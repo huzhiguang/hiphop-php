@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,10 +17,12 @@
 #ifndef incl_HPHP_JIT_MUTATION_H_
 #define incl_HPHP_JIT_MUTATION_H_
 
-#include "hphp/runtime/vm/jit/ir.h"
-#include "hphp/runtime/vm/jit/cfg.h"
+#include "hphp/runtime/vm/jit/block.h"
 
-namespace HPHP { namespace JIT {
+namespace HPHP { namespace jit {
+
+struct IRInstruction;
+struct IRUnit;
 
 //////////////////////////////////////////////////////////////////////
 
@@ -32,7 +34,7 @@ namespace HPHP { namespace JIT {
 
 /*
  * Clone a range of IRInstructions into the front of a target block
- * (immediately after its DefLabel, but before its Marker).
+ * (immediately after its DefLabel).
  *
  * Then, for any block reachable from `target', rewrite the sources of
  * any instructions that referred to the old destinations of the
@@ -43,14 +45,13 @@ namespace HPHP { namespace JIT {
  *
  * Pre: The range [first,last) may not contain control flow
  *      instructions.
- * Pre: isRPOSorted(blocks)
+ * Pre: blocks is in reverse postorder
  */
 void cloneToBlock(const BlockList& blocks,
-                  IRFactory& irFactory,
+                  IRUnit& unit,
                   Block::iterator first,
                   Block::iterator last,
-                  Block* dst);
-
+                  Block* target);
 
 /*
  * Move a range of IRInstructions to the front of a target block
@@ -66,16 +67,20 @@ void moveToBlock(Block::iterator first,
                  Block* dst);
 
 /*
- * Given a block where some SSATmps have changed type, walk the
- * sub-cfg reachable from that block and recompute the types of any
- * tmps that depend on it.
+ * Walk the cfg of the given unit, recomputing output types of all instructions
+ * from their inputs.
  *
  * The new types of any changed SSATmps must be related to their old
- * types.
- *
- * Pre: isRPOSorted(blocks)
+ * types.  However, notice that the new types may result in
+ * inconsistent operand types for instructions that are unreachable
+ * (but not yet removed from the IR unit).
  */
-void reflowTypes(Block*, const BlockList& blocks);
+void reflowTypes(IRUnit&);
+
+/*
+ * Recomputes the output type of each of inst's dests.
+ */
+void retypeDests(IRInstruction* inst, const IRUnit* unit);
 
 //////////////////////////////////////////////////////////////////////
 

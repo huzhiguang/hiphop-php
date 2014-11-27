@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,10 +15,14 @@
 */
 
 #include "hphp/runtime/base/thrift-buffer.h"
-#include "hphp/runtime/base/type-conversions.h"
+
 #include "hphp/runtime/base/builtin-functions.h"
+#include "hphp/runtime/base/type-conversions.h"
 #include "hphp/runtime/base/variable-unserializer.h"
+
 #include "hphp/util/logger.h"
+
+#include <vector>
 
 #define INVALID_DATA 1
 
@@ -52,7 +56,7 @@ void ThriftBuffer::reset(bool read) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-void ThriftBuffer::write(CStrRef data) {
+void ThriftBuffer::write(const String& data) {
   int32_t len = data.size();
   write(len);
 
@@ -191,12 +195,14 @@ void ThriftBuffer::throwInvalidStringSize(int size) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-static Variant unserialize_with_no_notice(CStrRef str) {
+static Variant unserialize_with_no_notice(const String& str) {
   VariableUnserializer vu(str.data(), str.data() + str.size(),
       VariableUnserializer::Type::Serialize, true);
   Variant v;
   try {
     v = vu.unserialize();
+  } catch (ResourceExceededException &) {
+    throw;
   } catch (Exception &e) {
     Logger::Error("unserialize(): %s", e.getMessage().c_str());
   }
@@ -236,7 +242,7 @@ void ThriftBuffer::read(Array &data) {
   data = unserialize_with_no_notice(sdata).toArray();
 }
 
-void ThriftBuffer::write(CArrRef data) {
+void ThriftBuffer::write(const Array& data) {
   VariableSerializer vs(m_serializerType);
   String sdata = vs.serialize(VarNR(data), true);
   write(sdata);
@@ -248,7 +254,7 @@ void ThriftBuffer::read(Object &data) {
   data = unserialize_with_no_notice(sdata).toObject();
 }
 
-void ThriftBuffer::write(CObjRef data) {
+void ThriftBuffer::write(const Object& data) {
   VariableSerializer vs(m_serializerType);
   String sdata = vs.serialize(VarNR(data), true);
   write(sdata);
@@ -260,7 +266,7 @@ void ThriftBuffer::read(Variant &data) {
   data = unserialize_with_no_notice(sdata);
 }
 
-void ThriftBuffer::write(CVarRef data) {
+void ThriftBuffer::write(const Variant& data) {
   VariableSerializer vs(m_serializerType);
   String sdata = vs.serialize(data, true);
   write(sdata);

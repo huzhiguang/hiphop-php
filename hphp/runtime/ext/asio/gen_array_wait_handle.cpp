@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -15,11 +15,16 @@
    +----------------------------------------------------------------------+
 */
 
-#include "hphp/runtime/ext/ext_asio.h"
+#include "hphp/runtime/ext/asio/gen_array_wait_handle.h"
+
 #include "hphp/runtime/ext/ext_closure.h"
+#include "hphp/runtime/ext/asio/asio_blockable.h"
 #include "hphp/runtime/ext/asio/asio_context.h"
 #include "hphp/runtime/ext/asio/asio_session.h"
+#include <hphp/runtime/ext/asio/static_wait_handle.h>
 #include "hphp/system/systemlib.h"
+#include "hphp/runtime/base/mixed-array.h"
+#include "hphp/runtime/base/mixed-array-defs.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -37,117 +42,130 @@ namespace {
   }
 }
 
-c_GenArrayWaitHandle::c_GenArrayWaitHandle(Class* cb)
-    : c_BlockableWaitHandle(cb), m_exception() {
+void c_GenArrayWaitHandle::ti_setoncreatecallback(const Variant& callback) {
+  AsioSession::Get()->setOnGenArrayCreateCallback(callback);
 }
 
-c_GenArrayWaitHandle::~c_GenArrayWaitHandle() {
-}
-
-void c_GenArrayWaitHandle::t___construct() {
-  Object e(SystemLib::AllocInvalidOperationExceptionObject(
-        "Use GenArrayWaitHandle::create() instead of constructor"));
+NEVER_INLINE __attribute__((__noreturn__))
+static void fail() {
+  Object e(SystemLib::AllocInvalidArgumentExceptionObject(
+    "Expected dependencies to be an array of WaitHandle instances"));
   throw e;
 }
 
-void c_GenArrayWaitHandle::ti_setoncreatecallback(CVarRef callback) {
-  if (!callback.isNull() && !callback.instanceof(c_Closure::s_cls)) {
-    Object e(SystemLib::AllocInvalidArgumentExceptionObject(
-      "Unable to set GenArrayWaitHandle::onCreate: on_create_cb not a closure"));
-    throw e;
+Object c_GenArrayWaitHandle::ti_create(const Array& inputDependencies) {
+  Array depCopy(inputDependencies->copy());
+  if (UNLIKELY(depCopy->kind() > ArrayData::kEmptyKind)) {
+    // The only array kind that can return a non-k{Packed,Mixed,Empty}Kind
+    // from ->copy() is GlobalsArray, which returns itself.
+    // This is only for $GLOBALS, which is about to throw anyway since it
+    // will fail the WaitHandle checks below.
+    fail();
   }
-  AsioSession::Get()->setOnGenArrayCreateCallback(callback.getObjectDataOrNull());
-}
+  assert(depCopy->isPacked() || depCopy->isMixed() ||
+         depCopy->kind() == ArrayData::kEmptyKind);
 
-Object c_GenArrayWaitHandle::ti_create(CArrRef dependencies) {
-  Array deps = dependencies->copy();
-  for (ssize_t iter_pos = deps->iter_begin();
-       iter_pos != ArrayData::invalid_index;
-       iter_pos = deps->iter_advance(iter_pos)) {
-
-    TypedValue* current = deps->nvGetValueRef(iter_pos);
-    if (UNLIKELY(current->m_type == KindOfRef)) {
-      tvUnbox(current);
-    }
-
-    if (!c_WaitHandle::fromCell(tvAssertCell(current)) &&
-        !IS_NULL_TYPE(current->m_type)) {
-      Object e(SystemLib::AllocInvalidArgumentExceptionObject(
-        "Expected dependencies to be an array of WaitHandle instances"));
-      throw e;
-    }
+  if (depCopy->kind() == ArrayData::kEmptyKind) {
+    auto const empty = make_tv<KindOfArray>(depCopy.detach());
+    return Object::attach(c_StaticWaitHandle::CreateSucceeded(empty));
   }
 
   Object exception;
-  for (ssize_t iter_pos = deps->iter_begin();
-       iter_pos != ArrayData::invalid_index;
-       iter_pos = deps->iter_advance(iter_pos)) {
 
-    Cell* current = tvAssertCell(deps->nvGetValueRef(iter_pos));
-    if (IS_NULL_TYPE(current->m_type)) {
-      // {uninit,null} yields null
-      tvWriteNull(current);
-      continue;
+  MixedArray::ValIter arrIter(depCopy.get());
+  for (; !arrIter.empty(); arrIter.advance()) {
+    auto const current = arrIter.current();
+    if (UNLIKELY(current->m_type == KindOfRef)) {
+      tvUnbox(current);
     }
+    if (IS_NULL_TYPE(current->m_type)) continue;
 
-    assert(current->m_type == KindOfObject);
-    assert(current->m_data.pobj->instanceof(c_WaitHandle::s_cls));
-    auto child = static_cast<c_WaitHandle*>(current->m_data.pobj);
+    auto const child = c_WaitHandle::fromCell(current);
+    if (UNLIKELY(!child)) fail();
 
     if (child->isSucceeded()) {
       cellSet(child->getResult(), *current);
-    } else if (child->isFailed()) {
-      putException(exception, child->getException());
-    } else {
-      assert(child->instanceof(c_WaitableWaitHandle::s_cls));
-      auto child_wh = static_cast<c_WaitableWaitHandle*>(child);
-
-      p_GenArrayWaitHandle my_wh = NEWOBJ(c_GenArrayWaitHandle)();
-      my_wh->initialize(exception, deps, iter_pos, child_wh);
-
-      AsioSession* session = AsioSession::Get();
-      if (UNLIKELY(session->hasOnGenArrayCreateCallback())) {
-        session->onGenArrayCreate(my_wh.get(), dependencies);
-      }
-
-      return my_wh;
+      continue;
     }
-  }
-
-  if (exception.isNull()) {
-    return c_StaticResultWaitHandle::Create(make_tv<KindOfArray>(deps.get()));
-  } else {
-    return c_StaticExceptionWaitHandle::Create(exception.get());
-  }
-}
-
-void c_GenArrayWaitHandle::initialize(CObjRef exception, CArrRef deps, ssize_t iter_pos, c_WaitableWaitHandle* child) {
-  m_exception = exception;
-  m_deps = deps;
-  m_iterPos = iter_pos;
-  try {
-    blockOn(child);
-  } catch (const Object& cycle_exception) {
-    putException(m_exception, cycle_exception.get());
-    m_iterPos = m_deps->iter_advance(m_iterPos);
-    onUnblocked();
-  }
-}
-
-void c_GenArrayWaitHandle::onUnblocked() {
-  for (;
-       m_iterPos != ArrayData::invalid_index;
-       m_iterPos = m_deps->iter_advance(m_iterPos)) {
-
-    Cell* current = tvAssertCell(m_deps->nvGetValueRef(m_iterPos));
-    if (IS_NULL_TYPE(current->m_type)) {
-      // {uninit,null} yields null
-      tvWriteNull(current);
+    if (UNLIKELY(child->isFailed())) {
+      putException(exception, child->getException());
       continue;
     }
 
+    /*
+     * We found a handle that isn't finished yet.
+     *
+     * We need to finish unboxing any refs in our dependency array,
+     * and then create a GenArrayWaitHandle to wrap it.
+     */
+    auto const current_pos = arrIter.currentPos();
+    arrIter.advance();
+    for (; !arrIter.empty(); arrIter.advance()) {
+      auto const future = arrIter.current();
+      if (UNLIKELY(future->m_type == KindOfRef)) {
+        tvUnbox(future);
+      }
+      if (IS_NULL_TYPE(future->m_type)) continue;
+      if (UNLIKELY(!c_WaitHandle::fromCell(future))) fail();
+    }
+
+    assert(child->instanceof(c_WaitableWaitHandle::classof()));
+    auto const child_wh = static_cast<c_WaitableWaitHandle*>(child);
+    p_GenArrayWaitHandle my_wh = newobj<c_GenArrayWaitHandle>();
+    my_wh->initialize(exception, depCopy, current_pos, child_wh);
+
+    auto const session = AsioSession::Get();
+    if (UNLIKELY(session->hasOnGenArrayCreateCallback())) {
+      session->onGenArrayCreate(my_wh.get(), inputDependencies);
+    }
+
+    return my_wh;
+  }
+
+  // Down here, everything was finished.  If there's an exception,
+  // that's all we give back.  Otherwise give back the array of
+  // results.
+  if (exception.isNull()) {
+    return Object::attach(c_StaticWaitHandle::CreateSucceeded(
+      make_tv<KindOfArray>(depCopy.detach())));
+  } else {
+    return Object::attach(c_StaticWaitHandle::CreateFailed(exception.detach()));
+  }
+}
+
+void c_GenArrayWaitHandle::initialize(const Object& exception, const Array& deps, ssize_t iter_pos, c_WaitableWaitHandle* child) {
+  setState(STATE_BLOCKED);
+  m_exception = exception;
+  m_deps = deps;
+  m_iterPos = iter_pos;
+
+  if (isInContext()) {
+    try {
+      child->enterContext(getContextIdx());
+    } catch (const Object& cycle_exception) {
+      putException(m_exception, cycle_exception.get());
+      m_iterPos = m_deps->iter_advance(m_iterPos);
+      incRefCount();
+      onUnblocked();
+      return;
+    }
+  }
+
+  blockOn(child);
+  incRefCount();
+}
+
+void c_GenArrayWaitHandle::onUnblocked() {
+  assert(getState() == STATE_BLOCKED);
+  MixedArray::ValIter arrIter(m_deps.get(), m_iterPos);
+
+  for (; !arrIter.empty(); arrIter.advance()) {
+    auto const current = tvAssertCell(arrIter.current());
+
+    if (IS_NULL_TYPE(current->m_type)) continue;
     assert(current->m_type == KindOfObject);
-    assert(current->m_data.pobj->instanceof(c_WaitHandle::s_cls));
+    assert(current->m_data.pobj->instanceof(c_WaitHandle::classof()));
+
     auto child = static_cast<c_WaitHandle*>(current->m_data.pobj);
 
     if (child->isSucceeded()) {
@@ -155,10 +173,15 @@ void c_GenArrayWaitHandle::onUnblocked() {
     } else if (child->isFailed()) {
       putException(m_exception, child->getException());
     } else {
-      assert(dynamic_cast<c_WaitableWaitHandle*>(child));
+      assert(child->instanceof(c_WaitableWaitHandle::classof()));
       auto child_wh = static_cast<c_WaitableWaitHandle*>(child);
 
       try {
+        m_iterPos = arrIter.currentPos();
+        if (isInContext()) {
+          child_wh->enterContext(getContextIdx());
+        }
+        detectCycle(child_wh);
         blockOn(child_wh);
         return;
       } catch (const Object& cycle_exception) {
@@ -167,14 +190,21 @@ void c_GenArrayWaitHandle::onUnblocked() {
     }
   }
 
+  m_iterPos = arrIter.currentPos();
+
+  auto parentChain = getParentChain();
   if (m_exception.isNull()) {
-    setResult(make_tv<KindOfArray>(m_deps.get()));
-    m_deps = nullptr;
+    setState(STATE_SUCCEEDED);
+    cellDup(make_tv<KindOfArray>(m_deps.get()), m_resultOrException);
   } else {
-    setException(m_exception.get());
+    setState(STATE_FAILED);
+    tvWriteObject(m_exception.get(), &m_resultOrException);
     m_exception = nullptr;
-    m_deps = nullptr;
   }
+
+  m_deps = nullptr;
+  parentChain.unblock();
+  decRefObj(this);
 }
 
 String c_GenArrayWaitHandle::getName() {
@@ -184,31 +214,20 @@ String c_GenArrayWaitHandle::getName() {
 c_WaitableWaitHandle* c_GenArrayWaitHandle::getChild() {
   assert(getState() == STATE_BLOCKED);
   return static_cast<c_WaitableWaitHandle*>(
-      m_deps->nvGetValueRef(m_iterPos)->m_data.pobj);
+    m_deps->getValueRef(m_iterPos).asTypedValue()->m_data.pobj);
 }
 
-void c_GenArrayWaitHandle::enterContext(context_idx_t ctx_idx) {
-  assert(AsioSession::Get()->getContext(ctx_idx));
-
-  // stop before corrupting unioned data
-  if (isFinished()) {
-    return;
-  }
-
-  // already in the more specific context?
-  if (LIKELY(getContextIdx() >= ctx_idx)) {
-    return;
-  }
-
+void c_GenArrayWaitHandle::enterContextImpl(context_idx_t ctx_idx) {
   assert(getState() == STATE_BLOCKED);
 
   // recursively import current child
   {
-    assert(m_iterPos != ArrayData::invalid_index);
-    Cell* current = tvAssertCell(m_deps->nvGetValueRef(m_iterPos));
+    assert(m_iterPos != m_deps->iter_end());
+    auto const current = tvAssertCell(
+      m_deps->getValueRef(m_iterPos).asTypedValue());
 
     assert(current->m_type == KindOfObject);
-    assert(current->m_data.pobj->instanceof(c_WaitableWaitHandle::s_cls));
+    assert(current->m_data.pobj->instanceof(c_WaitableWaitHandle::classof()));
     auto child_wh = static_cast<c_WaitableWaitHandle*>(current->m_data.pobj);
     child_wh->enterContext(ctx_idx);
   }
@@ -218,24 +237,26 @@ void c_GenArrayWaitHandle::enterContext(context_idx_t ctx_idx) {
 
   // try to import other children
   try {
-    for (ssize_t iter_pos = m_deps->iter_advance(m_iterPos);
-         iter_pos != ArrayData::invalid_index;
+    auto iter_limit = m_deps->iter_end();
+    for (size_t iter_pos = m_deps->iter_advance(m_iterPos);
+         iter_pos != iter_limit;
          iter_pos = m_deps->iter_advance(iter_pos)) {
 
-      Cell* current = tvAssertCell(m_deps->nvGetValueRef(iter_pos));
+      auto const current = tvAssertCell(
+        m_deps->getValueRef(iter_pos).asTypedValue());
       if (IS_NULL_TYPE(current->m_type)) {
         continue;
       }
 
       assert(current->m_type == KindOfObject);
-      assert(current->m_data.pobj->instanceof(c_WaitHandle::s_cls));
+      assert(current->m_data.pobj->instanceof(c_WaitHandle::classof()));
       auto child = static_cast<c_WaitHandle*>(current->m_data.pobj);
 
       if (child->isFinished()) {
         continue;
       }
 
-      assert(child->instanceof(c_WaitableWaitHandle::s_cls));
+      assert(child->instanceof(c_WaitableWaitHandle::classof()));
       auto child_wh = static_cast<c_WaitableWaitHandle*>(child);
       child_wh->enterContext(ctx_idx);
     }

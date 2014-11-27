@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,30 +14,43 @@
    +----------------------------------------------------------------------+
 */
 #include "hphp/runtime/base/array-init.h"
-#include "hphp/runtime/base/policy-array.h"
-#include "hphp/runtime/base/hphp-array.h"
+#include "hphp/runtime/base/mixed-array-defs.h"
 #include "hphp/runtime/base/runtime-option.h"
 
 namespace HPHP {
-///////////////////////////////////////////////////////////////////////////////
-// ArrayInit
 
-HOT_FUNC
-ArrayInit::ArrayInit(ssize_t n) {
-  if (!n) {
-    m_data = HphpArray::GetStaticEmptyArray();
-  } else if (false) {
-    // Force compilation of PolicyArray
-    m_data = NEW(PolicyArray)(n);
-  } else {
-    m_data = ArrayData::Make(n);
+//////////////////////////////////////////////////////////////////////
+
+ArrayInit::ArrayInit(size_t n, Map)
+#ifdef DEBUG
+  : m_addCount(0)
+  , m_expectedCount(n)
+#endif
+{
+  m_data = MixedArray::MakeReserveMixed(n);
+  m_data->setRefCount(0);
+}
+
+ArrayInit::ArrayInit(size_t n, Map, CheckAllocation)
+#ifdef DEBUG
+  : m_addCount(0)
+  , m_expectedCount(n)
+#endif
+{
+  if (n > std::numeric_limits<int>::max()) {
+    MM().forceOOM();
+    check_request_surprise_unlikely();
   }
+  auto const cmret = computeCapAndMask(n);
+  auto const allocsz = computeAllocBytes(cmret.first, cmret.second);
+  if (UNLIKELY(allocsz > kMaxSmartSize && MM().preAllocOOM(allocsz))) {
+    check_request_surprise_unlikely();
+  }
+  m_data = MixedArray::MakeReserveMixed(n);
+  m_data->setRefCount(0);
+  check_request_surprise_unlikely();
 }
 
-HOT_FUNC
-ArrayInit::ArrayInit(ssize_t n, MapInit)
-  : m_data(ArrayData::Make(n)) {
-}
+//////////////////////////////////////////////////////////////////////
 
-///////////////////////////////////////////////////////////////////////////////
 }

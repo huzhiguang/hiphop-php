@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,10 +14,11 @@
    +----------------------------------------------------------------------+
 */
 
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/array-init.h"
+#include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/variable-serializer.h"
 #include "hphp/runtime/base/execution-context.h"
-#include "hphp/runtime/base/builtin-functions.h"
+#include "hphp/runtime/base/types.h"
 
 #include "hphp/system/systemlib.h"
 
@@ -25,22 +26,20 @@ namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 // resources have a separate id space
-IMPLEMENT_THREAD_LOCAL_NO_CHECK_HOT(int, ResourceData::os_max_resource_id);
+__thread int ResourceData::os_max_resource_id;
 
-ResourceData::ResourceData() : m_count(0), m_cls(SystemLib::s_resourceClass) {
+ResourceData::ResourceData()
+  : m_kind_count(HeaderKind::Resource << 24) {
+  assert(m_kind == HeaderKind::Resource && m_count == 0);
   assert(uintptr_t(this) % sizeof(TypedValue) == 0);
-  int& pmax = *os_max_resource_id;
+  int& pmax = os_max_resource_id;
   if (pmax < 3) pmax = 3; // reserving 1, 2, 3 for STDIN, STDOUT, STDERR
   o_id = ++pmax;
 }
 
-int ResourceData::GetMaxResourceId() {
-  return *(os_max_resource_id.getCheck());
-}
-
 void ResourceData::o_setId(int id) {
   assert(id >= 1 && id <= 3); // only for STDIN, STDOUT, STDERR
-  int &pmax = *os_max_resource_id;
+  int &pmax = os_max_resource_id;
   if (o_id != id) {
     if (o_id == pmax) --pmax;
     o_id = id;
@@ -48,42 +47,39 @@ void ResourceData::o_setId(int id) {
 }
 
 ResourceData::~ResourceData() {
-  int &pmax = *os_max_resource_id;
+  int &pmax = os_max_resource_id;
   if (o_id && o_id == pmax) {
     --pmax;
   }
   o_id = -1;
 }
 
-Array ResourceData::o_toArray() const {
-  return empty_array;
+String ResourceData::o_toString() const {
+  return String("Resource id #") + String(o_id);
 }
 
-void ResourceData::dump() const {
-  o_toArray().dump();
+Array ResourceData::o_toArray() const {
+  return make_packed_array(Variant(const_cast<ResourceData*>(this)));
 }
 
 const StaticString s_Unknown("Unknown");
 
-CStrRef ResourceData::o_getClassName() const {
+const String& ResourceData::o_getClassName() const {
   if (isInvalid()) return s_Unknown;
   return o_getClassNameHook();
 }
 
-CStrRef ResourceData::o_getClassNameHook() const {
+const String& ResourceData::o_getClassNameHook() const {
   throw FatalErrorException("Resource did not provide a name");
 }
 
 void ResourceData::serializeImpl(VariableSerializer *serializer) const {
-  String saveName;
-  int saveId;
-  serializer->getResourceInfo(saveName, saveId);
-  serializer->setResourceInfo(o_getResourceName(), o_id);
-  o_toArray().serialize(serializer);
-  serializer->setResourceInfo(saveName, saveId);
+  serializer->pushResourceInfo(o_getResourceName(), o_id);
+  empty_array().serialize(serializer);
+  serializer->popResourceInfo();
 }
 
-CStrRef ResourceData::o_getResourceName() const {
+const String& ResourceData::o_getResourceName() const {
   return o_getClassName();
 }
 
@@ -94,6 +90,11 @@ void ResourceData::serialize(VariableSerializer* serializer) const {
     serializeImpl(serializer);
   }
   serializer->decNestedLevel((void*)this);
+}
+
+void ResourceData::compileTimeAssertions() {
+  static_assert(offsetof(ResourceData, m_kind) == HeaderKindOffset, "");
+  static_assert(offsetof(ResourceData, m_count) == FAST_REFCOUNT_OFFSET, "");
 }
 
 ///////////////////////////////////////////////////////////////////////////////

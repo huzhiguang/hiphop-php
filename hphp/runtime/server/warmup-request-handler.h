@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,13 +17,15 @@
 #ifndef incl_HPHP_WARMUP_REQUEST_HANDLER_H_
 #define incl_HPHP_WARMUP_REQUEST_HANDLER_H_
 
+#include <memory>
+
 #include "hphp/runtime/server/server.h"
 #include "hphp/runtime/server/http-request-handler.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-DECLARE_BOOST_TYPES(WarmupRequestHandlerFactory);
+struct WarmupRequestHandlerFactory;
 
 /**
  * WarmupRequestHandler is a small shim on top of HttpRequestHandler.
@@ -32,21 +34,25 @@ DECLARE_BOOST_TYPES(WarmupRequestHandlerFactory);
  */
 class WarmupRequestHandler : public RequestHandler {
 public:
-  explicit WarmupRequestHandler(int timeout,
-                                const WarmupRequestHandlerFactoryPtr& factory)
+  explicit WarmupRequestHandler(
+      int timeout,
+      const std::shared_ptr<WarmupRequestHandlerFactory>& factory)
     : RequestHandler(timeout), m_factory(factory), m_reqHandler(timeout) {}
 
-  virtual void handleRequest(Transport *transport);
+  void setupRequest(Transport* transport) override;
+  void teardownRequest(Transport* transport) noexcept override;
+  void handleRequest(Transport* transport) override;
+  void abortRequest(Transport* transport) override;
 
 private:
-  WarmupRequestHandlerFactoryPtr m_factory;
+  std::shared_ptr<WarmupRequestHandlerFactory> m_factory;
   HttpRequestHandler m_reqHandler;
 };
 
 class WarmupRequestHandlerFactory :
-  public boost::enable_shared_from_this<WarmupRequestHandlerFactory> {
+  public std::enable_shared_from_this<WarmupRequestHandlerFactory> {
 public:
-  WarmupRequestHandlerFactory(ServerPtr server,
+  WarmupRequestHandlerFactory(Server *server,
                               uint32_t additionalThreads,
                               uint32_t reqCount,
                               int timeout)
@@ -65,9 +71,8 @@ private:
   std::atomic<uint32_t> m_reqNumber;
   uint32_t const m_warmupReqThreshold;
   int m_timeout;
-  // The server has a shared pointer to us, so use a weak pointer to the
-  // server to avoid a circular reference.
-  ServerWeakPtr m_server;
+  // The server owns this object so will by definition outlive us
+  Server *m_server;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1998-2010 Zend Technologies Ltd. (http://www.zend.com) |
    +----------------------------------------------------------------------+
    | This source file is subject to version 2.00 of the Zend license,     |
@@ -14,13 +14,16 @@
    | license@zend.com so we can mail you a copy immediately.              |
    +----------------------------------------------------------------------+
 */
+
 #include "hphp/runtime/base/intl-convert.h"
-#include <stdlib.h>
+
+#include <cstdint>
+#include <cstdlib>
 
 namespace HPHP {
 
 void intl_convert_utf8_to_utf16(UChar** target, int* target_len,
-                                const char* src, int  src_len,
+                                const char* src, int src_len,
                                 UErrorCode* status) {
   UChar* dst_buf = nullptr;
   int32_t dst_len = 0;

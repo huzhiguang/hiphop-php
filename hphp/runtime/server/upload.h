@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -61,9 +61,9 @@ typedef struct _multipart_event_file_data {
 } multipart_event_file_data;
 
 typedef struct _multipart_event_file_end {
-  size_t  post_bytes_processed;
-  char  *temp_filename;
-  int  cancel_upload;
+  size_t      post_bytes_processed;
+  const char* temp_filename;
+  int         cancel_upload;
 } multipart_event_file_end;
 
 typedef struct _multipart_event_end {
@@ -71,9 +71,12 @@ typedef struct _multipart_event_end {
 } multipart_event_end;
 
 void rfc1867PostHandler(Transport *transport,
-                        Variant &post, Variant &files, int content_length,
-                        const void *&data, int &size,
-                        const std::string boundary);
+                        Array& post,
+                        Array& files,
+                        int content_length,
+                        const void*& data,
+                        int& size,
+                        std::string boundary);
 
 bool is_uploaded_file(const std::string filename);
 const std::set<std::string> &get_uploaded_files();

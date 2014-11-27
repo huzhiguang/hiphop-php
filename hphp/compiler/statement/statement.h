@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,19 +18,22 @@
 #define incl_HPHP_STATEMENT_H_
 
 #include "hphp/compiler/expression/expression.h"
+#include "hphp/compiler/analysis/label_scope.h"
+#include <string>
 
 #define STATEMENT_CONSTRUCTOR_BASE_PARAMETERS                           \
-  BlockScopePtr scope, LocationPtr loc, Statement::KindOf kindOf
+  BlockScopePtr scope, LabelScopePtr labelScope, LocationPtr loc, \
+  Statement::KindOf kindOf
 #define STATEMENT_CONSTRUCTOR_BASE_PARAMETER_VALUES                     \
-  scope, loc, kindOf
+  scope, labelScope, loc, kindOf
 #define STATEMENT_CONSTRUCTOR_PARAMETERS                                \
-  BlockScopePtr scope, LocationPtr loc
+  BlockScopePtr scope, LabelScopePtr labelScope, LocationPtr loc
 #define STATEMENT_CONSTRUCTOR_PARAMETER_VALUES(kindOf)                  \
-  scope, loc, Statement::KindOf##kindOf
+  scope, labelScope, loc, Statement::KindOf##kindOf
 #define DECLARE_BASE_STATEMENT_VIRTUAL_FUNCTIONS                        \
   virtual void analyzeProgram(AnalysisResultPtr ar);                    \
   virtual StatementPtr clone();                                         \
-  virtual void inferTypes(AnalysisResultPtr ar);                        \
+  virtual void outputCodeModel(CodeGenerator &cg);                      \
   virtual void outputPHP(CodeGenerator &cg, AnalysisResultPtr ar);
 #define DECLARE_STATEMENT_VIRTUAL_FUNCTIONS                             \
   DECLARE_BASE_STATEMENT_VIRTUAL_FUNCTIONS;                             \
@@ -38,12 +41,15 @@
   virtual int getKidCount() const;                                      \
   virtual void setNthKid(int n, ConstructPtr cp)
 #define NULL_STATEMENT()                                                \
-  BlockStatementPtr(new BlockStatement(getScope(), getLocation(),       \
+  BlockStatementPtr(new BlockStatement(getScope(),          \
+                                       getLabelScope(),     \
+                                       getLocation(),       \
                                        StatementListPtr()))
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 DECLARE_BOOST_TYPES(Statement);
+DECLARE_BOOST_TYPES(LabelScope);
 
 #define DECLARE_STATEMENT_TYPES(x)              \
     x(FunctionStatement),                       \
@@ -77,6 +83,7 @@ DECLARE_BOOST_TYPES(Statement);
     x(GotoStatement),                           \
     x(LabelStatement),                          \
     x(UseTraitStatement),                       \
+    x(ClassRequireStatement),                   \
     x(TraitPrecStatement),                      \
     x(TraitAliasStatement),                     \
     x(TypedefStatement)
@@ -123,18 +130,6 @@ public:
     return StatementPtr();
   }
 
-  /**
-   * Called after type inference.
-   */
-  virtual StatementPtr postOptimize(AnalysisResultConstPtr ar) {
-    return StatementPtr();
-  }
-
-  /**
-   * Called when types need to be inferred inside this statement.
-   */
-  virtual void inferTypes(AnalysisResultPtr ar) = 0;
-
   bool hasReachableLabel() const;
 
   virtual bool hasDecl() const { return false; }
@@ -149,10 +144,14 @@ public:
 
   virtual int getRecursiveCount() const { return 1; }
 
+  LabelScopePtr getLabelScope() { return m_labelScope; }
+  void setLabelScope(LabelScopePtr labelScope) { m_labelScope = labelScope; }
+
 protected:
   KindOf m_kindOf;
   int m_silencerCountMax;
   int m_silencerCountCurrent;
+  LabelScopePtr m_labelScope;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

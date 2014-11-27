@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,10 +13,11 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
+#include "hphp/util/cronolog.h"
+
+#include <boost/filesystem/path.hpp>
 
 #include <pwd.h>
-#include "hphp/util/cronolog.h"
-#include "hphp/util/util.h"
 
 /* Default permissions for files and directories that are created */
 
@@ -27,6 +28,9 @@
 namespace HPHP {
 
 ///////////////////////////////////////////////////////////////////////////////
+
+using std::string;
+namespace fs = boost::filesystem;
 
 /* Open a new log file: determine the start of the current
  * period, generate the log file name from the fileTemplate,
@@ -76,7 +80,7 @@ static FILE *new_log_file(const char *fileTemplate, const char *linkname,
 
   if (linkname) {
     /* Create a relative symlink to logs under linkname's directory */
-    std::string dir = Util::safe_dirname(linkname);
+    std::string dir = fs::path(linkname).parent_path().native();
     if (dir != "/") {
       dir.append("/");
     }

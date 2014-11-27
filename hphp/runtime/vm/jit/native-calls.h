@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,54 +20,71 @@
 #include <initializer_list>
 #include <functional>
 #include <vector>
+#include <algorithm>
 
-#include "hphp/runtime/vm/jit/types.h"
+#include "hphp/runtime/vm/jit/arg-group.h"
+#include "hphp/runtime/vm/jit/code-gen-helpers.h"
 #include "hphp/runtime/vm/jit/code-gen.h"
+#include "hphp/runtime/vm/jit/cpp-call.h"
+#include "hphp/runtime/vm/jit/types.h"
 
-namespace HPHP {  namespace JIT { namespace NativeCalls {
+namespace HPHP { namespace jit {
+
+struct IRInstruction;
+
+namespace NativeCalls {
 
 // Information about C++ helpers called by translated code, used by
 // CodeGenerator and LinearScan. See nativecalls.cpp for a full
 // description of the types and enums.
 
-enum class FuncType : unsigned {
-  Call,
-  SSA,
-};
-
 struct FuncPtr {
   FuncPtr() {}
-  explicit FuncPtr(TCA f) : type(FuncType::Call), call(f) {}
+  explicit FuncPtr(TCA) = delete;
 
   template<class Ret, class... Args>
   /* implicit */ FuncPtr(Ret (*fp)(Args...))
-    : type(FuncType::Call)
-    , call(fp)
+    : call(CppCall::direct(fp))
   {}
 
-  FuncPtr(FuncType t, uint64_t i) : type(t), srcIdx(i) {
-    assert(t == FuncType::SSA);
+  template<class Ret, class Cls, class... Args>
+  /* implicit */ FuncPtr(Ret (Cls::*fp)(Args...))
+    : call(CppCall::method(fp))
+  {}
+
+  template<class Ret, class Cls, class... Args>
+  /* implicit */ FuncPtr(Ret (Cls::*fp)(Args...) const)
+    : call(CppCall::method(fp))
+  {}
+
+  /*
+   * Create FuncPtrs to array data "rotated" vtables.  For example, in
+   * native-calls.cpp:
+   *
+   *   {NvGetInt, &g_array_funcs.nvGetInt, DSSA, SNone, {{SSA, 0}, {SSA, 1}}},
+   *
+   */
+  template<class Ret, class... Args>
+  /* implicit */ FuncPtr(Ret (*const (*p)[ArrayData::kNumKinds])(Args...))
+    : call(CppCall::array(p))
+  {
+    always_assert(0 && "This code needs to be conditional on "
+                       "deltaFits(p, sz::dword) before using it");
   }
 
-  FuncType type;
-  union {
-    CppCall call;
-    uint64_t srcIdx;
-  };
+  union { CppCall call; };
 };
 
 enum class ArgType : unsigned {
   SSA,
   TV,
-  MemberKeyS,
-  MemberKeyIS,
   ExtraImm,
   Imm,
 };
 
 // Function that extracts the bits for an immediate value from extra
 // data.
-typedef std::function<uintptr_t (IRInstruction*)> ExtraDataBits;
+typedef std::function<uintptr_t (const IRInstruction*)> ExtraDataBits;
 
 struct Arg {
   Arg(ArgType type, intptr_t ival) : type(type), ival(ival) {}
@@ -94,8 +111,7 @@ struct CallInfo {
 typedef std::initializer_list<CallInfo> CallInfoList;
 typedef hphp_hash_map<Opcode, CallInfo, std::hash<Opcode>> CallInfoMap;
 
-class CallMap {
-public:
+struct CallMap {
   explicit CallMap(CallInfoList infos);
 
   static bool hasInfo(Opcode op);
@@ -105,6 +121,6 @@ private:
   CallInfoMap m_map;
 };
 
-} } }
+}}}
 
 #endif

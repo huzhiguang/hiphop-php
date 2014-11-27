@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -21,9 +21,12 @@
 #include "hphp/runtime/base/hphp-system.h"
 #include "hphp/runtime/base/request-local.h"
 #include "hphp/runtime/base/zend-printf.h"
-#include "hphp/runtime/ext/ext_apc.h"
+#include "hphp/runtime/base/php-globals.h"
+#include "hphp/runtime/ext/apc/ext_apc.h"
 #include "hphp/util/logger.h"
 #include "hphp/runtime/base/string-util.h"
+#include "hphp/util/text-util.h"
+#include "hphp/runtime/base/request-event-handler.h"
 
 using std::set;
 
@@ -32,21 +35,20 @@ namespace HPHP {
 
 static void destroy_uploaded_files();
 
-class Rfc1867Data : public RequestEventHandler {
-public:
-  std::set<string> rfc1867ProtectedVariables;
-  std::set<string> rfc1867UploadedFiles;
+struct Rfc1867Data final : RequestEventHandler {
+  std::set<std::string> rfc1867ProtectedVariables;
+  std::set<std::string> rfc1867UploadedFiles;
   apc_rfc1867_data rfc1867ApcData;
   int (*rfc1867Callback)(apc_rfc1867_data *rfc1867ApcData,
                          unsigned int event, void *event_data, void **extra);
-  virtual void requestInit() {
+  void requestInit() override {
     if (RuntimeOption::EnableUploadProgress) {
       rfc1867Callback = apc_rfc1867_progress;
     } else {
       rfc1867Callback = nullptr;
     }
   }
-  virtual void requestShutdown() {
+  void requestShutdown() override {
     if (!rfc1867UploadedFiles.empty()) destroy_uploaded_files();
   }
 };
@@ -58,8 +60,8 @@ IMPLEMENT_STATIC_REQUEST_LOCAL(Rfc1867Data, s_rfc1867_data);
  *
  */
 
-static void safe_php_register_variable(char *var, CVarRef val,
-                                       Variant &track_vars_array,
+static void safe_php_register_variable(char *var, const Variant& val,
+                                       Array& track_vars_array,
                                        bool override_protection);
 
 #define FAILURE -1
@@ -147,32 +149,33 @@ static void add_protected_variable(char *varname) {
 
 static bool is_protected_variable(char *varname) {
   normalize_protected_variable(varname);
-  set<string>::iterator iter =
-    s_rfc1867_data->rfc1867ProtectedVariables.find(varname);
+  auto iter = s_rfc1867_data->rfc1867ProtectedVariables.find(varname);
   return iter != s_rfc1867_data->rfc1867ProtectedVariables.end();
 }
 
 
-static void safe_php_register_variable(char *var, CVarRef val,
-                                       Variant &track_vars_array,
+static void safe_php_register_variable(char *var, const Variant& val,
+                                       Array& track_vars_array,
                                        bool override_protection) {
   if (override_protection || !is_protected_variable(var)) {
     register_variable(track_vars_array, var, val);
   }
 }
 
-bool is_uploaded_file(const string filename) {
-  set<string> &rfc1867UploadedFiles = s_rfc1867_data->rfc1867UploadedFiles;
+bool is_uploaded_file(const std::string filename) {
+  std::set<std::string> &rfc1867UploadedFiles =
+    s_rfc1867_data->rfc1867UploadedFiles;
   return rfc1867UploadedFiles.find(filename) != rfc1867UploadedFiles.end();
 }
 
-const set<string> &get_uploaded_files() {
+const std::set<std::string> &get_uploaded_files() {
   return s_rfc1867_data->rfc1867UploadedFiles;
 }
 
 static void destroy_uploaded_files() {
-  set<string> &rfc1867UploadedFiles = s_rfc1867_data->rfc1867UploadedFiles;
-  for (set<string>::iterator iter = rfc1867UploadedFiles.begin();
+  std::set<std::string> &rfc1867UploadedFiles =
+    s_rfc1867_data->rfc1867UploadedFiles;
+  for (auto iter = rfc1867UploadedFiles.begin();
        iter != rfc1867UploadedFiles.end(); iter++) {
     unlink(iter->c_str());
   }
@@ -194,8 +197,8 @@ typedef struct {
   /* read buffer */
   char *buffer;
   char *buf_begin;
-  int  bufsize;
-  int  bytes_in_buffer;
+  uint32_t  bufsize;
+  int64_t   bytes_in_buffer; // signed to catch underflow errors
 
   /* boundary info */
   char *boundary;
@@ -204,20 +207,21 @@ typedef struct {
 
   /* post data */
   const char *post_data;
-  int post_size;
-  int throw_size;
+  uint64_t post_size;
+  uint64_t throw_size; // sum of all previously read chunks
   char *cursor;
-  int read_post_bytes;
+  uint64_t read_post_bytes;
 } multipart_buffer;
 
 typedef std::list<std::pair<std::string, std::string> > header_list;
 
-static int read_post(multipart_buffer *self, char *buf, int bytes_to_read) {
+static uint32_t read_post(multipart_buffer *self, char *buf,
+                          uint32_t bytes_to_read) {
   always_assert(bytes_to_read > 0);
   always_assert(self->post_data);
   always_assert(self->cursor >= self->post_data);
-  int bytes_remaining = (self->post_size - self->throw_size) -
-                        (self->cursor - self->post_data);
+  int64_t bytes_remaining = (self->post_size - self->throw_size) -
+                            (self->cursor - self->post_data);
   always_assert(bytes_remaining >= 0);
   if (bytes_to_read <= bytes_remaining) {
     memcpy(buf, self->cursor, bytes_to_read);
@@ -225,24 +229,24 @@ static int read_post(multipart_buffer *self, char *buf, int bytes_to_read) {
     return bytes_to_read;
   }
 
-  int bytes_read = bytes_remaining;
+  uint32_t bytes_read = bytes_remaining;
   memcpy(buf, self->cursor, bytes_remaining);
   bytes_to_read -= bytes_remaining;
-  always_assert(self->cursor = (char *)self->post_data +
+  self->cursor += bytes_remaining;
+  always_assert(self->cursor == (char *)self->post_data +
                         (self->post_size - self->throw_size));
   while (bytes_to_read > 0 && self->transport->hasMorePostData()) {
     int extra_byte_read = 0;
     const void *extra = self->transport->getMorePostData(extra_byte_read);
     if (extra_byte_read == 0) break;
     if (RuntimeOption::AlwaysPopulateRawPostData) {
-      self->post_data = (const char *)Util::buffer_append(
+      // Possible overflow in buffer_append if post_size + extra_byte_read >=
+      // MAX INT
+      self->post_data = (const char *)buffer_append(
         self->post_data, self->post_size, extra, extra_byte_read);
       self->cursor = (char*)self->post_data + self->post_size;
     } else {
-      self->post_data =
-        (const char *)realloc((void *)self->post_data, extra_byte_read + 1);
-      memcpy((void *)self->post_data, extra, extra_byte_read);
-      ((char*)self->post_data)[extra_byte_read] = 0;
+      self->post_data = (const char *)extra;
       self->throw_size = self->post_size;
       self->cursor = (char*)self->post_data;
     }
@@ -264,8 +268,8 @@ static int read_post(multipart_buffer *self, char *buf, int bytes_to_read) {
   fill up the buffer with client data.
   returns number of bytes added to buffer.
 */
-static int fill_buffer(multipart_buffer *self) {
-  int bytes_to_read, total_read = 0, actual_read = 0;
+static uint32_t fill_buffer(multipart_buffer *self) {
+  uint32_t bytes_to_read, total_read = 0, actual_read = 0;
 
   /* shift the existing data if necessary */
   if (self->bytes_in_buffer > 0 && self->buf_begin != self->buffer) {
@@ -314,7 +318,7 @@ static int multipart_buffer_eof(multipart_buffer *self) {
 /* create new multipart_buffer structure */
 static multipart_buffer *multipart_buffer_new(Transport *transport,
                                               const char *data, int size,
-                                              string boundary) {
+                                              std::string boundary) {
   multipart_buffer *self =
     (multipart_buffer *)calloc(1, sizeof(multipart_buffer));
 
@@ -421,8 +425,8 @@ static int find_boundary(multipart_buffer *self, char *boundary) {
 static int multipart_buffer_headers(multipart_buffer *self,
                                     header_list &header) {
   char *line;
-  StringPair prev_entry;
-  StringPair entry;
+  std::pair<std::string, std::string> prev_entry;
+  std::pair<std::string, std::string> entry;
 
   /* didn't find boundary, abort */
   if (!find_boundary(self, self->boundary)) {
@@ -446,10 +450,10 @@ static int multipart_buffer_headers(multipart_buffer *self,
     if (value) {
       *value = 0;
       do { value++; } while(isspace(*value));
-      entry = StringPair(key, value);
+      entry = std::make_pair(key, value);
     } else if (!header.empty()) {
       /* If no ':' on the line, add to previous line */
-      entry = StringPair(prev_entry.first, prev_entry.second + line);
+      entry = std::make_pair(prev_entry.first, prev_entry.second + line);
       header.pop_back();
     } else {
       continue;
@@ -691,19 +695,23 @@ static char *multipart_buffer_read_body(multipart_buffer *self,
  *
  */
 
-void rfc1867PostHandler(Transport *transport,
-                        Variant &post, Variant &files, int content_length,
-                        const void *&data, int &size, const string boundary) {
+void rfc1867PostHandler(Transport* transport,
+                        Array& post,
+                        Array& files,
+                        int content_length,
+                        const void*& data, int& size,
+                        const std::string boundary) {
   char *s=nullptr, *start_arr=nullptr;
-  string array_index, abuf;
-  char *temp_filename=nullptr, *lbuf=nullptr;
+  std::string array_index, abuf;
+  char *lbuf=nullptr;
   int total_bytes=0, cancel_upload=0, is_arr_upload=0, array_len=0;
   int max_file_size=0, skip_upload=0, anonindex=0, is_anonymous;
-  set<string> &uploaded_files = s_rfc1867_data->rfc1867UploadedFiles;
+  std::set<std::string> &uploaded_files = s_rfc1867_data->rfc1867UploadedFiles;
   multipart_buffer *mbuff;
   int fd=-1;
   void *event_extra_data = nullptr;
   unsigned int llen = 0;
+  int upload_count = RuntimeOption::MaxFileUploads;
 
   /* Initialize the buffer */
   if (!(mbuff = multipart_buffer_new(transport,
@@ -733,6 +741,7 @@ void rfc1867PostHandler(Transport *transport,
   }
 
   while (!multipart_buffer_eof(mbuff)) {
+    std::string temp_filename;
     char buff[FILLUNIT];
     char *cd=nullptr,*param=nullptr,*filename=nullptr, *tmp=nullptr;
     size_t blen=0, wlen=0;
@@ -791,7 +800,7 @@ void rfc1867PostHandler(Transport *transport,
         new_val_len = value_len;
         if (php_rfc1867_callback != nullptr) {
           multipart_event_formdata event_formdata;
-          size_t newlength = 0;
+          size_t newlength = new_val_len;
 
           event_formdata.post_bytes_processed = mbuff->read_post_bytes;
           event_formdata.name = param;
@@ -822,6 +831,11 @@ void rfc1867PostHandler(Transport *transport,
 
       /* If file_uploads=off, skip the file part */
       if (!RuntimeOption::EnableFileUploads) {
+        skip_upload = 1;
+      } else if (upload_count <= 0) {
+        Logger::Warning(
+          "Maximum number of allowable file uploads has been exceeded"
+        );
         skip_upload = 1;
       }
 
@@ -872,13 +886,14 @@ void rfc1867PostHandler(Transport *transport,
         snprintf(path, sizeof(path), "%s/XXXXXX",
                  RuntimeOption::UploadTmpDir.c_str());
         fd = mkstemp(path);
+        upload_count--;
         if (fd == -1) {
           Logger::Warning("Unable to open temporary file");
           Logger::Warning("File upload error - unable to create a "
                           "temporary file");
           cancel_upload = UPLOAD_ERROR_E;
         }
-        temp_filename = strdup(path);
+        temp_filename = path;
       }
 
       if (!skip_upload && php_rfc1867_callback != nullptr) {
@@ -891,12 +906,11 @@ void rfc1867PostHandler(Transport *transport,
                                  MULTIPART_EVENT_FILE_START,
                                  &event_file_start,
                                  &event_extra_data) == FAILURE) {
-          if (temp_filename) {
+          if (!temp_filename.empty()) {
             if (cancel_upload != UPLOAD_ERROR_E) { /* file creation failed */
               close(fd);
-              unlink(temp_filename);
+              unlink(temp_filename.c_str());
             }
-            free(temp_filename);
           }
           temp_filename="";
           free(param);
@@ -912,7 +926,7 @@ void rfc1867PostHandler(Transport *transport,
         continue;
       }
 
-      if(strlen(filename) == 0) {
+      if (strlen(filename) == 0) {
         Logger::Verbose("No file uploaded");
         cancel_upload = UPLOAD_ERROR_D;
       }
@@ -975,7 +989,7 @@ void rfc1867PostHandler(Transport *transport,
                         "file %s", strlen(filename) > 0 ? filename : "");
         cancel_upload = UPLOAD_ERROR_C;
       }
-      if(strlen(filename) > 0 && total_bytes == 0 && !cancel_upload) {
+      if (strlen(filename) > 0 && total_bytes == 0 && !cancel_upload) {
         Logger::Verbose("Uploaded file size 0 - file [%s=%s] not saved",
                         param, filename);
         cancel_upload = 5;
@@ -985,7 +999,7 @@ void rfc1867PostHandler(Transport *transport,
         multipart_event_file_end event_file_end;
 
         event_file_end.post_bytes_processed = mbuff->read_post_bytes;
-        event_file_end.temp_filename = temp_filename;
+        event_file_end.temp_filename = temp_filename.c_str();
         event_file_end.cancel_upload = cancel_upload;
         if (php_rfc1867_callback(&s_rfc1867_data->rfc1867ApcData,
                                  MULTIPART_EVENT_FILE_END,
@@ -996,11 +1010,10 @@ void rfc1867PostHandler(Transport *transport,
       }
 
       if (cancel_upload && cancel_upload != UPLOAD_ERROR_C) {
-        if (temp_filename) {
+        if (!temp_filename.empty()) {
           if (cancel_upload != UPLOAD_ERROR_E) { /* file creation failed */
-            unlink(temp_filename);
+            unlink(temp_filename.c_str());
           }
-          free(temp_filename);
         }
         temp_filename="";
       } else {
@@ -1016,7 +1029,7 @@ void rfc1867PostHandler(Transport *transport,
 
       if (is_arr_upload) {
         array_len = strlen(start_arr);
-        array_index = string(start_arr+1, array_len-2);
+        array_index = std::string(start_arr+1, array_len-2);
       }
 
       /* Add $foo_name */
@@ -1027,7 +1040,7 @@ void rfc1867PostHandler(Transport *transport,
       }
 
       if (is_arr_upload) {
-        abuf = string(param, strlen(param)-array_len);
+        abuf = std::string(param, strlen(param)-array_len);
         snprintf(lbuf, llen, "%s_name[%s]",
                  abuf.c_str(), array_index.c_str());
       } else {
@@ -1046,9 +1059,9 @@ void rfc1867PostHandler(Transport *transport,
         s = tmp;
       }
 
-      Variant globals(get_global_variables());
+      Array globals = php_globals_as_array();
       if (!is_anonymous) {
-        if (s && s > filename) {
+        if (s) {
           String val(s+1, strlen(s+1), CopyString);
           safe_php_register_variable(lbuf, val, globals, 0);
         } else {
@@ -1064,7 +1077,7 @@ void rfc1867PostHandler(Transport *transport,
       } else {
         snprintf(lbuf, llen, "%s[name]", param);
       }
-      if (s && s > filename) {
+      if (s) {
         String val(s+1, strlen(s+1), CopyString);
         safe_php_register_variable(lbuf, val, files, 0);
       } else {
@@ -1117,10 +1130,11 @@ void rfc1867PostHandler(Transport *transport,
       /* Initialize variables */
       add_protected_variable(param);
 
+      Variant tempFileName(temp_filename);
+
       /* if param is of form xxx[.*] this will cut it to xxx */
       if (!is_anonymous) {
-        String val(temp_filename, strlen(temp_filename), CopyString);
-        safe_php_register_variable(param, val, globals, 1);
+        safe_php_register_variable(param, tempFileName, globals, 1);
       }
 
       /* Add $foo[tmp_name] */
@@ -1131,7 +1145,6 @@ void rfc1867PostHandler(Transport *transport,
         snprintf(lbuf, llen, "%s[tmp_name]", param);
       }
       add_protected_variable(lbuf);
-      String tempFileName(temp_filename, strlen(temp_filename), CopyString);
       safe_php_register_variable(lbuf, tempFileName, files, 1);
 
       Variant file_size, error_type;

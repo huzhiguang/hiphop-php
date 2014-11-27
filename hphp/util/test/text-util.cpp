@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,7 +18,7 @@
 #include <vector>
 
 #include "hphp/util/text-util.h"
-#include "gtest/gtest.h"
+#include <gtest/gtest.h>
 
 namespace HPHP {
 
@@ -72,29 +72,32 @@ TEST_F(TestTextUtil, GetPathList) {
   vector<string> out;
 
   out = TextUtil::MakePathList("/some/path/to/foo");
-
-  ASSERT_EQ(out.size(), 4);
+  ASSERT_EQ(out.size(), 3);
   EXPECT_EQ(out[0], "/some");
   EXPECT_EQ(out[1], "/some/path");
   EXPECT_EQ(out[2], "/some/path/to");
-  EXPECT_EQ(out[3], "/some/path/to/foo");
 
   out = TextUtil::MakePathList("/justonebiglongname");
-
-  ASSERT_EQ(out.size(), 1);
-  EXPECT_EQ(out[0], "/justonebiglongname");
+  ASSERT_EQ(out.size(), 0);
 
   out = TextUtil::MakePathList("trailingslashonly/");
-  ASSERT_EQ(out.size(), 0);
+  ASSERT_EQ(out.size(), 1);
+  EXPECT_EQ(out[0], "trailingslashonly");
 
   out = TextUtil::MakePathList("middle/slash");
-  ASSERT_EQ(out.size(), 0);
+  ASSERT_EQ(out.size(), 1);
+  EXPECT_EQ(out[0], "middle");
 
   out = TextUtil::MakePathList("noslashesatall");
   ASSERT_EQ(out.size(), 0);
 
   out = TextUtil::MakePathList("");
   ASSERT_EQ(out.size(), 0);
+
+  out = TextUtil::MakePathList("foo/bar/index.php");
+  ASSERT_EQ(out.size(), 2);
+  EXPECT_EQ(out[0], "foo");
+  EXPECT_EQ(out[1], "foo/bar");
 }
 
 }  // namespace HPHP

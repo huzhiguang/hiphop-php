@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -23,15 +23,15 @@ namespace HPHP {
 
 class ServerNote  {
 public:
-  static void Add(CStrRef name, CStrRef value);
-  static String Get(CStrRef name);
+  static void Add(const String& name, const String& value);
+  static String Get(const String& name);
 
   static void Reset();
 private:
   Array m_notes;
 };
 
-void get_server_note() ATTRIBUTE_COLD;
+void get_server_note();
 
 ///////////////////////////////////////////////////////////////////////////////
 }

@@ -29,6 +29,9 @@
 
 #include <list>
 
+#include "hphp/util/data-block.h"
+#include "hphp/runtime/vm/jit/types.h"
+
 #include "hphp/vixl/globals.h"
 #include "hphp/vixl/utils.h"
 #include "hphp/vixl/a64/instructions-a64.h"
@@ -44,6 +47,7 @@ constexpr int kRegListSizeInBits = sizeof(RegList) * 8;
 // need to declare them in advance.
 class Register;
 class FPRegister;
+class MemOperand;
 
 
 class CPURegister {
@@ -54,26 +58,18 @@ class CPURegister {
     kInvalid = 0,
     kRegister,
     kFPRegister,
-    kNoRegister
   };
 
-  CPURegister() : code_(0), size_(0), type_(kNoRegister) {
-    assert(!IsValid());
-    assert(IsNone());
-  }
+  constexpr CPURegister() : code_(0), size_(0), type_(kInvalid) {}
 
-  CPURegister(unsigned code, unsigned size, RegisterType type)
-      : code_(code), size_(size), type_(type) {
-    assert(IsValidOrNone());
-  }
+  constexpr CPURegister(unsigned code, unsigned size, RegisterType type)
+      : code_(code), size_(size), type_(type) {}
 
-  unsigned code() const {
-    assert(IsValid());
+  constexpr unsigned code() const {
     return code_;
   }
 
-  RegisterType type() const {
-    assert(IsValidOrNone());
+  constexpr RegisterType type() const {
     return type_;
   }
 
@@ -82,8 +78,7 @@ class CPURegister {
     return IsValid() ? (static_cast<RegList>(1) << code_) : 0;
   }
 
-  unsigned size() const {
-    assert(IsValid());
+  constexpr unsigned size() const {
     return size_;
   }
 
@@ -109,13 +104,7 @@ class CPURegister {
   }
 
   bool IsValid() const {
-    if (IsValidRegister() || IsValidFPRegister()) {
-      assert(!IsNone());
-      return true;
-    } else {
-      assert(IsNone());
-      return false;
-    }
+    return IsValidRegister() || IsValidFPRegister();
   }
 
   bool IsValidRegister() const {
@@ -130,16 +119,7 @@ class CPURegister {
            (code_ < kNumberOfFPRegisters);
   }
 
-  bool IsNone() const {
-    // kNoRegister types should always have size 0 and code 0.
-    assert((type_ != kNoRegister) || (code_ == 0));
-    assert((type_ != kNoRegister) || (size_ == 0));
-
-    return type_ == kNoRegister;
-  }
-
   bool Is(const CPURegister& other) const {
-    assert(IsValidOrNone() && other.IsValidOrNone());
     return (code_ == other.code_) && (size_ == other.size_) &&
            (type_ == other.type_);
   }
@@ -175,28 +155,24 @@ class CPURegister {
   unsigned code_;
   unsigned size_;
   RegisterType type_;
-
- private:
-  bool IsValidOrNone() const {
-    return IsValid() || IsNone();
-  }
 };
 
 
 class Register : public CPURegister {
  public:
-  explicit Register() : CPURegister() {}
-  inline explicit Register(const CPURegister& other)
+  constexpr explicit Register() : CPURegister() {}
+  constexpr explicit Register(const CPURegister& other)
       : CPURegister(other.code(), other.size(), other.type()) {
-    assert(IsValidRegister());
   }
-  explicit Register(unsigned code, unsigned size)
+  constexpr explicit Register(unsigned code, unsigned size)
       : CPURegister(code, size, kRegister) {}
 
   bool IsValid() const {
-    assert(IsRegister() || IsNone());
-    return IsValidRegister();
+    return CPURegister::IsValid() && IsRegister();
   }
+
+  MemOperand operator[](const ptrdiff_t offset) const;
+  MemOperand operator[](const Register& offset) const;
 
   static const Register& WRegFromCode(unsigned code);
   static const Register& XRegFromCode(unsigned code);
@@ -213,17 +189,15 @@ class Register : public CPURegister {
 
 class FPRegister : public CPURegister {
  public:
-  inline FPRegister() : CPURegister() {}
-  inline explicit FPRegister(const CPURegister& other)
+  constexpr FPRegister() : CPURegister() {}
+  constexpr explicit FPRegister(const CPURegister& other)
       : CPURegister(other.code(), other.size(), other.type()) {
-    assert(IsValidFPRegister());
   }
-  inline FPRegister(unsigned code, unsigned size)
+  constexpr FPRegister(unsigned code, unsigned size)
       : CPURegister(code, size, kFPRegister) {}
 
   bool IsValid() const {
-    assert(IsFPRegister() || IsNone());
-    return IsValidFPRegister();
+    return CPURegister::IsValid()  && IsFPRegister();
   }
 
   static const FPRegister& SRegFromCode(unsigned code);
@@ -237,7 +211,6 @@ class FPRegister : public CPURegister {
   static const FPRegister sregisters[];
   static const FPRegister dregisters[];
 };
-
 
 // No*Reg is used to indicate an unused argument, or an error case. Note that
 // these all compare equal (using the Is() method). The Register and FPRegister
@@ -559,13 +532,13 @@ class Label {
     assert(!IsLinked() || IsBound());
   }
 
-  inline Instruction* link() const { return link_; }
-  inline Instruction* target() const { return target_; }
+  inline HPHP::CodeAddress link() const { return link_; }
+  inline HPHP::CodeAddress target() const { return target_; }
 
   inline bool IsBound() const { return is_bound_; }
   inline bool IsLinked() const { return link_ != nullptr; }
 
-  inline void set_link(Instruction* new_link) { link_ = new_link; }
+  inline void set_link(HPHP::CodeAddress new_link) { link_ = new_link; }
 
   static const int kEndOfChain = 0;
 
@@ -577,9 +550,9 @@ class Label {
   // link_ points to the latest branch instruction generated branching to this
   // branch.
   // If link_ is not nullptr, the label has been linked to.
-  Instruction* link_;
+  HPHP::CodeAddress link_;
   // The label location.
-  Instruction* target_;
+  HPHP::CodeAddress target_;
 
   friend class Assembler;
 };
@@ -602,11 +575,11 @@ enum LiteralPoolEmitOption {
 // Literal pool entry.
 class Literal {
  public:
-  Literal(Instruction* pc, uint64_t imm, unsigned size)
+  Literal(HPHP::CodeAddress pc, uint64_t imm, unsigned size)
       : pc_(pc), value_(imm), size_(size) {}
 
  private:
-  Instruction* pc_;
+  HPHP::CodeAddress pc_;
   int64_t value_;
   unsigned size_;
 
@@ -617,7 +590,7 @@ class Literal {
 // Assembler.
 class Assembler {
  public:
-  Assembler(byte* buffer, unsigned buffer_size);
+  explicit Assembler(HPHP::CodeBlock& cb);
 
   // The destructor asserts that one of the following is true:
   //  * The Assembler object has not been used.
@@ -647,6 +620,13 @@ class Assembler {
     return UpdateAndGetByteOffsetTo(label) >> kInstructionSizeLog2;
   }
 
+  HPHP::jit::TCA frontier() const {
+    return cb_.frontier();
+  }
+
+  bool isFrontierAligned(size_t align) const {
+    return cb_.isFrontierAligned(align);
+  }
 
   // Instruction set functions.
 
@@ -1066,6 +1046,9 @@ class Assembler {
   // Store integer or FP register.
   void str(const CPURegister& rt, const MemOperand& dst);
 
+  // PC-relative load.
+  void ldr(const Register& rt, Label* label);
+
   // Load word with sign extension.
   void ldrsw(const Register& rt, const MemOperand& src);
 
@@ -1278,6 +1261,9 @@ class Assembler {
   // Emit 64 bits of data into the instruction stream.
   inline void dc64(uint64_t data) { EmitData(&data, sizeof(data)); }
 
+  template<typename T>
+  inline void dc64(T* data) { dc64(reinterpret_cast<uint64_t>(data)); }
+
   // Copy a string into the instruction stream, including the terminating NUL
   // character. The instruction pointer (pc_) is then aligned correctly for
   // subsequent instructions.
@@ -1290,8 +1276,8 @@ class Assembler {
     // Pad with NUL characters until pc_ is aligned.
     const char pad[] = {'\0', '\0', '\0', '\0'};
     assert(sizeof(pad) == kInstructionSize);
-    Instruction* next_pc = AlignUp(pc_, kInstructionSize);
-    EmitData(&pad, next_pc - pc_);
+    auto next_pc = AlignUp(cb_.frontier(), kInstructionSize);
+    EmitData(&pad, next_pc - cb_.frontier());
   }
 
   // Code generation helpers.
@@ -1331,12 +1317,20 @@ class Assembler {
   // disallow the zero register.
   static Instr RdSP(Register rd) {
     assert(!rd.IsZero());
-    return (rd.code() & kRegCodeMask) << Rd_offset;
+    if (rd.code() == kSPRegInternalCode) {
+      return kSPRegCode << Rd_offset;
+    } else {
+      return rd.code() << Rd_offset;
+    }
   }
 
   static Instr RnSP(Register rn) {
     assert(!rn.IsZero());
-    return (rn.code() & kRegCodeMask) << Rn_offset;
+    if (rn.code() == kSPRegInternalCode) {
+      return kSPRegCode << Rn_offset;
+    } else {
+      return rn.code() << Rn_offset;
+    }
   }
 
   // Flags encoding.
@@ -1361,6 +1355,11 @@ class Assembler {
     Instr immhi = (imm >> ImmPCRelLo_width) << ImmPCRelHi_offset;
     Instr immlo = imm << ImmPCRelLo_offset;
     return (immhi & ImmPCRelHi_mask) | (immlo & ImmPCRelLo_mask);
+  }
+
+  static Instr ImmPCRelLoadStoreAddress(int imm19) {
+    assert(is_int19(imm19));
+    return truncate_to_int19(imm19) << ImmLLiteral_offset;
   }
 
   // Branch encoding.
@@ -1549,15 +1548,16 @@ class Assembler {
 
   // Size of the code generated in bytes
   uint64_t SizeOfCodeGenerated() const {
-    assert((pc_ >= buffer_) && (pc_ < (buffer_ + buffer_size_)));
-    return pc_ - buffer_;
+    assert(cb_.available() > 0);
+    return cb_.used();
   }
 
   // Size of the code generated since label to the current position.
   uint64_t SizeOfCodeGeneratedSince(Label* label) const {
     assert(label->IsBound());
-    assert((pc_ >= label->target()) && (pc_ < (buffer_ + buffer_size_)));
-    return pc_ - label->target();
+    auto addr = label->target();
+    assert(cb_.frontier() >= addr);
+    return cb_.frontier() - addr;
   }
 
 
@@ -1569,7 +1569,7 @@ class Assembler {
     if (--literal_pool_monitor_ == 0) {
       // Has the literal pool been blocked for too long?
       assert(literals_.empty() ||
-             (pc_ < (literals_.back()->pc_ + kMaxLoadLiteralRange)));
+             (cb_.frontier() < (literals_.back()->pc_ + kMaxLoadLiteralRange)));
     }
   }
 
@@ -1580,6 +1580,19 @@ class Assembler {
   void CheckLiteralPool(LiteralPoolEmitOption option = JumpRequired);
   void EmitLiteralPool(LiteralPoolEmitOption option = NoJumpRequired);
   size_t LiteralPoolSize();
+
+  static bool IsImmLogical(uint64_t value, unsigned width) {
+    unsigned ignored;
+    return IsImmLogical(value, width, &ignored, &ignored, &ignored);
+  }
+
+  static bool IsImmArithmetic(int64_t value) {
+    return IsImmAddSub(value);
+  }
+
+  // Encoding helpers.
+  static bool IsImmFP32(float imm);
+  static bool IsImmFP64(double imm);
 
  protected:
   inline const Register& AppropriateZeroRegFor(const CPURegister& reg) const {
@@ -1706,31 +1719,25 @@ class Assembler {
                                const FPRegister& fa,
                                FPDataProcessing3SourceOp op);
 
-  // Encoding helpers.
-  static bool IsImmFP32(float imm);
-  static bool IsImmFP64(double imm);
-
   void RecordLiteral(int64_t imm, unsigned size);
 
   // Emit the instruction at pc_.
   void Emit(Instr instruction) {
-    assert(sizeof(*pc_) == 1);
-    assert(sizeof(instruction) == kInstructionSize);
-    assert((pc_ + sizeof(instruction)) <= (buffer_ + buffer_size_));
+    assert(cb_.canEmit(sizeof(instruction)));
+    assert(sizeof(instruction) == sizeof(uint32_t));
+    CheckBufferSpace();
 
 #ifdef DEBUG
     finalized_ = false;
 #endif
 
-    memcpy(pc_, &instruction, sizeof(instruction));
-    pc_ += sizeof(instruction);
-    CheckBufferSpace();
+    cb_.dword(instruction);
   }
 
   // Emit data inline in the instruction stream.
   void EmitData(void const * data, unsigned size) {
-    assert(sizeof(*pc_) == 1);
-    assert((pc_ + size) <= (buffer_ + buffer_size_));
+    assert(cb_.canEmit(size));
+    CheckBufferSpace();
 
 #ifdef DEBUG
     finalized_ = false;
@@ -1738,25 +1745,21 @@ class Assembler {
 
     // TODO: Record this 'instruction' as data, so that it can be disassembled
     // correctly.
-    memcpy(pc_, data, size);
-    pc_ += size;
-    CheckBufferSpace();
+    cb_.bytes(size, reinterpret_cast<const uint8_t*>(data));
   }
 
   inline void CheckBufferSpace() {
-    assert(pc_ < (buffer_ + buffer_size_));
-    if (pc_ > next_literal_pool_check_) {
+    assert(cb_.available() > 0);
+    if (cb_.frontier() > next_literal_pool_check_) {
       CheckLiteralPool();
     }
   }
 
   // The buffer into which code and relocation info are generated.
-  Instruction* buffer_;
-  // Buffer size, in bytes.
-  unsigned buffer_size_;
-  Instruction* pc_;
+  HPHP::CodeBlock& cb_;
+
   std::list<Literal*> literals_;
-  Instruction* next_literal_pool_check_;
+  HPHP::CodeAddress next_literal_pool_check_;
   unsigned literal_pool_monitor_;
 
   friend class BlockLiteralPoolScope;

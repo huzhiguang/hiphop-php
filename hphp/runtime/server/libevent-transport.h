@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,6 +20,8 @@
 #include "hphp/runtime/server/transport.h"
 #include <evhttp.h>
 
+#include <folly/IPAddress.h>
+
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -35,6 +37,7 @@ public:
   virtual const char *getUrl();
   virtual const char *getRemoteHost();
   virtual uint16_t getRemotePort();
+  virtual const char *getServerAddr();
   virtual const void *getPostData(int &size);
   virtual bool hasMorePostData();
   virtual const void *getMorePostData(int &size);
@@ -60,13 +63,13 @@ private:
   int m_workerId;
   std::string m_url;
   std::string m_remote_host;
+  folly::IPAddress m_remote_ip;
   uint16_t m_remote_port;
   std::string m_http_version;
   Method m_method;
   const char *m_extended_method;
   HeaderMap m_requestHeaders;
   bool m_sendStarted;
-  bool m_sendEnded;
   int m_requestSize;
 };
 

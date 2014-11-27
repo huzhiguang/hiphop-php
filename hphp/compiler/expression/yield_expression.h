@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -33,13 +33,10 @@ public:
 
   ExpressionPtr getKeyExpression() { return m_keyExp; }
   ExpressionPtr getValueExpression() { return m_valExp; }
-  int getLabel() { assert(m_label >= 1); return m_label; }
-  void setLabel(int label) { assert(m_label == -1); m_label = label; }
 
 private:
   ExpressionPtr m_keyExp;
   ExpressionPtr m_valExp;
-  int m_label;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

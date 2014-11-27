@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,11 +17,18 @@
 #ifndef incl_HPHP_EVAL_DEBUGGER_H_
 #define incl_HPHP_EVAL_DEBUGGER_H_
 
+#include <vector>
+
 #include "hphp/util/lock.h"
 #include "hphp/runtime/debugger/debugger_proxy.h"
 #include "hphp/runtime/base/program-functions.h"
-#include "tbb/concurrent_hash_map.h"
-#include "tbb/concurrent_queue.h"
+#include <tbb/concurrent_hash_map.h>
+#include <tbb/concurrent_queue.h>
+#include <set>
+
+namespace HPHP {
+struct ThreadInfo;
+}
 
 namespace HPHP { namespace Eval {
 
@@ -35,7 +42,7 @@ namespace HPHP { namespace Eval {
 // sandboxes with proxies. Interrupts get minimal handling before being handed
 // off to the proper proxy.
 
-DECLARE_BOOST_TYPES(CmdInterrupt);
+struct CmdInterrupt;
 
 class Debugger {
 public:
@@ -48,7 +55,7 @@ public:
 
   // Add a new sandbox a debugger can connect to.
   static void RegisterSandbox(const DSandboxInfo &sandbox);
-  static void UnregisterSandbox(CStrRef id);
+  static void UnregisterSandbox(const String& id);
 
   //  Add/remove/change DebuggerProxy.
   static DebuggerProxyPtr CreateProxy(SmartPtr<Socket> socket, bool local);
@@ -58,7 +65,7 @@ public:
   static int CountConnectedProxy();
   static DebuggerProxyPtr GetProxy();
 
-  static void GetRegisteredSandboxes(DSandboxInfoPtrVec &sandboxes);
+  static void GetRegisteredSandboxes(std::vector<DSandboxInfoPtr> &sandboxes);
   static bool IsThreadDebugging(int64_t tid);
 
   static void RetireProxy(DebuggerProxyPtr proxy);
@@ -81,12 +88,12 @@ public:
 
   // Interrupt from VM
   static void InterruptVMHook(int type = BreakPointReached,
-                              CVarRef e = null_variant);
+                              const Variant& e = null_variant);
 
   // Surround text with color, if set.
   static void SetTextColors();
-  static String ColorStdout(CStrRef s);
-  static String ColorStderr(CStrRef s);
+  static String ColorStdout(const String& s);
+  static String ColorStderr(const String& s);
 
   // Log debugging state when we're shutting the server down.
   enum ShutdownKind {
@@ -155,7 +162,7 @@ private:
   void registerThread();
   void addOrUpdateSandbox(const DSandboxInfo &sandbox);
   DSandboxInfoPtr getSandbox(const StringData* sid);
-  void getSandboxes(DSandboxInfoPtrVec &sandboxes);
+  void getSandboxes(std::vector<DSandboxInfoPtr> &sandboxes);
   void registerSandbox(const DSandboxInfo &sandbox);
   void unregisterSandbox(const StringData* sandboxId);
 

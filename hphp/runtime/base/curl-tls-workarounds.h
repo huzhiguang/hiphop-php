@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,7 +17,7 @@
 #ifndef incl_HPHP_CURL_TLS_WORKAROUNDS_H_
 #define incl_HPHP_CURL_TLS_WORKAROUNDS_H_
 
-#include "curl/curl.h"
+#include <curl/curl.h>
 
 namespace HPHP {
 

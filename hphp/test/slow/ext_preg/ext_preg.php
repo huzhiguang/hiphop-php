@@ -195,28 +195,19 @@ function test_preg_replace() {
   preg_replace(array("/\\d/", "/\\s/"), "*", "xp 4 to", -1, $count);
   VS($count, 3);
 
-  $html_body = "<html><body></body></html>";
-  $html_body2 = preg_replace("/(<\\/?\\w+[^>]*>)/e",
-                             "strtoupper(\"$1\")",
-                             $html_body);
-  VS($html_body2, "<HTML><BODY></BODY></HTML>");
+  VS(preg_replace("/xxx", "w", "xxxx"), NULL);
+  VS(preg_replace("/xxx/", "w", "xxxx"), "wx");
+  VS(preg_replace("/xxy/", "w", "xxxx"), "xxxx");
 
-  $css_text = "#AAAA;";
-  $css_text2 = preg_replace("/#([A-Fa-f0-9]{3,6});/e",
-                                    "strtolower(\"#\\1;\");", $css_text);
-  VS($css_text2, "#aaaa;");
+  VS(preg_replace("/xxx", "w", array("xxxx")), array());
+  VS(preg_replace("/xxx/", "w", array("xxxx")), array("wx"));
+  VS(preg_replace("/xxx/", "w", array("xxxx", "yyyy")), array("wx", "yyyy"));
+  VS(preg_replace(array("/xxx/", "/xxx"), "w", array("xxxx")), array());
+  VS(preg_replace(array("/xxx/", "/xxx/"), "w", array("xxxx")), array("wx"));
 
-  $rgb_text = "rgb(13, 14, 15)";
-  $rgb_text2 =
-    preg_replace("/rgb\\(([0-9]{1,3}), ([0-9]{1,3}), ([0-9]{1,3})\\)/e",
-                   "sprintf(\"%02x%02x%02x\", \"\\1\", \"\\2\", \"\\3\")",
-                   $rgb_text);
-  VS($rgb_text2, "0d0e0f");
-
-  $res = preg_replace("/(a*)(b*)/e",
-                              "test_preg_rep(\"\\1\",\"smu\\\"rf\",\"\\2\")",
-                              "aaabbbblahblahaabbbababab");
-  VS($res, "BBBBaaalahBlahBBBaaBaBaBa");
+  VS(preg_replace("/xxx", array("w"), array("xxxx")), false);
+  VS(preg_replace(array("/xxx"), array("w"), array("xxxx")), array());
+  VS(preg_replace(array("/xxx/"), array("w"), array("xxxx")), array("wx"));
 }
 
 function next_year($m) {

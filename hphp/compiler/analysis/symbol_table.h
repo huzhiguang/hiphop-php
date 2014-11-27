@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,9 +18,14 @@
 #define incl_HPHP_SYMBOL_TABLE_H_
 
 #include "hphp/compiler/hphp.h"
-#include "hphp/util/json.h"
-#include "hphp/util/util.h"
+#include <map>
+#include <memory>
+#include <set>
+#include <vector>
+#include "hphp/compiler/json.h"
 #include "hphp/util/lock.h"
+#include "hphp/util/hash-map-typedefs.h"
+#include <folly/Bits.h>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -29,7 +34,7 @@ class BlockScope;
 class CodeGenerator;
 class Variant;
 DECLARE_BOOST_TYPES(Construct);
-DECLARE_BOOST_TYPES(Type);
+DECLARE_EXTENDED_BOOST_TYPES(Type);
 DECLARE_BOOST_TYPES(AnalysisResult);
 DECLARE_BOOST_TYPES(SymbolTable);
 DECLARE_BOOST_TYPES(FunctionScope);
@@ -272,7 +277,7 @@ private:
 /**
  * Base class of VariableTable and ConstantTable.
  */
-class SymbolTable : public boost::enable_shared_from_this<SymbolTable>,
+class SymbolTable : public std::enable_shared_from_this<SymbolTable>,
                     public JSON::CodeError::ISerializable {
 public:
   static Mutex AllSymbolTablesMutex;
@@ -342,7 +347,7 @@ public:
    * How big of a hash table for generate C++ switch statements.
    */
   int getJumpTableSize() const {
-    return Util::roundUpToPowerOfTwo(m_symbolVec.size() * 2);
+    return folly::nextPowTwo(m_symbolVec.size() * 2);
   }
 
   void canonicalizeSymbolOrder();

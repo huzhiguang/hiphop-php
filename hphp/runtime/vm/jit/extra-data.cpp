@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,12 +17,21 @@
 #include "hphp/runtime/vm/jit/extra-data.h"
 
 #include "hphp/runtime/vm/jit/ssa-tmp.h"
+#include "hphp/runtime/vm/jit/abi-x64.h"
+#include "hphp/util/text-util.h"
 
-namespace HPHP { namespace JIT {
+namespace HPHP { namespace jit {
 
-std::string LdLocData::show() const {
-  return folly::to<std::string>(LocalId::show(), ',',
-                                valSrc ? valSrc->toString() : "null");
+std::string NewStructData::show() const {
+  std::ostringstream os;
+  auto delim = "";
+  for (uint32_t i = 0; i < numKeys; i++) {
+    os << delim << "\"" <<
+       escapeStringForCPP(keys[i]->data(), keys[i]->size()) <<
+       "\"";
+    delim = ",";
+  }
+  return os.str();
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -141,7 +150,9 @@ MAKE_DISPATCHER(EqualsDispatcher, bool, cseEqualsExtraImpl);
 MAKE_DISPATCHER(CloneDispatcher, IRExtraData*, cloneExtraImpl);
 MAKE_DISPATCHER(ShowDispatcher, std::string, showExtraImpl);
 
-} // namespace
+}
+
+//////////////////////////////////////////////////////////////////////
 
 size_t cseHashExtra(Opcode opc, IRExtraData* data) {
   return dispatchExtra<size_t,HashDispatcher>(opc, data);
@@ -160,4 +171,6 @@ std::string showExtra(Opcode opc, const IRExtraData* data) {
       const_cast<IRExtraData*>(data));
 }
 
-} }
+//////////////////////////////////////////////////////////////////////
+
+}}

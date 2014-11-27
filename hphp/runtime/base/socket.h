@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -38,24 +38,30 @@ class Socket : public File {
 public:
   // We cannot use object allocation for this class, because
   // we need to support pfsockopen() that can make a socket persistent.
+  void* operator new(size_t s) {
+    return ::operator new(s);
+  }
+  void operator delete(void* p) {
+    return ::operator delete(p);
+  }
 
   Socket();
   Socket(int sockfd, int type, const char *address = nullptr, int port = 0,
-         double timeout = 0);
+         double timeout = 0, const StaticString& streamType = empty_string_ref);
   virtual ~Socket();
 
-  static StaticString s_class_name;
   // overriding ResourceData
-  CStrRef o_getClassNameHook() const { return s_class_name; }
+  const String& o_getClassNameHook() const { return classnameof(); }
 
   // implementing File
-  virtual bool open(CStrRef filename, CStrRef mode);
+  virtual bool open(const String& filename, const String& mode);
   virtual bool close();
   virtual int64_t readImpl(char *buffer, int64_t length);
   virtual int64_t writeImpl(const char *buffer, int64_t length);
   virtual bool eof();
   virtual Array getMetaData();
   virtual int64_t tell();
+  virtual void sweep() override;
 
   // check if the socket is still open
   virtual bool checkLiveness();
@@ -79,7 +85,6 @@ protected:
 
   int m_type;
   int m_error;
-  bool m_eof;
 
   int m_timeout; // in micro-seconds;
   bool m_timedOut;
@@ -88,6 +93,8 @@ protected:
 
   bool closeImpl();
   bool waitForData();
+private:
+  void inferStreamType();
 };
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,52 +15,60 @@
 */
 
 #include "hphp/runtime/base/file.h"
-#include "hphp/runtime/base/complex-types.h"
-#include "hphp/runtime/base/string-buffer.h"
-#include "hphp/runtime/base/type-conversions.h"
+
+#include "hphp/runtime/base/array-init.h"
+#include "hphp/runtime/base/array-iterator.h"
 #include "hphp/runtime/base/builtin-functions.h"
+#include "hphp/runtime/base/exceptions.h"
+#include "hphp/runtime/base/runtime-error.h"
+#include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/stream-wrapper-registry.h"
+#include "hphp/runtime/base/string-buffer.h"
+#include "hphp/runtime/base/thread-info.h"
+#include "hphp/runtime/base/type-conversions.h"
+#include "hphp/runtime/base/zend-printf.h"
+#include "hphp/runtime/base/zend-string.h"
+
+#include "hphp/runtime/ext/stream/ext_stream-user-filters.h"
+
 #include "hphp/runtime/server/static-content-cache.h"
 #include "hphp/runtime/server/virtual-host.h"
-#include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/base/runtime-error.h"
-#include "hphp/runtime/base/array-init.h"
+
+#include "hphp/system/constants.h"
+
+#include "hphp/runtime/base/file-util.h"
 #include "hphp/util/logger.h"
 #include "hphp/util/process.h"
-#include "hphp/util/util.h"
-#include "hphp/runtime/base/zend-string.h"
-#include "hphp/runtime/base/zend-printf.h"
-#include "hphp/runtime/base/exceptions.h"
-#include "hphp/runtime/base/array-iterator.h"
-#include "hphp/runtime/base/stream-wrapper-registry.h"
-#include "folly/String.h"
 
+#include <folly/String.h>
+
+#include <algorithm>
 #include <sys/file.h>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 // statics
 
-StaticString File::s_class_name("File");
 StaticString File::s_resource_name("stream");
 
-IMPLEMENT_REQUEST_LOCAL(FileData, s_file_data);
+int __thread s_pcloseRet;
 
+const int File::CHUNK_SIZE = 8192;
 const int File::USE_INCLUDE_PATH = 1;
 
-String File::TranslatePathKeepRelative(CStrRef filename) {
-  String canonicalized(Util::canonicalize(filename.data(),
-                                          filename.size()), AttachString);
-
-  if (RuntimeOption::SafeFileAccess) {
-    const vector<string> &allowedDirectories =
-      VirtualHost::GetAllowedDirectories();
+String File::TranslatePathKeepRelative(const String& filename) {
+  // canonicalize asserts that we don't have nulls
+  String canonicalized = FileUtil::canonicalize(filename);
+  if (ThreadInfo::s_threadInfo->m_reqInjectionData.hasSafeFileAccess()) {
+    auto const& allowedDirectories = ThreadInfo::s_threadInfo->
+      m_reqInjectionData.getAllowedDirectories();
     auto it = std::upper_bound(allowedDirectories.begin(),
                                allowedDirectories.end(), canonicalized,
-                               [](CStrRef val, const string& dir) {
+                               [](const String& val, const std::string& dir) {
                                  return strcmp(val.c_str(), dir.c_str()) < 0;
                                });
     if (it != allowedDirectories.begin()) {
-      const string& dir = *--it;
+      const std::string& dir = *--it;
       if (dir.size() <= canonicalized.size() &&
           !strncmp(dir.c_str(), canonicalized.c_str(), dir.size())) {
         return canonicalized;
@@ -69,36 +77,30 @@ String File::TranslatePathKeepRelative(CStrRef filename) {
 
     // disallow access with an absolute path
     if (canonicalized.charAt(0) == '/') {
-      return "";
+      return empty_string();
     }
 
     // unresolvable paths are all considered as unsafe
     if (canonicalized.find("..") >= 0) {
       assert(canonicalized.find("..") == 0);
-      return "";
+      return empty_string();
     }
   }
 
   return canonicalized;
 }
 
-String File::TranslatePath(CStrRef filename) {
-  String canonicalized = TranslatePathKeepRelative(filename);
-
-  if (canonicalized.charAt(0) == '/') {
-    return canonicalized;
+String File::TranslatePath(const String& filename) {
+  if (filename.charAt(0) != '/') {
+    String cwd = g_context->getCwd();
+    return TranslatePathKeepRelative(cwd + "/" + filename);
   }
-
-  String cwd = g_context->getCwd();
-  if (!cwd.empty() && cwd[cwd.length() - 1] == '/') {
-    return cwd + canonicalized;
-  }
-  return cwd + "/" + canonicalized;
+  return TranslatePathKeepRelative(filename);
 }
 
-String File::TranslatePathWithFileCache(CStrRef filename) {
-  String canonicalized(Util::canonicalize(filename.data(),
-                                          filename.size()), AttachString);
+String File::TranslatePathWithFileCache(const String& filename) {
+  // canonicalize asserts that we don't have nulls
+  String canonicalized = FileUtil::canonicalize(filename);
   String translated = TranslatePath(canonicalized);
   if (!translated.empty() && access(translated.data(), F_OK) < 0 &&
       StaticContentCache::TheFileCache) {
@@ -111,52 +113,93 @@ String File::TranslatePathWithFileCache(CStrRef filename) {
   return translated;
 }
 
-String File::TranslateCommand(CStrRef cmd) {
+String File::TranslateCommand(const String& cmd) {
   //TODO: security checking
   return cmd;
 }
 
-bool File::IsVirtualDirectory(CStrRef filename) {
-  if (StaticContentCache::TheFileCache &&
-      StaticContentCache::TheFileCache->dirExists(filename.data(), false)) {
-    return true;
-  }
-  return false;
+bool File::IsVirtualDirectory(const String& filename) {
+  return
+    StaticContentCache::TheFileCache &&
+    StaticContentCache::TheFileCache->dirExists(filename.data(), false);
 }
 
-bool File::IsPlainFilePath(CStrRef filename) {
-  return filename.find("://") == String::npos;
-}
-
-Variant File::Open(CStrRef filename, CStrRef mode,
-                   int options /* = 0 */,
-                   CVarRef context /* = null */) {
+Resource File::Open(const String& filename, const String& mode,
+                    int options /* = 0 */,
+                    const Variant& context /* = null */) {
   Stream::Wrapper *wrapper = Stream::getWrapperFromURI(filename);
-  File *file = wrapper->open(filename, mode, options, context);
+  if (!wrapper) return Resource();
+  Resource rcontext =
+    context.isNull() ? g_context->getStreamContext() : context.toResource();
+  File *file = wrapper->open(filename, mode, options, rcontext);
   if (file != nullptr) {
     file->m_name = filename.data();
     file->m_mode = mode.data();
-    return Resource(file);
+    file->m_streamContext = rcontext;
   }
-  return false;
+  return Resource(file);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // constructor and destructor
 
-File::File(bool nonblocking)
+File::File(bool nonblocking /* = true */,
+           const String& wrapper /* = null_string */,
+           const String& stream_type /* = empty_string_ref */)
   : m_isLocal(false), m_fd(-1), m_closed(false), m_nonblocking(nonblocking),
-    m_writepos(0), m_readpos(0), m_position(0), m_buffer(nullptr) {
+    m_writepos(0), m_readpos(0), m_position(0), m_eof(false),
+    m_wrapperType(wrapper.get()), m_streamType(stream_type.get()),
+    m_buffer(nullptr), m_bufferSize(CHUNK_SIZE) {
 }
 
 File::~File() {
   closeImpl();
 }
 
+void File::sweep() {
+  // Clear non-smart state without deleting `this`. Therefore assumes
+  // `this` has been smart allocated. Note that the derived class'
+  // sweep() is responsible for closing m_fd and any other non-smart
+  // resources it might have allocated.
+  assert(!valid());
+  free(m_buffer);
+  using std::string;
+  m_name.~string();
+  m_mode.~string();
+  m_wrapperType = nullptr;
+  m_streamType = nullptr;
+}
+
 void File::closeImpl() {
-  if (m_buffer) {
-    free(m_buffer);
-    m_buffer = nullptr;
+  free(m_buffer);
+  m_buffer = nullptr;
+}
+
+void File::invokeFiltersOnClose() {
+  if (MemoryManager::sweeping()) {
+    return;
+  }
+  // As it's being closed, we can't actually do anything with filter output
+  applyFilters(
+    empty_string_ref,
+    m_readFilters,
+    /* closing = */ true
+  );
+  if (!m_writeFilters.empty()) {
+    auto buf = applyFilters(
+      empty_string_ref,
+      m_writeFilters,
+      /* closing = */ true
+    );
+    if (buf.length() > 0) {
+      writeImpl(buf.data(), buf.length());
+    }
+  }
+  for (auto filter: m_readFilters) {
+    filter.getTyped<StreamFilter>()->invokeOnClose();
+  }
+  for (auto filter: m_writeFilters) {
+    filter.getTyped<StreamFilter>()->invokeOnClose();
   }
 }
 
@@ -178,20 +221,54 @@ int File::getc() {
   return (int)(unsigned char)buffer[0];
 }
 
+String File::read() {
+  StringBuffer sb;
+  int64_t copied = 0;
+  int64_t avail = bufferedLen();
+
+  while (!eof() || avail) {
+    if (m_buffer == nullptr) {
+      m_buffer = (char *)malloc(CHUNK_SIZE);
+      m_bufferSize = CHUNK_SIZE;
+    }
+
+    if (avail > 0) {
+      sb.append(m_buffer + m_readpos, avail);
+      copied += avail;
+    }
+
+    m_writepos = filteredReadToBuffer();
+    m_readpos = 0;
+    avail = bufferedLen();
+
+    if (avail == 0) {
+      break;
+    }
+  }
+
+  m_position += copied;
+  return sb.detach();
+}
+
 String File::read(int64_t length) {
   if (length <= 0) {
     raise_notice("Invalid length %" PRId64, length);
+    // XXX: Changing this to empty_string causes problems, something is
+    // writing to this upstream but I'm not sure what and since it's
+    // unlikely to provide significant gain alone I'm leaving it for now.
     return "";
   }
 
-  String s = String(length, ReserveString);
-  char *ret = s.mutableSlice().ptr;
+  auto const allocSize = length;
+  String s = String(allocSize, ReserveString);
+  char *ret = s.bufferSlice().ptr;
   int64_t copied = 0;
-  int64_t avail = m_writepos - m_readpos;
+  int64_t avail = bufferedLen();
 
   while (avail < length && !eof()) {
     if (m_buffer == nullptr) {
       m_buffer = (char *)malloc(CHUNK_SIZE);
+      m_bufferSize = CHUNK_SIZE;
     }
 
     if (avail > 0) {
@@ -200,9 +277,9 @@ String File::read(int64_t length) {
       length -= avail;
     }
 
-    m_writepos = readImpl(m_buffer, CHUNK_SIZE);
+    m_writepos = filteredReadToBuffer();
     m_readpos = 0;
-    avail = m_writepos - m_readpos;
+    avail = bufferedLen();
 
     if (avail == 0 || m_nonblocking) {
       // For nonblocking mode, temporary out of data.
@@ -210,7 +287,7 @@ String File::read(int64_t length) {
     }
   }
 
-  avail = m_writepos - m_readpos;
+  avail = bufferedLen();
   if (avail > 0) {
     int64_t n = length < avail ? length : avail;
     memcpy(ret + copied, m_buffer + m_readpos, n);
@@ -219,43 +296,97 @@ String File::read(int64_t length) {
   }
 
   m_position += copied;
-  return s.setSize(copied);
+
+  assert(copied <= allocSize);
+  s.shrink(copied);
+  return s;
 }
 
-int64_t File::write(CStrRef data, int64_t length /* = 0 */) {
+int64_t File::filteredReadToBuffer() {
+  int64_t bytes_read = readImpl(m_buffer, CHUNK_SIZE);
+  if (LIKELY(m_readFilters.empty())) {
+    return bytes_read;
+  }
+
+  String data(m_buffer, bytes_read, CopyString);
+  String filtered = applyFilters(data,
+                                 m_readFilters,
+                                 /* closing = */ false);
+  if (filtered.length() > m_bufferSize) {
+    auto new_buffer = realloc(m_buffer, filtered.length());
+    if (!new_buffer) {
+      raise_error("Failed to realloc buffer");
+      return 0;
+    }
+    m_buffer = (char*) new_buffer;
+    m_bufferSize = filtered.length();
+  }
+  memcpy(m_buffer, filtered.data(), filtered.length());
+  return filtered.length();
+}
+
+int64_t File::filteredWrite(const char* buffer, int64_t length) {
+  if (LIKELY(m_writeFilters.empty())) {
+    return writeImpl(buffer, length);
+  }
+
+  String data(buffer, length, CopyString);
+  String filtered = applyFilters(data,
+                                 m_writeFilters,
+                                 /* closing = */ false);
+
+  if (!filtered.empty()) {
+    int64_t written = writeImpl(filtered.data(), filtered.size());
+    m_position += written;
+  }
+  return 0;
+}
+
+int64_t File::write(const String& data, int64_t length /* = 0 */) {
   if (seekable()) {
     int64_t offset = m_readpos - m_writepos;
+    // Writing shouldn't change the EOF status, but because we have a
+    // transparent buffer, we need to do read operations on the backing
+    // store, which can.
+    //
+    // EOF state isn't just a matter of position on all subclasses;
+    // even seek(0, SEEK_CUR) can change it.
+    auto eof = m_eof;
     m_readpos = m_writepos = 0; // invalidating read buffer
     seek(offset, SEEK_CUR);
+    m_eof = eof;
   }
+
   if (length <= 0 || length > data.size()) {
     length = data.size();
   }
-  if (length) {
-    int64_t written = writeImpl(data.data(), length);
-    m_position += written;
-    return written;
+
+  if (!length) {
+    return 0;
   }
-  return 0;
+
+  int64_t written = filteredWrite(data.data(), length);
+  m_position += written;
+  return written;
 }
 
 int File::putc(char c) {
   char buf[1];
   buf[0] = c;
-  int ret = writeImpl(buf, 1);
+  int ret = filteredWrite(buf, 1);
   m_position += ret;
   return ret;
 }
 
 bool File::seek(int64_t offset, int whence /* = SEEK_SET */) {
   if (whence != SEEK_CUR) {
-    throw NotSupportedException(__func__, "cannot seek other than SEEK_CUR");
+    throw_not_supported(__func__, "cannot seek other than SEEK_CUR");
   }
   if (offset < 0) {
-    throw NotSupportedException(__func__, "cannot seek backwards");
+    throw_not_supported(__func__, "cannot seek backwards");
   }
   if (offset > 0) {
-    int64_t avail = m_writepos - m_readpos;
+    int64_t avail = bufferedLen();
     assert(avail >= 0);
     if (avail >= offset) {
       m_readpos += offset;
@@ -280,15 +411,15 @@ bool File::seek(int64_t offset, int whence /* = SEEK_SET */) {
 }
 
 int64_t File::tell() {
-  throw NotSupportedException(__func__, "cannot tell");
+  throw_not_supported(__func__, "cannot tell");
 }
 
 bool File::eof() {
-  throw NotSupportedException(__func__, "cannot test eof");
+  throw_not_supported(__func__, "cannot test eof");
 }
 
 bool File::rewind() {
-  throw NotSupportedException(__func__, "cannot rewind");
+  throw_not_supported(__func__, "cannot rewind");
 }
 
 bool File::flush() {
@@ -296,7 +427,7 @@ bool File::flush() {
 }
 
 bool File::truncate(int64_t size) {
-  throw NotSupportedException(__func__, "cannot truncate");
+  throw_not_supported(__func__, "cannot truncate");
 }
 
 bool File::lock(int operation) {
@@ -317,6 +448,64 @@ bool File::lock(int operation, bool &wouldblock /* = false */) {
   return true;
 }
 
+bool File::stat(struct stat *sb) {
+  // Undocumented, but Zend returns false for streams where fstat is unsupported
+  return false;
+}
+
+void File::appendReadFilter(Resource& resource) {
+  assert(resource.is<StreamFilter>());
+  m_readFilters.push_back(resource);
+}
+
+void File::appendWriteFilter(Resource& resource) {
+  assert(resource.is<StreamFilter>());
+  m_writeFilters.push_back(resource);
+}
+
+void File::prependReadFilter(Resource& resource) {
+  assert(resource.is<StreamFilter>());
+  m_readFilters.push_front(resource);
+}
+
+void File::prependWriteFilter(Resource& resource) {
+  assert(resource.is<StreamFilter>());
+  m_writeFilters.push_front(resource);
+}
+
+bool File::removeFilter(Resource& resource) {
+  assert(resource.is<StreamFilter>());
+  ResourceData* rd = resource.get();
+  for (auto it = m_readFilters.begin(); it != m_readFilters.end(); ++it) {
+    if (it->get() == rd) {
+      m_readFilters.erase(it);
+      return true;
+    }
+  }
+  for (auto it = m_writeFilters.begin(); it != m_writeFilters.end(); ++it) {
+    if (it->get() == rd) {
+      std::list<Resource> closing_filters;
+      closing_filters.push_back(rd);
+      String result(applyFilters(empty_string_ref,
+                                 closing_filters,
+                                 /* closing = */ true));
+      std::list<Resource> later_filters;
+      auto dupit(it);
+      for (++dupit; dupit != m_writeFilters.end(); ++dupit) {
+        later_filters.push_back(dupit->get());
+      }
+      result = applyFilters(result, later_filters, false);
+      if (!result.empty()) {
+        int64_t written = writeImpl(result.data(), result.size());
+        m_position += written;
+      }
+      m_writeFilters.erase(it);
+      return true;
+    }
+  }
+  return false;
+}
+
 const StaticString
   s_wrapper_type("wrapper_type"),
   s_stream_type("stream_type"),
@@ -330,18 +519,25 @@ const StaticString
   s_wrapper_data("wrapper_data");
 
 Array File::getMetaData() {
-  ArrayInit ret(10);
-  ret.set(s_wrapper_type, o_getClassName());
-  ret.set(s_stream_type,  getStreamType());
-  ret.set(s_mode,         String(m_mode));
-  ret.set(s_unread_bytes, 0);
-  ret.set(s_seekable,     seekable());
-  ret.set(s_uri,          String(m_name));
-  ret.set(s_timed_out,    false);
-  ret.set(s_blocked,      true);
-  ret.set(s_eof,          eof());
-  ret.set(s_wrapper_data, getWrapperMetaData());
-  return ret.create();
+  return make_map_array(
+    s_wrapper_type, getWrapperType(),
+    s_stream_type,  getStreamType(),
+    s_mode,         String(m_mode),
+    s_unread_bytes, 0,
+    s_seekable,     seekable(),
+    s_uri,          String(m_name),
+    s_timed_out,    false,
+    s_blocked,      true,
+    s_eof,          eof(),
+    s_wrapper_data, getWrapperMetaData()
+  );
+}
+
+String File::getWrapperType() const {
+  if ((!m_wrapperType) || m_wrapperType->empty()) {
+    return o_getClassName();
+  }
+  return m_wrapperType;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -352,24 +548,24 @@ String File::readLine(int64_t maxlen /* = 0 */) {
   size_t total_copied = 0;
   char *ret = nullptr;
   for (;;) {
-    int64_t avail = m_writepos - m_readpos;
+    int64_t avail = bufferedLen();
     if (avail > 0) {
       int64_t cpysz = 0;
       bool done = false;
 
       char *readptr = m_buffer + m_readpos;
-      const char *eol;
+      const char *eol = nullptr;
       const char *cr;
       const char *lf;
       cr = (const char *)memchr(readptr, '\r', avail);
       lf = (const char *)memchr(readptr, '\n', avail);
-      if (cr && lf != cr + 1 && !(lf && lf < cr)) {
+      if (cr && lf != cr + 1 && !(lf && lf < cr) && cr != &readptr[avail - 1]) {
         /* mac */
         eol = cr;
       } else if ((cr && lf && cr == lf - 1) || (lf)) {
         /* dos or unix endings */
         eol = lf;
-      } else {
+      } else if (cr != &readptr[avail - 1]) {
         eol = cr;
       }
 
@@ -405,10 +601,11 @@ String File::readLine(int64_t maxlen /* = 0 */) {
     } else {
       if (m_buffer == nullptr) {
         m_buffer = (char *)malloc(CHUNK_SIZE);
+        m_bufferSize = CHUNK_SIZE;
       }
-      m_writepos = readImpl(m_buffer, CHUNK_SIZE);
+      m_writepos = filteredReadToBuffer();
       m_readpos = 0;
-      if (m_writepos - m_readpos == 0) {
+      if (bufferedLen() == 0) {
         break;
       }
     }
@@ -423,26 +620,26 @@ String File::readLine(int64_t maxlen /* = 0 */) {
   return String(ret, total_copied, AttachString);
 }
 
-String File::readRecord(CStrRef delimiter, int64_t maxlen /* = 0 */) {
+Variant File::readRecord(const String& delimiter, int64_t maxlen /* = 0 */) {
   if (eof() && m_writepos == m_readpos) {
-    return empty_string;
+    return false;
   }
 
   if (maxlen <= 0 || maxlen > CHUNK_SIZE) {
     maxlen = CHUNK_SIZE;
   }
 
-  int64_t avail = m_writepos - m_readpos;
+  int64_t avail = bufferedLen();
   if (m_buffer == nullptr) {
     m_buffer = (char *)malloc(CHUNK_SIZE * 3);
   }
   if (avail < maxlen && !eof()) {
     assert(m_writepos + maxlen - avail <= CHUNK_SIZE * 3);
     m_writepos += readImpl(m_buffer + m_writepos, maxlen - avail);
-    maxlen = m_writepos - m_readpos;
+    maxlen = bufferedLen();
   }
   if (m_readpos >= CHUNK_SIZE) {
-    memcpy(m_buffer, m_buffer + m_readpos, m_writepos - m_readpos);
+    memcpy(m_buffer, m_buffer + m_readpos, bufferedLen());
     m_writepos -= m_readpos;
     m_readpos = 0;
   }
@@ -455,9 +652,9 @@ String File::readRecord(CStrRef delimiter, int64_t maxlen /* = 0 */) {
   } else {
     if (delimiter.size() == 1) {
       e = (const char *)memchr(m_buffer + m_readpos, delimiter.charAt(0),
-                               m_writepos - m_readpos);
+                               bufferedLen());
     } else {
-      int64_t pos = string_find(m_buffer + m_readpos, m_writepos - m_readpos,
+      int64_t pos = string_find(m_buffer + m_readpos, bufferedLen(),
                               delimiter.data(), delimiter.size(), 0, true);
       if (pos >= 0) {
         e = m_buffer + m_readpos + pos;
@@ -480,7 +677,7 @@ String File::readRecord(CStrRef delimiter, int64_t maxlen /* = 0 */) {
 
   if (toread >= 0) {
     String s = String(toread, ReserveString);
-    char *buf = s.mutableSlice().ptr;
+    char *buf = s.bufferSlice().ptr;
     if (toread) {
       memcpy(buf, m_buffer + m_readpos, toread);
     }
@@ -490,10 +687,11 @@ String File::readRecord(CStrRef delimiter, int64_t maxlen /* = 0 */) {
       m_readpos += delimiter.size();
       m_position += delimiter.size();
     }
-    return s.setSize(toread);
+    s.setSize(toread);
+    return s;
   }
 
-  return empty_string;
+  return empty_string();
 }
 
 int64_t File::print() {
@@ -508,16 +706,15 @@ int64_t File::print() {
   return total;
 }
 
-int64_t File::printf(CStrRef format, CArrRef args) {
-  int len = 0;
-  char *output = string_printf(format.data(), format.size(), args, &len);
-  return write(String(output, len, AttachString));
+int64_t File::printf(const String& format, const Array& args) {
+  String str = string_printf(format.data(), format.size(), args);
+  return write(str);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // csv functions
 
-int64_t File::writeCSV(CArrRef fields, char delimiter_char /* = ',' */,
+int64_t File::writeCSV(const Array& fields, char delimiter_char /* = ',' */,
                      char enclosure_char /* = '"' */) {
   int line = 0;
   int count = fields.size();
@@ -581,10 +778,12 @@ static const char *lookup_trailing_spaces(const char *ptr, int len) {
   return ptr;
 }
 
-Array File::readCSV(int64_t length /* = 0 */, char delimiter_char /* = ',' */,
+Array File::readCSV(int64_t length /* = 0 */,
+                    char delimiter_char /* = ',' */,
                     char enclosure_char /* = '"' */,
-                    char escape_char /* = '\\' */) {
-  String line = readLine(length);
+                    char escape_char /* = '\\' */,
+                    const String* input /* = nullptr */) {
+  const String& line = (input != nullptr) ? *input : readLine(length);
   if (line.empty()) {
     return Array();
   }
@@ -676,7 +875,7 @@ Array File::readCSV(int64_t length /* = 0 */, char delimiter_char /* = ',' */,
               memcpy(tptr, line_end, line_end_len);
               tptr += line_end_len;
 
-              new_line = readLine(length);
+              new_line = (input != nullptr) ? String() : readLine(length);
               const char *new_buf = new_line.data();
               int64_t new_len = new_line.size();
               if (new_len == 0) {
@@ -811,6 +1010,39 @@ String File::getLastError() {
   return String(folly::errnoStr(errno).toStdString());
 }
 
+template<class ResourceList>
+String File::applyFilters(const String& buffer,
+                          ResourceList& filters,
+                          bool closing) {
+  if (buffer.empty() && !closing) {
+    return buffer;
+  }
+  Resource in(null_resource);
+  Resource out;
+  if (buffer.empty()) {
+    out = Resource(newres<BucketBrigade>());
+  } else {
+    out = Resource(newres<BucketBrigade>(buffer));
+  }
+
+  for (Resource& resource: filters) {
+    in = out;
+    out = Resource(newres<BucketBrigade>());
+
+    auto filter = resource.getTyped<StreamFilter>();
+    assert(filter);
+    auto result = filter->invokeFilter(in, out, closing);
+    // PSFS_ERR_FATAL doesn't raise a fatal in Zend - appears to be
+    // treated the same as PSFS_FEED_ME
+    if (UNLIKELY(result != k_PSFS_PASS_ON)) {
+      return empty_string();
+    }
+  }
+
+  auto bb = out.getTyped<BucketBrigade>();
+  assert(bb);
+  return bb->createString();
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 }

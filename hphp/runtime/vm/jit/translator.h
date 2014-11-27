@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,585 +13,451 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
+
 #ifndef incl_HPHP_TRANSLATOR_H_
 #define incl_HPHP_TRANSLATOR_H_
 
-#include <limits.h>
-#include <string.h>
-#include <stdio.h>
-#include <assert.h>
-#include <memory>
-#include <map>
-#include <vector>
-#include <set>
-
-#include <boost/dynamic_bitset.hpp>
-
-#include "hphp/util/hash.h"
-#include "hphp/util/timer.h"
-#include "hphp/runtime/base/execution-context.h"
-#include "hphp/runtime/base/smart-containers.h"
-#include "hphp/runtime/vm/bytecode.h"
-#include "hphp/runtime/vm/jit/fixup.h"
-#include "hphp/runtime/vm/jit/runtime-type.h"
-#include "hphp/runtime/vm/jit/srcdb.h"
-#include "hphp/runtime/vm/jit/translator-instrs.h"
-#include "hphp/runtime/vm/jit/write-lease.h"
-#include "hphp/runtime/vm/jit/prof-data.h"
-#include "hphp/runtime/vm/jit/unique-stubs.h"
+#include "hphp/runtime/base/types.h"
+#include "hphp/runtime/base/datatype.h"
+#include "hphp/runtime/base/repo-auth-type.h"
 #include "hphp/runtime/vm/debugger-hook.h"
+#include "hphp/runtime/vm/hhbc.h"
 #include "hphp/runtime/vm/srckey.h"
-#include "hphp/runtime/base/md5.h"
 
-/* Translator front-end. */
+#include "hphp/runtime/vm/jit/types.h"
+#include "hphp/runtime/vm/jit/location.h"
+#include "hphp/runtime/vm/jit/prof-src-key.h"
+#include "hphp/runtime/vm/jit/region-selection.h"
+#include "hphp/runtime/vm/jit/srcdb.h"
+#include "hphp/runtime/vm/jit/trans-rec.h"
+#include "hphp/runtime/vm/jit/type.h"
+#include "hphp/runtime/vm/jit/unique-stubs.h"
+#include "hphp/runtime/vm/jit/write-lease.h"
+
+#include "hphp/util/hash-map-typedefs.h"
+#include "hphp/util/mutex.h"
+
+#include <folly/Format.h>
+
+#include <functional>
+#include <map>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
 namespace HPHP {
-namespace JIT {
-class HhbcTranslator;
-class IRTranslator;
-}
-namespace Debug {
-class DebugInfo;
-}
-namespace Transl {
+///////////////////////////////////////////////////////////////////////////////
 
-using JIT::Type;
-using JIT::RegionDesc;
-using JIT::HhbcTranslator;
-using JIT::ProfData;
+struct Class;
+struct Func;
+
+namespace Debug { struct DebugInfo; }
+
+namespace jit {
+///////////////////////////////////////////////////////////////////////////////
+
+struct Block;
+struct InliningDecider;
+struct IRTranslator;
+struct NormalizedInstruction;
+struct ProfData;
 
 static const uint32_t transCountersPerChunk = 1024 * 1024 / 8;
 
-class TranslatorX64;
-extern TranslatorX64* volatile nextTx64;
-extern __thread TranslatorX64* tx64;
 
-/*
- * DIRTY when the live register state is spread across the stack and m_fixup,
- * CLEAN when it has been sync'ed into g_context.
- */
-enum class VMRegState {
-  CLEAN,
-  DIRTY
-};
-extern __thread VMRegState tl_regState;
+///////////////////////////////////////////////////////////////////////////////
+// Translator exceptions.
 
-struct NormalizedInstruction;
-
-// A DynLocation is a Location-in-execution: a location, along with
-// whatever is known about its runtime type.
-struct DynLocation {
-  Location    location;
-  RuntimeType rtt;
-
-  DynLocation(Location l, DataType t) : location(l), rtt(t) {}
-
-  DynLocation(Location l, RuntimeType t) : location(l), rtt(t) {}
-
-  DynLocation() : location(), rtt() {}
-
-  bool operator==(const DynLocation& r) const {
-    return rtt == r.rtt && location == r.location;
-  }
-
-  // Hash function
-  size_t operator()(const DynLocation &dl) const {
-    uint64_t rtthash = rtt(rtt);
-    uint64_t locHash = location(location);
-    return rtthash ^ locHash;
-  }
-
-  std::string pretty() const {
-    return Trace::prettyNode("DynLocation", location, rtt);
-  }
-
-  // Punch through a bunch of frequently called rtt and location methods.
-  // While this is unlovely here, we use DynLocation in bazillions of
-  // places in the translator, and constantly saying ".rtt" is worse.
-  bool isString() const {
-    return rtt.isString();
-  }
-  bool isInt() const {
-    return rtt.isInt();
-  }
-  bool isDouble() const {
-    return rtt.isDouble();
-  }
-  bool isBoolean() const {
-    return rtt.isBoolean();
-  }
-  bool isRef() const {
-    return rtt.isRef();
-  }
-  bool isRefToObject() const {
-    return rtt.isRef() && innerType() == KindOfObject;
-  }
-  bool isValue() const {
-    return rtt.isValue();
-  }
-  bool isNull() const {
-    return rtt.isNull();
-  }
-  bool isObject() const {
-    return rtt.isObject();
-  }
-  bool isArray() const {
-    return rtt.isArray();
-  }
-  DataType valueType() const {
-    return rtt.valueType();
-  }
-  DataType innerType() const {
-    return rtt.innerType();
-  }
-  DataType outerType() const {
-    return rtt.outerType();
-  }
-
-  bool isStack() const {
-    return location.isStack();
-  }
-  bool isLocal() const {
-    return location.isLocal();
-  }
-  bool isLiteral() const {
-    return location.isLiteral();
-  }
-
-  // Uses the runtime state. True if this dynLocation can be overwritten by
-  // SetG's and SetM's.
-  bool canBeAliased() const;
+struct TranslationFailedExc : std::runtime_error {
+  TranslationFailedExc(const char* file, int line)
+    : std::runtime_error(folly::format("TranslationFailedExc @ {}:{}",
+                                       file, line).str())
+  {}
 };
 
-// Flags that summarize the plan for handling a given instruction.
-enum TXFlags {
-  Interp = 0,       // default; must be boolean false
-  Supported = 1,    // Not interpreted, though possibly with C++
-  NonReentrant = 2, // Supported with no possibility of reentry.
-  MachineCode  = 4, // Supported without C++ at all.
-  Simple = NonReentrant | Supported,
-  Native = MachineCode | Simple
-};
-
-struct Tracelet;
-struct TraceletContext;
-
-// Return a summary string of the bytecode in a tracelet.
-std::string traceletShape(const Tracelet&);
-
-class TranslationFailedExc : public std::exception {
- public:
-  const char* m_file; // must be static
-  const int m_line;
-  TranslationFailedExc(const char* file, int line) :
-    m_file(file), m_line(line) { }
-};
-
-class UnknownInputExc : public std::runtime_error {
- public:
-  const char* m_file; // must be static
-  const int m_line;
+struct UnknownInputExc : std::runtime_error {
   UnknownInputExc(const char* file, int line)
     : std::runtime_error(folly::format("UnknownInputExc @ {}:{}",
                                        file, line).str())
     , m_file(file)
     , m_line(line)
   {}
+
+  const char* m_file; // must be static
+  const int m_line;
 };
 
 #define punt() do { \
-  throw Transl::TranslationFailedExc(__FILE__, __LINE__); \
+  throw TranslationFailedExc(__FILE__, __LINE__); \
 } while(0)
 
 #define throwUnknownInput() do { \
-  throw Transl::UnknownInputExc(__FILE__, __LINE__); \
+  throw UnknownInputExc(__FILE__, __LINE__); \
 } while(0);
 
-class GuardType {
- public:
-  explicit GuardType(DataType outer = KindOfAny,
-                     DataType inner = KindOfNone);
-  explicit GuardType(const RuntimeType& rtt);
-           GuardType(const GuardType& other);
-  const DataType   getOuterType() const;
-  const DataType   getInnerType() const;
-  const Class*     getSpecializedClass() const;
-  bool             isSpecific() const;
-  bool             isSpecialized() const;
-  bool             isRelaxed() const;
-  bool             isGeneric() const;
-  bool             isCounted() const;
-  bool             isMoreRefinedThan(const GuardType& other) const;
-  bool             mayBeUninit() const;
-  GuardType        getCountness() const;
-  GuardType        getCountnessInit() const;
-  DataTypeCategory getCategory() const;
-  GuardType        dropSpecialization() const;
-  RuntimeType      getRuntimeType() const;
-  bool             isEqual(GuardType other) const;
-  bool             hasArrayKind() const;
-  ArrayData::ArrayKind getArrayKind() const;
 
- private:
-  DataType outerType;
-  DataType innerType;
-  union {
-    const Class* klass;
-    struct {
-      bool arrayKindValid;
-      ArrayData::ArrayKind arrayKind;
-    };
-  };
-};
+///////////////////////////////////////////////////////////////////////////////
+// Translator auxiliary types.
 
-typedef hphp_hash_map<Location,RuntimeType,Location> TypeMap;
-typedef hphp_hash_set<Location, Location> LocationSet;
-typedef hphp_hash_map<DynLocation*, GuardType>  DynLocTypeMap;
-
-
-const char* getTransKindName(TransKind kind);
+using BlockIdToIRBlockMap = hphp_hash_map<RegionDesc::BlockId, Block*>;
 
 /*
- * Used to maintain a mapping from the bytecode to its corresponding x86.
+ * The information about the context a translation is occurring in.
+ *
+ * These fields are fixed for the whole translation.  Many objects in the JIT
+ * need access to this.
  */
-struct TransBCMapping {
-  Offset bcStart;
-  TCA    aStart;
-  TCA    astubsStart;
+struct TransContext {
+  /* The SrcKey for this translation. */
+  SrcKey srcKey() const;
+
+  TransID transID;  // May be kInvalidTransID if not for a real translation.
+  Offset initBcOffset;
+  Offset initSpOffset;
+  bool resumed;
+  const Func* func;
 };
 
 /*
- * A record with various information about a translation.
+ * Arguments for the translate() entry points in Translator.
+ *
+ * These include a variety of flags that help decide what to translate, or what
+ * to do after we're done, so it's distinct from the TransContext above.
  */
-struct TransRec {
-  TransID                 id;
-  TransKind               kind;
-  SrcKey                  src;
-  MD5                     md5;
-  uint32_t                  bcStopOffset;
-  vector<DynLocation>     dependencies;
-  TCA                     aStart;
-  uint32_t                  aLen;
-  TCA                     astubsStart;
-  uint32_t                  astubsLen;
-  TCA                     counterStart;
-  uint8_t                   counterLen;
-  vector<TransBCMapping>  bcMapping;
-
-  TransRec() {}
-
-  TransRec(SrcKey    s,
-           MD5       _md5,
-           TransKind _kind,
-           TCA       _aStart = 0,
-           uint32_t    _aLen = 0,
-           TCA       _astubsStart = 0,
-           uint32_t    _astubsLen = 0) :
-      id(0), kind(_kind), src(s), md5(_md5), bcStopOffset(0),
-      aStart(_aStart), aLen(_aLen),
-      astubsStart(_astubsStart), astubsLen(_astubsLen),
-      counterStart(0), counterLen(0) { }
-
-  TransRec(SrcKey                   s,
-           MD5                      _md5,
-           TransKind                _kind,
-           const Tracelet&          t,
-           TCA                      _aStart = 0,
-           uint32_t                 _aLen = 0,
-           TCA                      _astubsStart = 0,
-           uint32_t                 _astubsLen = 0,
-           TCA                      _counterStart = 0,
-           uint8_t                  _counterLen = 0,
-           vector<TransBCMapping>  _bcMapping = vector<TransBCMapping>());
-
-  void setID(TransID newID) { id = newID; }
-  string print(uint64_t profCount) const;
-};
-
 struct TranslArgs {
-  TranslArgs(const SrcKey& sk, bool align)
-      : m_sk(sk)
-      , m_src(nullptr)
-      , m_align(align)
-      , m_interp(false)
-      , m_setFuncBody(false)
-      , m_transId(InvalidID)
-    {}
+  TranslArgs(SrcKey sk, bool align)
+    : m_sk(sk)
+    , m_align(align)
+    , m_dryRun(false)
+    , m_setFuncBody(false)
+    , m_transId(kInvalidTransID)
+    , m_region(nullptr)
+  {}
 
-  TranslArgs& sk(const SrcKey& sk) {
+  TranslArgs& sk(SrcKey sk) {
     m_sk = sk;
-    return *this;
-  }
-  TranslArgs& src(TCA src) {
-    m_src = src;
     return *this;
   }
   TranslArgs& align(bool align) {
     m_align = align;
     return *this;
   }
-  TranslArgs& interp(bool interp) {
-    m_interp = interp;
+  TranslArgs& dryRun(bool dry) {
+    m_dryRun = dry;
     return *this;
   }
   TranslArgs& setFuncBody() {
     m_setFuncBody = true;
     return *this;
   }
+  TranslArgs& flags(TransFlags flags) {
+    m_flags = flags;
+    return *this;
+  }
   TranslArgs& transId(TransID transId) {
     m_transId = transId;
     return *this;
   }
+  TranslArgs& region(RegionDescPtr region) {
+    m_region = region;
+    return *this;
+  }
 
   SrcKey m_sk;
-  TCA m_src;
   bool m_align;
-  bool m_interp;
+  bool m_dryRun;
   bool m_setFuncBody;
+  TransFlags m_flags;
   TransID m_transId;
+  RegionDescPtr m_region;
 };
 
+
+///////////////////////////////////////////////////////////////////////////////
+// Translator.
+
 /*
- * Translator annotates a tracelet with input/output locations/types.
+ * Module for converting a RegionDesc into an IR instruction stream.
+ *
+ * There is only ever one single Translator, owned by the global MCGenerator,
+ * whose state is reset in between translations.
  */
 struct Translator {
-  // kMaxInlineReturnDecRefs is the maximum ref-counted locals to
-  // generate an inline return for.
-  static const int kMaxInlineReturnDecRefs = 1;
+  Translator();
 
-  static const int MaxJmpsTracedThrough = 5;
+  /////////////////////////////////////////////////////////////////////////////
+  // Types.
 
-  JIT::UniqueStubs uniqueStubs;
-
-private:
-  friend struct TraceletContext;
-
-  void analyzeCallee(TraceletContext&,
-                     Tracelet& parent,
-                     NormalizedInstruction* fcall);
-  bool applyInputMetaData(Unit::MetaHandle&,
-                          NormalizedInstruction* ni,
-                          TraceletContext& tas,
-                          InputInfos& ii);
-  void getOutputs(Tracelet& t,
-                  NormalizedInstruction* ni,
-                  int& currentStackOffset,
-                  bool& varEnvTaint);
-  void relaxDeps(Tracelet& tclet, TraceletContext& tctxt);
-  void constrainDep(const DynLocation* loc,
-                    NormalizedInstruction* firstInstr,
-                    GuardType specType,
-                    GuardType& relxType);
-  DataTypeCategory getOperandConstraintCategory(NormalizedInstruction* instr,
-                                                size_t opndIdx,
-                                                const GuardType& specType);
-  GuardType getOperandConstraintType(NormalizedInstruction* instr,
-                                     size_t                 opndIdx,
-                                     const GuardType&       specType);
-
-  void constrainOperandType(GuardType&             relxType,
-                            NormalizedInstruction* instr,
-                            size_t                 opndIdx,
-                            const GuardType&       specType);
-
-
-  RuntimeType liveType(Location l, const Unit &u, bool specialize = false);
-  RuntimeType liveType(const Cell* outer,
-                       const Location& l,
-                       bool specialize = false);
-
-  virtual void syncWork() = 0;
-  virtual void invalidateSrcKey(SrcKey sk) = 0;
-
-protected:
   enum TranslateResult {
     Failure,
     Retry,
     Success
   };
-  static const char* translateResultName(TranslateResult r);
-  void traceStart(Offset bcStartOffset);
-  virtual void traceCodeGen() = 0;
+
+  /*
+   * Data used by translateRegion() to pass information between retries.
+   */
+  struct RetryContext {
+    // Instructions that must be interpreted.
+    ProfSrcKeySet toInterp;
+
+    // Inlined regions.
+    std::unordered_map<ProfSrcKey,
+                       RegionDescPtr,
+                       ProfSrcKey::Hasher> inlines;
+  };
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Main translation API.
+
+  /*
+   * Start, end, or free a trace of code to be translated.
+   */
+  void traceStart(TransContext context);
   void traceEnd();
   void traceFree();
 
-protected:
-  void requestResetHighLevelTranslator();
-
-  /* translateRegion reads from the RegionBlacklist to determine when
-   * to interpret an instruction, and adds failed instructions to the
-   * blacklist so they're interpreted on the next attempt. */
-  typedef hphp_hash_set<SrcKey, SrcKey::Hasher> RegionBlacklist;
+  /*
+   * Translate `region'.
+   *
+   * The caller is expected to continue calling translateRegion() until either
+   * Success or Failure is returned.  Otherwise, Retry is returned, and the
+   * caller is responsible for threading the same RetryContext through to
+   * the retried translations.
+   */
   TranslateResult translateRegion(const RegionDesc& region,
-                                  RegionBlacklist& interp);
-
-  typedef std::map<TCA, TransID> TransDB;
-  TransDB            m_transDB;
-  vector<TransRec>   m_translations;
-  vector<uint64_t*>  m_transCounters;
-
-  int64_t              m_createdTime;
-
-  std::unique_ptr<JIT::IRTranslator> m_irTrans;
-
-  SrcDB              m_srcDB;
-
-  static Lease s_writeLease;
-  static volatile bool s_replaceInFlight;
-
-public:
-
-  Translator();
-  virtual ~Translator();
-  static Translator* Get();
-  static void advanceTranslator() {
-    tx64 = nextTx64;
-  }
-  static void clearTranslator() {
-    tx64 = nullptr;
-  }
-  static Lease& WriteLease() {
-    return s_writeLease;
-  }
-  static bool ReplaceInFlight() {
-    return s_replaceInFlight;
-  }
-  static RuntimeType outThisObjectType();
+                                  RetryContext& retry,
+                                  TransFlags trflags);
 
   /*
-   * Interface between the arch-dependent translator and outside world.
+   * Stringify a TranslateResult.
    */
-  virtual void requestInit() = 0;
-  virtual void requestExit() = 0;
-  virtual TCA funcPrologue(Func* f, int nArgs, ActRec* ar = nullptr) = 0;
-  virtual TCA getTranslatedCaller() const = 0;
-  virtual std::string getUsage() = 0;
-  virtual size_t getCodeSize() = 0;
-  virtual size_t getStubSize() = 0;
-  virtual size_t getTargetCacheSize() = 0;
-  virtual bool dumpTC(bool ignoreLease = false) = 0;
-  virtual bool dumpTCCode(const char *filename) = 0;
-  virtual bool dumpTCData() = 0;
-  virtual void protectCode() = 0;
-  virtual void unprotectCode() = 0;
-  virtual bool isValidCodeAddress(TCA tca) const = 0;
-  virtual Debug::DebugInfo* getDebugInfo() = 0;
-  virtual void enterTCAtSrcKey(SrcKey& sk) = 0;
-  virtual void enterTCAtPrologue(ActRec* ar, TCA start) = 0;
-  virtual void enterTCAfterPrologue(TCA start) = 0;
+  static const char* ResultName(TranslateResult r);
 
-  const TransDB& getTransDB() const {
-    return m_transDB;
-  }
 
-  const TransRec* getTransRec(TCA tca) const {
-    if (!isTransDBEnabled()) return nullptr;
+  /////////////////////////////////////////////////////////////////////////////
+  // Accessors.
 
-    TransDB::const_iterator it = m_transDB.find(tca);
-    if (it == m_transDB.end()) {
-      return nullptr;
-    }
-    if (it->second >= m_translations.size()) {
-      return nullptr;
-    }
-    return &m_translations[it->second];
-  }
+  /*
+   * Get the IRTranslator for the current translation.
+   *
+   * This is reset whenever traceStart() is called.
+   */
+  IRTranslator* irTrans() const;
 
-  const TransRec* getTransRec(TransID transId) const {
-    if (!isTransDBEnabled()) return nullptr;
+  /*
+   * Get the Translator's ProfData.
+   */
+  ProfData* profData() const;
 
-    always_assert(transId < m_translations.size());
-    return &m_translations[transId];
-  }
+  /*
+   * Get the SrcDB.
+   *
+   * This is the one true SrcDB, since Translator is used as a singleton.
+   */
+  const SrcDB& getSrcDB() const;
 
-  TransID getCurrentTransID() const {
-    return m_translations.size();
-  }
+  /*
+   * Get the SrcRec for `sk'.
+   *
+   * If no SrcRec exists, insert one into the SrcDB.
+   */
+  SrcRec* getSrcRec(SrcKey sk);
 
-  uint64_t* getTransCounterAddr();
-  uint64_t getTransCounter(TransID transId) const;
+  /*
+   * Current region being translated, if any.
+   */
+  const RegionDesc* region() const;
 
+  /////////////////////////////////////////////////////////////////////////////
+  // Configuration.
+
+  /*
+   * We call the TransKind `mode' for some reason.
+   */
+  TransKind mode() const;
+  void setMode(TransKind mode);
+
+  /*
+   * Whether to use ahot.
+   *
+   * This defaults to runtime option values, and is only changed if we're using
+   * ahot and it runs out of space.
+   */
+  bool useAHot() const;
+  void setUseAHot(bool val);
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Translation DB.
+  //
+  // We maintain mappings from TCAs and TransIDs to translation information,
+  // for debugging purposes only.  Outside of debug builds and processes with
+  // TC dumps enabled, these routines do no work, and their corresponding data
+  // structures are unused.
+  //
+  // Note that PGO always has a coherent notion of TransID---the so-called
+  // `profTransID', which is just the region block ID (which are globally
+  // unique).  This is completely distinct from the Translator's TransID.
+
+  /*
+   * Whether the TransDB structures should be used.
+   *
+   * True only for debug builds or when TC dumps are enabled.
+   */
+  static bool isTransDBEnabled();
+
+  /*
+   * Get a TransRec by TCA or TransID.
+   *
+   * Return nullptr if the TransDB is not enabled.
+   */
+  const TransRec* getTransRec(TCA tca) const;
+  const TransRec* getTransRec(TransID transId) const;
+
+  /*
+   * Add a translation.
+   *
+   * Does nothing but trace if the TransDB is not enabled.
+   */
   void addTranslation(const TransRec& transRec);
 
-  // helpers for srcDB.
-  SrcRec* getSrcRec(SrcKey sk) {
-    // TODO: add a insert-or-find primitive to THM
-    if (SrcRec* r = m_srcDB.find(sk)) return r;
-    assert(s_writeLease.amOwner());
-    return m_srcDB.insert(sk);
-  }
-
-  const SrcDB& getSrcDB() const {
-    return m_srcDB;
-  }
+  /*
+   * Get the TransID of the current (or next, if there is no current)
+   * translation.
+   */
+  TransID getCurrentTransID() const;
 
   /*
-   * Create a Tracelet for the given SrcKey, which must actually be
-   * the current VM frame.
+   * Get the translation counter for `transId'.
    *
-   * XXX The analysis pass will inspect the live state of the VM stack
-   * as needed to determine the current types of in-flight values.
+   * Return -1 if the TransDB is not enabled.
    */
-  std::unique_ptr<Tracelet> analyze(SrcKey sk, const TypeMap& = TypeMap());
+  uint64_t getTransCounter(TransID transId) const;
 
-  void postAnalyze(NormalizedInstruction* ni, SrcKey& sk,
-                   Tracelet& t, TraceletContext& tas);
+  /*
+   * Get a pointer to the translation counter for getCurrentTransID().
+   *
+   * Return nullptr if the TransDB is not enabled.
+   */
+  uint64_t* getTransCounterAddr();
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Debug blacklist.
+  //
+  // The set of PC's and SrcKey's we refuse to JIT because they contain hphpd
+  // breakpoints.
+
+  /*
+   * Atomically clear all entries from the debug blacklist.
+   */
+  void clearDbgBL();
+
+  /*
+   * Add `pc' to the debug blacklist.
+   *
+   * Return whether we actually performed an insertion.
+   */
+  bool addDbgBLPC(PC pc);
+
+  /*
+   * Check if `sk' is in the debug blacklist.
+   *
+   * Lazily populates m_dbgBLSrcKey from m_dbgBLPC if we don't find the entry.
+   */
+  bool isSrcKeyInBL(SrcKey sk);
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Static data.
+
+  static Lease& WriteLease();
+
+  static const int MaxJmpsTracedThrough = 5;
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Other methods.
+
+public:
   static bool liveFrameIsPseudoMain();
 
-  inline void sync() {
-    if (tl_regState == VMRegState::CLEAN) return;
-    syncWork();
-  }
+private:
+  TranslateResult translateRegionImpl(const RegionDesc& region,
+                                      RetryContext& retry,
+                                      TransFlags trflags,
+                                      InliningDecider& inl,
+                                      const NormalizedInstruction* fcall);
 
-  inline bool stateIsDirty() {
-    return tl_regState == VMRegState::DIRTY;
-  }
+  void createBlockMap(const RegionDesc&    region,
+                      BlockIdToIRBlockMap& blockIdToIRBlock);
 
-  inline bool isTransDBEnabled() const {
-    return debug || RuntimeOption::EvalDumpTC;
-  }
+  void setSuccIRBlocks(const RegionDesc&          region,
+                       RegionDesc::BlockId        srcBlockId,
+                       const BlockIdToIRBlockMap& blockIdToIRBlock);
 
-protected:
+  void setIRBlock(RegionDesc::BlockId        blockId,
+                  const RegionDesc&          region,
+                  const BlockIdToIRBlockMap& blockIdToIRBlock);
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Data members.
+
+public:
+  UniqueStubs uniqueStubs;
+
+private:
+  int64_t m_createdTime;
+
+  TransKind m_mode;
+  const RegionDesc* m_region{nullptr};
+  std::unique_ptr<ProfData> m_profData;
+  bool m_useAHot;
+
+  std::unique_ptr<IRTranslator> m_irTrans;
+  SrcDB m_srcDB;
+
+  // Translation DB.
+  typedef std::map<TCA, TransID> TransDB;
+  TransDB m_transDB;
+  std::vector<TransRec> m_translations;
+  std::vector<uint64_t*> m_transCounters;
+
+  // Debug blacklist.
   PCFilter m_dbgBLPC;
   hphp_hash_set<SrcKey,SrcKey::Hasher> m_dbgBLSrcKey;
   Mutex m_dbgBlacklistLock;
-  bool isSrcKeyInBL(const SrcKey& sk);
 
-  TransKind m_mode;
-  ProfData* m_profData;
-
-private:
-  int m_analysisDepth;
-
-public:
-  void clearDbgBL();
-  bool addDbgBLPC(PC pc);
-  virtual bool addDbgGuards(const Unit* unit) = 0;
-  virtual bool addDbgGuard(const Func* func, Offset offset) = 0;
-
-  ProfData* profData() const {
-    return m_profData;
-  }
-
-  TransKind mode() const {
-    return m_mode;
-  }
-
-  int analysisDepth() const {
-    assert(m_analysisDepth >= 0);
-    return m_analysisDepth;
-  }
-
-  // Async hook for file modifications.
-  void invalidateFile(Eval::PhpFile* f);
-
-  // Start a new translation space. Returns true IFF this thread created
-  // a new space.
-  bool replace();
+  // Write lease.
+  static Lease s_writeLease;
 };
 
+
+///////////////////////////////////////////////////////////////////////////////
+// Stack information.
+
+/*
+ * Number of stack values popped by the opcode at `pc'.
+ */
+int64_t getStackPopped(PC pc);
+
+/*
+ * Number of stack values pushed by the opcode at `pc'.
+ */
+int64_t getStackPushed(PC pc);
+
+/*
+ * Change in stack depth made by `ni'.
+ */
 int getStackDelta(const NormalizedInstruction& ni);
-int64_t getStackPopped(const NormalizedInstruction&);
-int64_t getStackPushed(const NormalizedInstruction&);
+
+
+///////////////////////////////////////////////////////////////////////////////
+// Control flow information.
 
 enum class ControlFlowInfo {
   None,
@@ -599,130 +465,95 @@ enum class ControlFlowInfo {
   BreaksBB
 };
 
-static inline ControlFlowInfo
-opcodeControlFlowInfo(const Op instr) {
-  switch (instr) {
-    case OpJmp:
-    case OpJmpZ:
-    case OpJmpNZ:
-    case OpSwitch:
-    case OpSSwitch:
-    case OpContSuspend:
-    case OpContSuspendK:
-    case OpContRetC:
-    case OpRetC:
-    case OpRetV:
-    case OpExit:
-    case OpFatal:
-    case OpIterNext:
-    case OpIterNextK:
-    case OpMIterNext:
-    case OpMIterNextK:
-    case OpWIterNext:
-    case OpWIterNextK:
-    case OpIterInit: // May branch to fail case.
-    case OpIterInitK: // Ditto
-    case OpMIterInit: // Ditto
-    case OpMIterInitK: // Ditto
-    case OpWIterInit: // Ditto
-    case OpWIterInitK: // Ditto
-    case OpDecodeCufIter: // Ditto
-    case OpIterBreak:
-    case OpThrow:
-    case OpUnwind:
-    case OpEval:
-    case OpNativeImpl:
-    case OpContHandle:
-      return ControlFlowInfo::BreaksBB;
-    case OpFCall:
-    case OpFCallArray:
-    case OpContEnter:
-    case OpIncl:
-    case OpInclOnce:
-    case OpReq:
-    case OpReqOnce:
-    case OpReqDoc:
-      return ControlFlowInfo::ChangesPC;
-    default:
-      return ControlFlowInfo::None;
-  }
-}
+/*
+ * Return the ControlFlowInfo for `instr'.
+ */
+ControlFlowInfo opcodeControlFlowInfo(const Op op);
 
 /*
- * opcodeChangesPC --
+ * Return true if the instruction can potentially set PC to point to something
+ * other than the next instruction in the bytecode.
+ */
+bool opcodeChangesPC(const Op op);
+
+/*
+ * Return true if the instruction always breaks a tracelet.
  *
- *   Returns true if the instruction can potentially set PC to point
- *   to something other than the next instruction in the bytecode
+ * Most instructions that change PC will break the tracelet, though some do not
+ * (e.g., FCall).
  */
-static inline bool
-opcodeChangesPC(const Op instr) {
-  return opcodeControlFlowInfo(instr) >= ControlFlowInfo::ChangesPC;
-}
+bool opcodeBreaksBB(const Op op);
 
 /*
- * opcodeBreaksBB --
- *
- *   Returns true if the instruction always breaks a tracelet. Most
- *   instructions that change PC will break the tracelet, though some
- *   do not (ex. FCall).
+ * Similar to opcodeBreaksBB but more strict.  We break profiling blocks after
+ * any instruction that can side exit, including instructions with predicted
+ * output, and before any control flow merge point.
  */
-static inline bool
-opcodeBreaksBB(const Op instr) {
-  return opcodeControlFlowInfo(instr) == ControlFlowInfo::BreaksBB;
-}
+bool instrBreaksProfileBB(const NormalizedInstruction* inst);
+
+
+///////////////////////////////////////////////////////////////////////////////
+// Input and output information.
 
 /*
- * If this returns true, we dont generate guards for any of the inputs
- * to this instruction (this is essentially to avoid generating guards
- * on behalf of interpreted instructions).
+ * Location and metadata for an instruction's input.
  */
-bool dontGuardAnyInputs(Op op);
-bool outputDependsOnInput(const Op instr);
+struct InputInfo {
+  explicit InputInfo(const Location& l)
+    : loc(l)
+    , dontBreak(false)
+    , dontGuard(l.isLiteral())
+    , dontGuardInner(false)
+  {}
 
-extern bool tc_dump();
-const Func* lookupImmutableMethod(const Class* cls, const StringData* name,
-                                  bool& magicCall, bool staticLookup,
-                                  Class* ctx);
+  std::string pretty() const;
 
-// This is used to check that return types of builtins are not simple
-// types. This is different from IS_REFCOUNTED_TYPE because builtins
-// can return Variants, and we use KindOfUnknown to denote these
-// return types.
-static inline bool isCppByRef(DataType t) {
-  return t != KindOfBoolean && t != KindOfInt64 && t != KindOfNull;
-}
+public:
+  // Location tag for the input.
+  Location loc;
 
-// return true if type is passed in/out of C++ as String&/Array&/Object&
-static inline bool isSmartPtrRef(DataType t) {
-  return t == KindOfString || t == KindOfStaticString ||
-         t == KindOfArray || t == KindOfObject ||
-         t == KindOfResource;
-}
+  // If an input is unknowable, don't break the tracelet just to find its
+  // type---but still generate a guard if that will tell us its type.
+  bool dontBreak;
 
-void populateImmediates(NormalizedInstruction&);
-void preInputApplyMetaData(Unit::MetaHandle, NormalizedInstruction*);
-enum class MetaMode {
-  Normal,
-  Legacy,
+  // Never break the tracelet nor generate a guard on account of this input.
+  bool dontGuard;
+
+  // Never guard the inner type if this input is KindOfRef.
+  bool dontGuardInner;
 };
-void readMetaData(Unit::MetaHandle&, NormalizedInstruction&, HhbcTranslator&,
-                  MetaMode m = MetaMode::Normal);
-bool instrMustInterp(const NormalizedInstruction&);
 
-typedef std::function<Type(int)> LocalTypeFn;
-void getInputs(SrcKey startSk, NormalizedInstruction& inst, InputInfos& infos,
-               const Func* func, const LocalTypeFn& localType);
-void getInputsImpl(SrcKey startSk, NormalizedInstruction* inst,
-                   int& currentStackOffset, InputInfos& inputs,
-                   const Func* func, const LocalTypeFn& localType);
-bool outputIsPredicted(SrcKey startSk, NormalizedInstruction& inst);
-bool callDestroysLocals(const NormalizedInstruction& inst,
-                        const Func* caller);
-int locPhysicalOffset(Location l, const Func* f = nullptr);
-bool shouldAnalyzeCallee(const NormalizedInstruction*, const FPIEnt*,
-                         const Op, const int);
+/*
+ * Vector of InputInfo with some flags and a pretty-printer.
+ */
+struct InputInfoVec : public std::vector<InputInfo> {
+  InputInfoVec()
+    : needsRefCheck(false)
+  {}
+
+  std::string pretty() const;
+
+public:
+  bool needsRefCheck;
+};
+
+/*
+ * Get input location info and flags for a NormalizedInstruction.  Some flags
+ * on `ni' may be updated.
+ *
+ * `startSk' should be the SrcKey for the first instruction in the region
+ * containing the instruction.
+ */
+InputInfoVec getInputs(SrcKey startSk, NormalizedInstruction&);
 
 namespace InstrFlags {
+///////////////////////////////////////////////////////////////////////////////
+
+/*
+ * Type of the output(s) of an instruction.
+ *
+ * May be dependent on the input type.
+ */
 enum OutTypeConstraints {
   OutNull,
   OutNullUninit,
@@ -741,10 +572,11 @@ enum OutTypeConstraints {
 
   OutUnknown,           // Not known at tracelet compile-time
   OutPred,              // Unknown, but give prediction a whirl.
+  OutPredBool,          // Boolean value predicted to be True or False
   OutCns,               // Constant; may be known at compile-time
   OutVUnknown,          // type is V(unknown)
 
-  OutSameAsInput,       // type is the same as the first stack inpute
+  OutSameAsInput,       // type is the same as the first stack input
   OutCInput,            // type is C(input)
   OutVInput,            // type is V(input)
   OutCInputL,           // type is C(type) of local input
@@ -754,6 +586,7 @@ enum OutTypeConstraints {
   OutFInputR,           // Like FInputL, but for R's on the stack.
 
   OutArith,             // For Add, Sub, Mul
+  OutArithO,            // For AddO, SubO, MulO
   OutBitOp,             // For BitAnd, BitOr, BitXor
   OutSetOp,             // For SetOpL
   OutIncDec,            // For IncDecL
@@ -761,14 +594,19 @@ enum OutTypeConstraints {
   OutClassRef,          // KindOfClass
   OutFPushCufSafe,      // FPushCufSafe pushes two values of different
                         // types and an ActRec
-  OutNone
+
+  OutIsTypeL,           // output for IsTypeL instructions
+
+  OutNone,
 };
 
 /*
- * Input codes indicate what an instruction reads, and some other
- * things about their behavior.  The order these show up in the inputs
- * vector is given in getInputs(), and is relevant in a few cases
- * (e.g. instructions taking both stack inputs and MVectors).
+ * Input codes indicate what an instruction reads, and some other things about
+ * their behavior.
+ *
+ * The order these show up in the inputs vector is given in getInputs(), and is
+ * relevant in a few cases (e.g. instructions taking both stack inputs and
+ * MVectors).
  */
 enum Operands {
   None            = 0,
@@ -794,22 +632,157 @@ enum Operands {
   StackTop3 = Stack1 | Stack2 | Stack3,
 };
 
-inline Operands operator|(const Operands& l, const Operands& r) {
-  return Operands(int(r) | int(l));
-}
+Operands operator|(const Operands& l, const Operands& r);
+
+///////////////////////////////////////////////////////////////////////////////
 }
 
+/*
+ * Metadata describing an instruction's inputs and outputs, including their
+ * number and constraints.
+ *
+ * Encoded in a sparse table in translator.cpp.
+ */
 struct InstrInfo {
-  InstrFlags::Operands           in;
-  InstrFlags::Operands           out;
+  InstrFlags::Operands in;
+  InstrFlags::Operands out;
   InstrFlags::OutTypeConstraints type; // How are outputs related to inputs?
   int numPushed;
 };
 
+/*
+ * Get the InstrInfo for `op'.
+ */
 const InstrInfo& getInstrInfo(Op op);
 
-typedef const int COff; // Const offsets
+/*
+ * Is the output of `inst' predicted?
+ *
+ * Flags on `inst' may be updated.
+ */
+bool outputIsPredicted(NormalizedInstruction& inst);
 
-} } // HPHP::Transl
+/*
+ * If this returns true, we dont generate guards for any of the inputs to this
+ * instruction.
+ *
+ * This is used to avoid generating guards for interpreted instructions.
+ */
+bool dontGuardAnyInputs(Op op);
+
+
+///////////////////////////////////////////////////////////////////////////////
+// Property information.
+
+struct PropInfo {
+  PropInfo()
+    : offset(-1)
+    , repoAuthType{}
+  {}
+
+  explicit PropInfo(int offset, RepoAuthType repoAuthType)
+    : offset(offset)
+    , repoAuthType{repoAuthType}
+  {}
+
+  int offset;
+  RepoAuthType repoAuthType;
+};
+
+PropInfo getPropertyOffset(const NormalizedInstruction& ni,
+                           Class* ctx, const Class*& baseClass,
+                           const MInstrInfo& mii,
+                           unsigned mInd, unsigned iInd);
+
+PropInfo getFinalPropertyOffset(const NormalizedInstruction& ni,
+                                Class* ctx, const MInstrInfo& mii);
+
+
+///////////////////////////////////////////////////////////////////////////////
+// Other instruction information.
+
+/*
+* Some bytecodes are always no-ops but kept around for various reasons (mostly
+* stack flavor safety).
+ */
+bool isAlwaysNop(Op op);
+
+/*
+ * Return true if we have absolutely no JIT support for `inst'.
+ *
+ * Always returns true if JitAlwaysInterpOne is set.
+ */
+bool instrMustInterp(const NormalizedInstruction& inst);
+
+/*
+ * Could `inst' clobber the locals in the environment of `caller'?
+ *
+ * This occurs, e.g., if `inst' is a call to extract().
+ */
+bool callDestroysLocals(const NormalizedInstruction& inst,
+                        const Func* caller);
+
+/*
+ * Could the CPP builtin function `callee` destroy the locals
+ * in the environment of its caller?
+ *
+ * This occurs, e.g., if `func' is extract().
+ */
+bool builtinFuncDestroysLocals(const Func* callee);
+
+///////////////////////////////////////////////////////////////////////////////
+// Completely unrelated functionality.
+
+/*
+ * This routine attempts to find the Func* that will be called for a given
+ * target Class and function name, from a given context.  This function
+ * determines if a given Func* will be called in a request-insensitive way
+ * (i.e. suitable for burning into the TC as a pointer).  The class we are
+ * targeting is assumed to be a subclass of `cls', not exactly `cls'.
+ *
+ * This function should not be used in a context where the call may involve
+ * late static binding (i.e. FPushClsMethod), since it assumes static functions
+ * will be resolved as targeting on cls regardless of whether they are
+ * overridden.
+ *
+ * Returns nullptr if we can't be sure this would always call this function.
+ */
+const Func* lookupImmutableMethod(const Class* cls, const StringData* name,
+                                  bool& magicCall, bool staticLookup,
+                                  Class* ctx);
+
+/*
+ * Return true if type is passed in/out of C++ as String&/Array&/Object&.
+ */
+inline bool isSmartPtrRef(MaybeDataType t) {
+  return t == KindOfString || t == KindOfStaticString ||
+         t == KindOfArray || t == KindOfObject ||
+         t == KindOfResource;
+}
+
+/*
+ * Is a call to `funcd' with `numArgs' arguments a NativeImpl call?
+ */
+inline bool isNativeImplCall(const Func* funcd, int numArgs) {
+  return funcd && funcd->methInfo() && numArgs == funcd->numParams();
+}
+
+/*
+ * The offset, in cells, of this location from its base pointer.
+ *
+ * The Func* is needed to see how many locals to skip for iterators.  If the
+ * current frame pointer is not the context you're looking for, be sure to pass
+ * in a non-default `f'.
+ */
+int locPhysicalOffset(Location l, const Func* f = nullptr);
+
+extern bool tc_dump();
+
+///////////////////////////////////////////////////////////////////////////////
+}}
+
+#define incl_HPHP_TRANSLATOR_INL_H_
+#include "hphp/runtime/vm/jit/translator-inl.h"
+#undef incl_HPHP_TRANSLATOR_INL_H_
 
 #endif

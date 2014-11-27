@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,10 +17,16 @@
 #ifndef incl_HPHP_HTTP_SERVER_TRANSPORT_H_
 #define incl_HPHP_HTTP_SERVER_TRANSPORT_H_
 
-#include "hphp/util/base.h"
+#include <list>
+#include <string>
+#include <unordered_map>
+#include <utility>
+
 #include "hphp/util/compression.h"
+#include "hphp/util/functional.h"
 #include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/string-holder.h"
 #include "hphp/runtime/base/debuggable.h"
 #include "hphp/runtime/base/runtime-option.h"
 
@@ -30,8 +36,12 @@ namespace HPHP {
 /**
  * For storing headers and cookies.
  */
-typedef std::map<std::string, std::vector<std::string>, stdltistr> HeaderMap;
-typedef std::map<std::string, std::string, stdltistr> CookieMap;
+template <typename V>
+using CaseInsenMap =
+  std::unordered_map<std::string, V, string_hashi, string_eqstri>;
+
+using HeaderMap = CaseInsenMap<std::vector<std::string>>;
+using CookieList = std::vector<std::pair<std::string, std::string>>;
 
 /**
  * A class defining an interface that request handler can use to query
@@ -84,10 +94,21 @@ public:
   virtual ~Transport();
 
   void onRequestStart(const timespec &queueTime);
-  const timespec &getQueueTime() const { return m_queueTime;}
-  const timespec &getWallTime() const { return m_wallTime;}
-  const timespec &getCpuTime() const { return m_cpuTime;}
-  const int64_t &getInstructions() const { return m_instructions;}
+  const timespec &getQueueTime() const { return m_queueTime; }
+  const timespec &getWallTime() const { return m_wallTime; }
+  const timespec &getCpuTime() const { return m_cpuTime; }
+  const int64_t &getInstructions() const { return m_instructions; }
+  const int64_t &getSleepTime() const { return m_sleepTime; }
+  void incSleepTime(unsigned int seconds) { m_sleepTime += seconds; }
+  const int64_t &getuSleepTime() const { return m_usleepTime; }
+  void incuSleepTime(unsigned int useconds) { m_usleepTime += useconds; }
+  const int64_t &getnSleepTimeS() const { return m_nsleepTimeS; }
+  const int32_t &getnSleepTimeN() const { return m_nsleepTimeN; }
+  void incnSleepTime(unsigned long int seconds, unsigned int nseconds) {
+    m_nsleepTimeN += nseconds;
+    m_nsleepTimeS += seconds + (m_nsleepTimeN / 1000000000);
+    m_nsleepTimeN %= 1000000000;
+  }
 
   ///////////////////////////////////////////////////////////////////////////
   // Functions sub-classes have to implement.
@@ -98,6 +119,33 @@ public:
   virtual const char *getUrl() = 0;
   virtual const char *getRemoteHost() = 0;
   virtual uint16_t getRemotePort() = 0;
+  // The transport can override REMOTE_ADDR if it has one
+  virtual const char *getRemoteAddr() { return ""; }
+  // The transport can override the virtualhosts' docroot
+  virtual const std::string getDocumentRoot() { return ""; }
+  // The transport can say exactly what script to use
+  virtual const std::string getScriptFilename() { return ""; }
+  virtual const std::string getPathTranslated() { return ""; }
+  virtual const std::string getPathInfo() { return ""; }
+  virtual bool isPathInfoSet() {return false; }
+
+  /**
+   * Server Headers
+   */
+  virtual const char *getServerName() {
+    return "";
+  };
+  virtual const char *getServerAddr() {
+    return  RuntimeOption::ServerPrimaryIPv4.empty() ?
+       RuntimeOption::ServerPrimaryIPv6.c_str() :
+       RuntimeOption::ServerPrimaryIPv4.c_str();
+  };
+  virtual uint16_t getServerPort() {
+    return RuntimeOption::ServerPort;
+  };
+  virtual const char *getServerSoftware() {
+    return "HPHP";
+  };
 
   /**
    * POST request's data.
@@ -128,6 +176,7 @@ public:
    */
   virtual std::string getHeader(const char *name) = 0;
   virtual void getHeaders(HeaderMap &headers) = 0;
+  virtual void getTransportParams(HeaderMap &serverParams) {};
 
 
   /**
@@ -135,9 +184,9 @@ public:
    */
   void addHeaderNoLock(const char *name, const char *value);
   void addHeader(const char *name, const char *value);
-  void addHeader(CStrRef header);
+  void addHeader(const String& header);
   void replaceHeader(const char *name, const char *value);
-  void replaceHeader(CStrRef header);
+  void replaceHeader(const String& header);
   void removeHeader(const char *name);
   void removeAllHeaders();
   void getResponseHeaders(HeaderMap &headers);
@@ -147,11 +196,10 @@ public:
   /**
    * Content/MIME type related functions.
    */
-  void setMimeType(CStrRef mimeType);
+  void setMimeType(const String& mimeType);
   String getMimeType();
-  const char *getDefaultContentType() { return "text/html";}
-  bool sendDefaultContentType() { return m_sendContentType;}
-  void setDefaultContentType(bool send) { m_sendContentType = send;}
+  bool getUseDefaultContentType() { return m_sendContentType;}
+  void setUseDefaultContentType(bool send) { m_sendContentType = send;}
 
   /**
    * Can we gzip response?
@@ -165,8 +213,8 @@ public:
   /**
    * Set cookie response header.
    */
-  bool setCookie(CStrRef name, CStrRef value, int64_t expire = 0,
-                 CStrRef path = "", CStrRef domain = "", bool secure = false,
+  bool setCookie(const String& name, const String& value, int64_t expire = 0,
+                 const String& path = "", const String& domain = "", bool secure = false,
                  bool httponly = false, bool encode_url = true);
 
   /**
@@ -201,6 +249,41 @@ public:
   virtual void onSendEndImpl() {}
 
   /**
+   * Returns true if this transport supports server pushed resources
+   */
+  virtual bool supportsServerPush() { return false; }
+
+  /**
+   * Attempt to push the resource identified by host/path on this transport
+   *
+   * @param priority (3 bit priority, 0 = highest, 7 = lowest),
+   * @param headers HTTP headers for this resource
+   * @param body body bytes (optional)
+   * @param size length of @p body or 0
+   * @param eom true if no more body bytes are expected
+   *
+   * @return an ID that can be passed to pushResourceBody if more body
+   *         is being streamed later.  0 indicates that the push failed
+   *         immediately.
+   */
+  virtual int64_t pushResource(const char *host, const char *path,
+                               uint8_t priority, const Array& headers,
+                                const void *data, int size, bool eom) {
+    return 0;
+  };
+
+  /**
+   * Stream body and/or EOM marker for a pushed resource
+   *
+   * @param id ID returned by pushResource
+   * @param data body bytes (optional if eom is true)
+   * @param size length of @p body
+   * @param eom true if no more body bytes are expected
+   */
+  virtual void pushResourceBody(int64_t id, const void *data, int size,
+                                bool eom) {}
+
+  /**
    * Need this implementation to break keep-alive connections.
    */
   virtual bool isServerStopping() { return false;}
@@ -214,7 +297,7 @@ public:
    *   http://facebook.com/foo?x=1       server object is "/foo?x=1"
    *   http://facebook.com/foo/bar?x=1   server object is "/foo/bar?x=1"
    */
-  const char *getServerObject();
+  virtual const char *getServerObject();
 
   /**
    * We define a "command" as the part of URL without parameters:
@@ -286,29 +369,17 @@ public:
   /**
    * Sending back a response.
    */
-  void setResponse(int code, const char *info) {
-    assert(code != 500 || (info && *info)); // must have a reason for a 500
-    m_responseCode = code;
-    m_responseCodeInfo = info ? info : "";
-  }
+  void setResponse(int code, const char *info = nullptr);
   const std::string &getResponseInfo() const { return m_responseCodeInfo; }
   bool headersSent() { return m_headerSent;}
-  bool setHeaderCallback(CVarRef callback);
+  bool setHeaderCallback(const Variant& callback);
+  void sendRaw(void *data, int size, int code = 200,
+               bool compressed = false, bool chunked = false,
+               const char *codeInfo = nullptr);
 private:
-  void sendRawLocked(void *data, int size, int code = 200,
-                     bool compressed = false, bool chunked = false,
-                     const char *codeInfo = nullptr);
-public:
-  virtual void sendRaw(void *data, int size, int code = 200,
-                       bool compressed = false, bool chunked = false,
+  void sendRawInternal(const void *data, int size, int code = 200,
+                       bool compressed = false,
                        const char *codeInfo = nullptr);
-private:
-  void sendStringLocked(const char *data, int code = 200,
-                        bool compressed = false, bool chunked = false,
-                        const char * codeInfo = nullptr) {
-    sendRawLocked((void*)data, strlen(data), code, compressed, chunked,
-                  codeInfo);
-  }
 public:
   void sendString(const char *data, int code = 200, bool compressed = false,
                   bool chunked = false,
@@ -321,11 +392,10 @@ public:
     sendRaw((void*)data.c_str(), data.length(), code, compressed, chunked,
             codeInfo);
   }
-  void redirect(const char *location, int code, const char *info );
+  void redirect(const char *location, int code, const char *info = nullptr);
 
   // TODO: support rfc1867
-  virtual bool isUploadedFile(CStrRef filename);
-  virtual bool moveUploadedFile(CStrRef filename, CStrRef destination);
+  virtual bool isUploadedFile(const String& filename);
 
   int getResponseSize() const { return m_responseSize; }
   int getResponseCode() const { return m_responseCode; }
@@ -357,8 +427,8 @@ protected:
    * token's start char * addresses in ParamMaps. Therefore, this entire
    * process is very efficient without excessive string copying.
    */
-  typedef hphp_hash_map<const char *, std::vector<const char *>,
-                        hphp_hash<const char *>, eqstr> ParamMap;
+  typedef hphp_hash_map<const char*, std::vector<const char*>,
+                        cstr_hash, eqstr> ParamMap;
 
   // timers
   timespec m_queueTime;
@@ -366,6 +436,11 @@ protected:
   timespec m_cpuTime;
 
   int64_t m_instructions;
+
+  int64_t m_sleepTime;
+  int64_t m_usleepTime;
+  int64_t m_nsleepTimeS;
+  int32_t m_nsleepTimeN;
 
   // input
   char *m_url;
@@ -377,7 +452,7 @@ protected:
   // output
   bool m_chunkedEncoding;
   bool m_headerSent;
-  Variant m_headerCallback;
+  Cell m_headerCallback;
   bool m_headerCallbackDone;  // used to prevent infinite loops
   int m_responseCode;
   std::string m_responseCodeInfo;
@@ -385,11 +460,12 @@ protected:
   bool m_firstHeaderSet;
   std::string m_firstHeaderFile;
   int m_firstHeaderLine;
-  CookieMap m_responseCookies;
+  CookieList m_responseCookiesList;
   int m_responseSize;
   int m_responseTotalSize; // including added headers
   int m_responseSentSize;
   int64_t m_flushTimeUs;
+  bool m_sendEnded;
 
   std::vector<int> m_chunksSentSizes;
 
@@ -415,15 +491,15 @@ protected:
   void parsePostParams();
   static void parseQuery(char *query, ParamMap &params);
   static void urlUnescape(char *value);
-  bool splitHeader(CStrRef header, String &name, const char *&value);
+  bool splitHeader(const String& header, String &name, const char *&value);
+  std::list<std::string> getCookieLines();
 
-  String prepareResponse(const void *data, int size, bool &compressed,
-                         bool last);
-  bool moveUploadedFileHelper(CStrRef filename, CStrRef destination);
+  StringHolder prepareResponse(const void *data, int size, bool &compressed,
+                               bool last);
 
 private:
-  void prepareHeaders(bool compressed, bool chunked, const String &response,
-    const String& orig_response);
+  void prepareHeaders(bool compressed, bool chunked,
+    const StringHolder &response, const StringHolder& orig_response);
 };
 
 ///////////////////////////////////////////////////////////////////////////////

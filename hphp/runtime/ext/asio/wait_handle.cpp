@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -15,35 +15,37 @@
    +----------------------------------------------------------------------+
 */
 
-#include "hphp/runtime/ext/ext_asio.h"
+#include "hphp/runtime/ext/asio/wait_handle.h"
+
 #include "hphp/runtime/ext/ext_closure.h"
 #include "hphp/runtime/ext/asio/asio_session.h"
+#include "hphp/runtime/ext/asio/waitable_wait_handle.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-c_WaitHandle::c_WaitHandle(Class* cb)
-    : ExtObjectData(cb), m_resultOrException(make_tv<KindOfNull>()) {
-}
-
-c_WaitHandle::~c_WaitHandle() {
-}
+const StaticString s_result("<result>");
+const StaticString s_exception("<exception>");
 
 void c_WaitHandle::t___construct() {
-  throw NotSupportedException(__func__, "WTF? This is an abstract class");
+  throw_not_supported(
+      __func__, "WaitHandles cannot be constructed directly");
 }
 
-void c_WaitHandle::ti_setonjoincallback(CVarRef callback) {
-  if (!callback.isNull() && !callback.instanceof(c_Closure::s_cls)) {
-    Object e(SystemLib::AllocInvalidArgumentExceptionObject(
-      "Unable to set WaitHandle::onJoin: on_join_cb not a closure"));
-    throw e;
-  }
-  AsioSession::Get()->setOnJoinCallback(callback.getObjectDataOrNull());
+void c_WaitHandle::ti_setoniowaitentercallback(const Variant& callback) {
+  AsioSession::Get()->setOnIOWaitEnterCallback(callback);
+}
+
+void c_WaitHandle::ti_setoniowaitexitcallback(const Variant& callback) {
+  AsioSession::Get()->setOnIOWaitExitCallback(callback);
+}
+
+void c_WaitHandle::ti_setonjoincallback(const Variant& callback) {
+  AsioSession::Get()->setOnJoinCallback(callback);
 }
 
 Object c_WaitHandle::t_getwaithandle() {
-  return this;
+  always_assert(false);
 }
 
 // throws if cross-context cycle found
@@ -54,7 +56,7 @@ void c_WaitHandle::t_import() {
 
   context_idx_t ctx_idx = AsioSession::Get()->getCurrentContextIdx();
   if (ctx_idx) {
-    assert(dynamic_cast<c_WaitableWaitHandle*>(this));
+    assert(instanceof(c_WaitableWaitHandle::classof()));
     static_cast<c_WaitableWaitHandle*>(this)->enterContext(ctx_idx);
   }
 }
@@ -62,7 +64,7 @@ void c_WaitHandle::t_import() {
 Variant c_WaitHandle::t_join() {
   if (!isFinished()) {
     // run the full blown machinery
-    assert(dynamic_cast<c_WaitableWaitHandle*>(this));
+    assert(instanceof(c_WaitableWaitHandle::classof()));
     static_cast<c_WaitableWaitHandle*>(this)->join();
   }
 
@@ -95,7 +97,14 @@ int64_t c_WaitHandle::t_getid() {
 }
 
 String c_WaitHandle::t_getname() {
-  return getName();
+  if (isSucceeded()) {
+    return s_result;
+  } else if (isFailed()) {
+    return s_exception;
+  }
+
+  assert(instanceof(c_WaitableWaitHandle::classof()));
+  return static_cast<c_WaitableWaitHandle*>(this)->getName();
 }
 
 Object c_WaitHandle::t_getexceptioniffailed() {

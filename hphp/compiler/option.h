@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,25 +18,32 @@
 #define incl_HPHP_OPTION_H_
 
 #include "hphp/util/hdf.h"
+
+#include <folly/dynamic.h>
+
+#include <map>
+#include <set>
+#include <vector>
+#include "hphp/runtime/base/runtime-option.h"
 #include "hphp/util/string-bag.h"
-#include "hphp/util/base.h"
+#include "hphp/util/deprecated/base.h"
+#include "hphp/util/deprecated/declare-boost-types.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 DECLARE_BOOST_TYPES(BlockScope);
 DECLARE_BOOST_TYPES(FileScope);
 
+// Can we make sure this equals IniSettingMap?
+typedef folly::dynamic IniSettingMap;
+
 class Option {
 public:
-  /**
-   * Directory that has system HPHP files for loading builtin classes, etc.
-   */
-  static std::string GetSystemRoot();
 
   /**
    * Load options from different sources.
    */
-  static void Load(Hdf &config);
+  static void Load(const IniSettingMap& ini, Hdf &config);
   static void Load(); // load default options
 
   /**
@@ -107,6 +114,13 @@ public:
   static bool PostOptimization;
   static bool AnalyzePerfectVirtuals;
   static bool HardTypeHints;
+  static bool HardReturnTypeHints;
+
+  /*
+   * Flags that only affect HHBBC right now.  See hhbbc/hhbbc.h for
+   * description.
+   */
+  static bool HardConstProp;
 
   /**
    * Separate compilation
@@ -120,7 +134,6 @@ public:
   static bool GeneratePickledPHP;
   static bool GenerateInlinedPHP;
   static bool GenerateTrimmedPHP;
-  static bool GenerateInferredTypes;  // comments on constant/variable tables
   static bool ConvertSuperGlobals;    // $GLOBALS['var'] => global $var
   static bool ConvertQOpExpressions;  // $var = $exp ? $yes : $no => if-else
   static std::string ProgramPrologue;
@@ -131,7 +144,7 @@ public:
   static std::vector<std::string> DynamicMethodPostfixes;
   static std::vector<std::string> DynamicClassPrefixes;
   static std::vector<std::string> DynamicClassPostfixes;
-  static std::set<std::string> DynamicInvokeFunctions;
+  static std::set<std::string, stdltistr> DynamicInvokeFunctions;
   static std::set<std::string> VolatileClasses;
   static std::map<std::string,std::string> AutoloadClassMap;
   static std::map<std::string,std::string> AutoloadFuncMap;
@@ -155,7 +168,6 @@ public:
    * A somewhat unique prefix for system identifiers.
    */
   static std::string IdPrefix;
-  static std::string LabelEscape;
   static std::string LambdaPrefix;
   static std::string Tab;
 
@@ -163,7 +175,6 @@ public:
    * Name resolution helpers.
    */
   static const char *UserFilePrefix;
-  static const char *ClassHeaderPrefix;
 
   /**
    * Turn it off for cleaner unit tests.
@@ -216,12 +227,15 @@ public:
   static bool ParseTimeOpts;
   static bool OutputHHBC;
   static bool EnableHipHopSyntax;
+  static bool EnableZendCompat;
   static bool JitEnableRenameFunction;
   static bool EnableHipHopExperimentalSyntax;
   static bool EnableShortTags;
   static bool EnableAspTags;
   static bool EnableXHP;
-  static bool EnableFinallyStatement;
+  static bool IntsOverflowToInts;
+  static HackStrictOption StrictArrayFillKeys;
+  static HackStrictOption DisallowDynamicVarEnvFuncs;
   static int ParserThreadCount;
 
   static int GetScannerType();
@@ -237,53 +251,47 @@ public:
    * Optimizations
    */
   static int InvokeFewArgsCount;
-  static bool InvokeWithSpecificArgs;
-  static bool FlattenInvoke;
   static int InlineFunctionThreshold;
-  static bool UseVirtualDispatch;
   static bool EliminateDeadCode;
-  static bool CopyProp;
   static bool LocalCopyProp;
-  static bool StringLoopOpts;
   static int AutoInline;
   static bool ArrayAccessIdempotent;
 
   /**
    * Output options
    */
-  static bool GenerateCppLibCode;
-  static bool GenerateSourceInfo;
   static bool GenerateDocComments;
-  static bool ControlFlow;
   static bool VariableCoalescing;
   static bool DumpAst;
   static bool WholeProgram;
+  static bool UseHHBBC;  // see hhbbc/README
   static bool RecordErrors;
   static std::string DocJson; // filename to dump doc JSON to
 
-  static void setHookHandler(void (*hookHandler)(Hdf &config)) {
-    m_hookHandler = hookHandler;
-  }
-
-  static bool (*PersistenceHook)(BlockScopeRawPtr scope, FileScopeRawPtr fs);
 private:
-  /**
-   * Directory that has system HPHP files for loading builtin classes, etc.
-   */
-  static std::string SystemRoot;
   static StringBag OptionStrings;
 
-  static void LoadRootHdf(const Hdf &roots, std::map<std::string,
-                          std::string> &map);
-  static void LoadRootHdf(const Hdf &roots, std::vector<std::string> &vec);
+  static void LoadRootHdf(const IniSettingMap& ini, const Hdf &roots,
+                          std::map<std::string, std::string> &map);
+  static void LoadRootHdf(const IniSettingMap& ini, const Hdf &roots,
+                          std::vector<std::string> &vec);
   static void OnLoad();
 
   static bool IsDynamic(const std::string &name,
                         const std::vector<std::string> &prefixes,
                         const std::vector<std::string> &postfixes);
-
-  static void (*m_hookHandler)(Hdf &config);
 };
+
+//////////////////////////////////////////////////////////////////////
+
+/*
+ * Hook called after Option is set up to propagate various options to
+ * HHBBC's option structure.
+ *
+ * This exists this way because we don't want to have libhhbbc depend
+ * on all of libhphp_analysis---the dependency goes the other way.
+ */
+void initialize_hhbbc_options();
 
 ///////////////////////////////////////////////////////////////////////////////
 }

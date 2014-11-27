@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,6 +16,11 @@
 
 #ifndef incl_HPHP_EVAL_DEBUGGER_BREAK_POINT_H_
 #define incl_HPHP_EVAL_DEBUGGER_BREAK_POINT_H_
+
+#include <memory>
+#include <vector>
+#include <list>
+#include <utility>
 
 #include "hphp/runtime/debugger/debugger_thrift_buffer.h"
 
@@ -60,7 +65,7 @@ enum InterruptType : int8_t {
 // grabbing source data out of the corresponding Unit.
 class InterruptSite {
 public:
-  InterruptSite(bool hardBreakPoint, CVarRef e);
+  InterruptSite(bool hardBreakPoint, const Variant& e);
 
   const InterruptSite *getCallingSite() const;
   const char *getFile() const { return m_file.data(); }
@@ -77,7 +82,7 @@ public:
 
   // Optionally provided by VM, could be an exception object, a string, or null
   // depending on the context.
-  CVarRef getError() { return m_error; }
+  const Variant& getError() { return m_error; }
 
   std::string &url() const { return m_url; }
   std::string desc() const;
@@ -90,7 +95,7 @@ public:
   bool funcEntry() const { return m_funcEntry; }
 
 private:
-  InterruptSite(ActRec* fp, Offset offset, CVarRef error);
+  InterruptSite(ActRec* fp, Offset offset, const Variant& error);
   void Initialize(ActRec *fp);
 
   Variant m_error;
@@ -117,9 +122,13 @@ private:
 
 ///////////////////////////////////////////////////////////////////////////////
 
-DECLARE_BOOST_TYPES(DFunctionInfo);
-DECLARE_BOOST_TYPES(BreakPointInfo);
-DECLARE_BOOST_TYPES(DebuggerProxy);
+struct BreakPointInfo;
+struct DebuggerProxy;
+struct DFunctionInfo;
+
+using BreakPointInfoPtr = std::shared_ptr<BreakPointInfo>;
+using DebuggerProxyPtr = std::shared_ptr<DebuggerProxy>;
+
 class BreakPointInfo {
 public:
   // The state of the break point
@@ -174,9 +183,11 @@ public:
   void sendImpl(int version, DebuggerThriftBuffer &thrift);
   void recvImpl(int version, DebuggerThriftBuffer &thrift);
 
-  static void SendImpl(int version, const BreakPointInfoPtrVec &bps,
+  static void SendImpl(int version,
+                       const std::vector<BreakPointInfoPtr>& bps,
                        DebuggerThriftBuffer &thrift);
-  static void RecvImpl(int version, BreakPointInfoPtrVec &bps,
+  static void RecvImpl(int version,
+                       std::vector<BreakPointInfoPtr>& bps,
                        DebuggerThriftBuffer &thrift);
 
   bool breakable(int stackDepth, Offset offset) const;
@@ -198,7 +209,7 @@ public:
   int32_t m_char2;
 
   // class::func()
-  DFunctionInfoPtrVec m_funcs;
+  std::vector<std::shared_ptr<DFunctionInfo>> m_funcs;
 
   std::string getNamespace() const;
   std::string getClass() const;
@@ -246,7 +257,7 @@ private:
   int32_t parseFileLocation(const std::string &str, int32_t offset);
   bool parseLines(const std::string &token);
 
-  bool checkExceptionOrError(CVarRef e);
+  bool checkExceptionOrError(const Variant& e);
   bool checkUrl(std::string &url);
   bool checkLines(int line);
   bool checkStack(InterruptSite &site);

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,11 +13,15 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/runtime/debugger/cmd/cmd_list.h"
+
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include "hphp/runtime/debugger/cmd/cmd_info.h"
 #include "hphp/runtime/base/file.h"
-#include "hphp/runtime/ext/ext_file.h"
+#include "hphp/runtime/ext/std/ext_std_file.h"
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
@@ -120,7 +124,7 @@ void CmdList::getListLocation(DebuggerClient &client, int &lineFocus0,
 void CmdList::listEvalCode(DebuggerClient &client) {
   assert(m_file.empty());
 
-  string evalCode = client.getCode();
+  std::string evalCode = client.getCode();
   if (evalCode.empty()) {
     client.error("There is no current source file.");
   } else {
@@ -143,7 +147,7 @@ bool CmdList::listFileRange(DebuggerClient &client,
     m_line2 = tmp;
   }
 
-  CmdListPtr res = client.xend<CmdList>(this);
+  auto res = client.xend<CmdList>(this);
   if (res->m_code.isString()) {
     if (!client.code(res->m_code.toString(), m_line1, m_line2,
                      lineFocus0, charFocus0, lineFocus1, charFocus1)) {
@@ -158,7 +162,7 @@ bool CmdList::listFileRange(DebuggerClient &client,
 const StaticString
   s_methods("methods"),
   s_file("file"),
-  s_line1("line2"),
+  s_line1("line1"),
   s_line2("line2");
 
 // Sends an Info command to the server to retrieve source location
@@ -170,11 +174,11 @@ const StaticString
 // needed for this command.
 bool CmdList::listFunctionOrClass(DebuggerClient &client) {
   assert(client.argCount() == 1);
-  CmdInfoPtr cmdInfo(new CmdInfo());
+  auto cmdInfo = std::make_shared<CmdInfo>();
   DebuggerCommandPtr deleter(cmdInfo);
-  string subsymbol;
+  std::string subsymbol;
   cmdInfo->parseOneArg(client, subsymbol);
-  CmdInfoPtr cmd = client.xend<CmdInfo>(cmdInfo.get());
+  auto cmd = client.xend<CmdInfo>(cmdInfo.get());
   Array info = cmd->getInfo();
   if (info.empty()) return false;
   always_assert(info.size() == 1);
@@ -184,7 +188,7 @@ bool CmdList::listFunctionOrClass(DebuggerClient &client) {
     String key = CmdInfo::FindSubSymbol(funcInfo[s_methods].toArray(),
                                         subsymbol);
     if (key.isNull()) return false;
-    funcInfo = funcInfo[s_methods][key].toArray();
+    funcInfo = funcInfo[s_methods].toArray()[key].toArray();
   }
   String file = funcInfo[s_file].toString();
   int line1 = funcInfo[s_line1].toInt32();
@@ -219,7 +223,7 @@ void CmdList::onClient(DebuggerClient &client) {
   int line = 0;
   m_line1 = m_line2 = 0;
   if (client.argCount() == 1) {
-    string arg = client.argValue(1);
+    std::string arg = client.argValue(1);
     if (DebuggerClient::IsValidNumber(arg)) {
       line = atoi(arg.c_str());
       if (line <= 0) {
@@ -229,14 +233,14 @@ void CmdList::onClient(DebuggerClient &client) {
       }
       m_line1 = line - DebuggerClient::CodeBlockSize/2;
       m_line2 = m_line1 + DebuggerClient::CodeBlockSize;
-    } else if (arg.find("::") != string::npos) {
+    } else if (arg.find("::") != std::string::npos) {
       if (!listFunctionOrClass(client)) {
         client.error("Unable to read specified method.");
       }
       return;
     } else {
       size_t pos = arg.find(':');
-      if (pos != string::npos) {
+      if (pos != std::string::npos) {
         m_file = arg.substr(0, pos);
         if (m_file.empty()) {
           client.error("File name cannot be empty.");
@@ -246,9 +250,9 @@ void CmdList::onClient(DebuggerClient &client) {
         arg = arg.substr(pos + 1);
       }
       pos = arg.find('-');
-      if (pos != string::npos) {
-        string line1 = arg.substr(0, pos);
-        string line2 = arg.substr(pos + 1);
+      if (pos != std::string::npos) {
+        std::string line1 = arg.substr(0, pos);
+        std::string line2 = arg.substr(pos + 1);
         if (!DebuggerClient::IsValidNumber(line1) ||
             !DebuggerClient::IsValidNumber(line2)) {
           if (m_file.empty()) {
@@ -278,6 +282,9 @@ void CmdList::onClient(DebuggerClient &client) {
       } else {
         if (!DebuggerClient::IsValidNumber(arg)) {
           if (m_file.empty()) {
+            if (client.argCount() == 1 && listFunctionOrClass(client)) {
+              return;
+            }
             m_file = arg;
             m_line1 = 1;
             m_line2 = DebuggerClient::CodeBlockSize;
@@ -320,12 +327,9 @@ void CmdList::onClient(DebuggerClient &client) {
     }
   }
 
-  if (listFileRange(client, line, charFocus0, lineFocus1, charFocus1)) {
-    return;
-  } else if (client.argCount() != 1 || !listFunctionOrClass(client)) {
-    client.error(
-      "Unable to read specified function, class or source file location.");
-    return;
+   if (!listFileRange(client, line, charFocus0, lineFocus1, charFocus1)) {
+     client.error(
+       "Unable to read specified function, class or source file location.");
   }
 }
 
@@ -338,7 +342,7 @@ void CmdList::onClient(DebuggerClient &client) {
 bool CmdList::onServer(DebuggerProxy &proxy) {
   auto savedWarningFrequency = RuntimeOption::WarningFrequency;
   RuntimeOption::WarningFrequency = 0;
-  m_code = f_file_get_contents(m_file.c_str());
+  m_code = HHVM_FN(file_get_contents)(m_file.c_str());
   if (!proxy.isLocal() && !m_code.toBoolean() && m_file[0] != '/') {
     DSandboxInfo info = proxy.getSandbox();
     if (info.m_path.empty()) {
@@ -346,11 +350,12 @@ bool CmdList::onServer(DebuggerProxy &proxy) {
                     info.desc().c_str());
     } else {
       std::string full_path = info.m_path + m_file;
-      m_code = f_file_get_contents(full_path.c_str());
+      m_code = HHVM_FN(file_get_contents)(full_path.c_str());
     }
   }
   RuntimeOption::WarningFrequency = savedWarningFrequency;
-  if (!m_code.toBoolean() && m_file == "systemlib.php") {
+  if (!m_code.toBoolean() &&
+    m_file.find("systemlib.php") == m_file.length() - 13) {
     m_code = SystemLib::s_source;
   }
   return proxy.sendToClient((DebuggerCommand*)this);
@@ -363,7 +368,7 @@ Variant CmdList::GetSourceFile(DebuggerClient &client,
                                const std::string &file) {
   CmdList cmd;
   cmd.m_file = file;
-  CmdListPtr res = client.xend<CmdList>(&cmd);
+  auto res = client.xend<CmdList>(&cmd);
   return res->m_code;
 }
 

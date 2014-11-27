@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -19,7 +19,9 @@
 #define PHP_ENCODING_H
 
 #include "hphp/runtime/ext/soap/xml.h"
+#include <memory>
 #include "hphp/runtime/base/complex-types.h"
+#include "hphp/util/hash-map-typedefs.h"
 
 ///////////////////////////////////////////////////////////////////////////////
 // defines
@@ -180,13 +182,13 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-DECLARE_BOOST_TYPES(soapMapping);
 struct soapMapping {
   Variant to_xml;
   Variant to_zval;
 };
 
-class sdlType;
+struct sdlType;
+
 class encodeType {
 public:
   encodeType() : type(0), sdl_type(NULL) {}
@@ -194,46 +196,46 @@ public:
   int type;
   std::string type_str;
   std::string ns;
-  sdlType *sdl_type; // weak pointer
-  soapMappingPtr map;
+  sdlType* sdl_type; // weak pointer
+  std::shared_ptr<soapMapping> map;
 };
 typedef encodeType* encodeTypePtr;
 
-DECLARE_BOOST_TYPES(encode);
-typedef StringToencodePtrMap encodeMap;
-typedef boost::shared_ptr<encodeMap> encodeMapPtr;
 struct encode {
   encodeType details;
   Variant (*to_zval)(encodeTypePtr type, xmlNodePtr data);
-  xmlNodePtr (*to_xml)(encodeTypePtr type, CVarRef data, int style,
+  xmlNodePtr (*to_xml)(encodeTypePtr type, const Variant& data, int style,
                        xmlNodePtr parent);
 };
+using encodePtr = std::shared_ptr<encode>;
+typedef hphp_string_hash_map<std::shared_ptr<encode>,encode> encodeMap;
+typedef std::shared_ptr<encodeMap> encodeMapPtr;
 
 struct encodeStatic {
   int type;
   const char *type_str;
   const char *ns;
   Variant (*to_zval)(encodeTypePtr type, xmlNodePtr data);
-  xmlNodePtr (*to_xml)(encodeTypePtr type, CVarRef data, int style,
+  xmlNodePtr (*to_xml)(encodeTypePtr type, const Variant& data, int style,
                        xmlNodePtr parent);
 };
 
 ///////////////////////////////////////////////////////////////////////////////
 
 /* Master functions all encode/decode should be called thur these functions */
-xmlNodePtr master_to_xml(encodePtr encode, CVarRef data, int style,
+xmlNodePtr master_to_xml(encodePtr encode, const Variant& data, int style,
                          xmlNodePtr parent);
 Variant master_to_zval(encodePtr encode, xmlNodePtr data);
 
 /* user defined mapping */
-xmlNodePtr to_xml_user(encodeTypePtr type, CVarRef data, int style,
+xmlNodePtr to_xml_user(encodeTypePtr type, const Variant& data, int style,
                        xmlNodePtr parent);
 Variant to_zval_user(encodeTypePtr type, xmlNodePtr node);
 
 void whiteSpace_replace(xmlChar* str);
 void whiteSpace_collapse(xmlChar* str);
 
-xmlNodePtr sdl_guess_convert_xml(encodeTypePtr enc, CVarRef data,
+xmlNodePtr sdl_guess_convert_xml(encodeTypePtr enc, const Variant& data,
                                  int style, xmlNodePtr parent);
 Variant sdl_guess_convert_zval(encodeTypePtr enc, xmlNodePtr data);
 

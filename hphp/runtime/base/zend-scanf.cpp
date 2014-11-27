@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1998-2010 Zend Technologies Ltd. (http://www.zend.com) |
    +----------------------------------------------------------------------+
    | This source file is subject to version 2.00 of the Zend license,     |
@@ -158,9 +158,9 @@ static const char *BuildCharSet(CharSet *cset, const char *format) {
     ch = end++;
   }
 
-  cset->chars = (char *)malloc(end - format - 1);
+  cset->chars = (char *)smart_malloc(end - format - 1);
   if (nranges > 0) {
-    cset->ranges = (::Range*)malloc(sizeof(::Range) * nranges);
+    cset->ranges = (::Range*)smart_malloc(sizeof(::Range) * nranges);
   } else {
     cset->ranges = nullptr;
   }
@@ -267,9 +267,9 @@ static int CharInSet(CharSet *cset, int c) {
  *----------------------------------------------------------------------
  */
 static void ReleaseCharSet(CharSet *cset) {
-  free((char *)cset->chars);
+  smart_free((char *)cset->chars);
   if (cset->ranges) {
-    free((char *)cset->ranges);
+    smart_free((char *)cset->ranges);
   }
 }
 
@@ -310,7 +310,7 @@ static int ValidateFormat(const char *format, int numVars, int *totalSubs) {
    * a variable is multiply assigned or left unassigned.
    */
   if (numVars > nspace) {
-    nassign = (int*)malloc(sizeof(int) * numVars);
+    nassign = (int*)smart_malloc(sizeof(int) * numVars);
     nspace = numVars;
   }
   for (i = 0; i < nspace; i++) {
@@ -382,7 +382,7 @@ notXpg:
     gotSequential = 1;
     if (gotXpg) {
 mixedXPG:
-      if (nassign != staticAssign) free((char *)nassign);
+      if (nassign != staticAssign) smart_free((char *)nassign);
       throw_invalid_argument
         ("format: cannot mix \"%%\" and \"%%n$\" conversion specifiers");
       return SCAN_ERROR_INVALID_FORMAT;
@@ -469,12 +469,12 @@ xpgCheckDone:
       }
       break;
     badSet:
-      if (nassign != staticAssign) free((char *)nassign);
+      if (nassign != staticAssign) smart_free((char *)nassign);
       throw_invalid_argument("format: Unmatched [ in format string");
       return SCAN_ERROR_INVALID_FORMAT;
 
     default:
-      if (nassign != staticAssign) free((char *)nassign);
+      if (nassign != staticAssign) smart_free((char *)nassign);
       throw_invalid_argument("Bad scan conversion character \"%c\"", *ch);
       return SCAN_ERROR_INVALID_FORMAT;
     }
@@ -493,12 +493,12 @@ xpgCheckDone:
           nspace += STATIC_LIST_SIZE;
         }
         if (nassign == staticAssign) {
-          nassign = (int*)malloc(nspace * sizeof(int));
+          nassign = (int*)smart_malloc(nspace * sizeof(int));
           for (i = 0; i < STATIC_LIST_SIZE; ++i) {
             nassign[i] = staticAssign[i];
           }
         } else {
-          nassign = (int*)realloc((void *)nassign, nspace * sizeof(int));
+          nassign = (int*)smart_realloc((void *)nassign, nspace * sizeof(int));
         }
         for (i = value; i < nspace; i++) {
           nassign[i] = 0;
@@ -524,7 +524,7 @@ xpgCheckDone:
   }
   for (i = 0; i < numVars; i++) {
     if (nassign[i] > 1) {
-      if (nassign != staticAssign) free((char *)nassign);
+      if (nassign != staticAssign) smart_free((char *)nassign);
       throw_invalid_argument
         ("format: Variable is assigned by multiple \"%%n$\" specifiers");
       return SCAN_ERROR_INVALID_FORMAT;
@@ -533,18 +533,18 @@ xpgCheckDone:
        * If the space is empty, and xpgSize is 0 (means XPG wasn't
        * used, and/or numVars != 0), then too many vars were given
        */
-      if (nassign != staticAssign) free((char *)nassign);
+      if (nassign != staticAssign) smart_free((char *)nassign);
       throw_invalid_argument
         ("format: Variable is not assigned by any conversion specifiers");
       return SCAN_ERROR_INVALID_FORMAT;
     }
   }
 
-  if (nassign != staticAssign) free((char *)nassign);
+  if (nassign != staticAssign) smart_free((char *)nassign);
   return SCAN_SUCCESS;
 
 badIndex:
-  if (nassign != staticAssign) free((char *)nassign);
+  if (nassign != staticAssign) smart_free((char *)nassign);
   if (gotXpg) {
     throw_invalid_argument
       ("format: \"%%n$\" argument index out of range");
@@ -569,7 +569,7 @@ int string_sscanf(const char *string, const char *format, int numVars,
                   Variant &return_value) {
   int  nconversions;
   int  totalVars = -1;
-  int  value;
+  int64_t value;
   char *end;
   const char *baseString;
   char op   = 0;
@@ -582,6 +582,8 @@ int string_sscanf(const char *string, const char *format, int numVars,
   int  flags;
   char buf[64];  /* Temporary buffer to hold scanned number
                   * strings before they are passed to strtoul() */
+
+  Array returnArray;
 
   /*
    * Check for errors in the format string.
@@ -678,7 +680,7 @@ int string_sscanf(const char *string, const char *format, int numVars,
     switch (*ch) {
     case 'n':
       if (!(flags & SCAN_SUPPRESS)) {
-        return_value.append((int)(string - baseString));
+        returnArray.append((int)(string - baseString));
       }
       nconversions++;
       continue;
@@ -789,7 +791,7 @@ int string_sscanf(const char *string, const char *format, int numVars,
         }
       }
       if (!(flags & SCAN_SUPPRESS)) {
-        return_value.append(String(string, end-string, CopyString));
+        returnArray.append(String(string, end-string, CopyString));
       }
       string = end;
       break;
@@ -822,7 +824,7 @@ int string_sscanf(const char *string, const char *format, int numVars,
         goto done;
       }
       if (!(flags & SCAN_SUPPRESS)) {
-        return_value.append(String(string, end-string, CopyString));
+        returnArray.append(String(string, end-string, CopyString));
       }
       string = end;
       break;
@@ -944,12 +946,12 @@ int string_sscanf(const char *string, const char *format, int numVars,
        */
       if (!(flags & SCAN_SUPPRESS)) {
         *end = '\0';
-        value = (int) (*fn)(buf, nullptr, base);
+        value = (int64_t) (*fn)(buf, nullptr, base);
         if ((flags & SCAN_UNSIGNED) && (value < 0)) {
-          snprintf(buf, sizeof(buf), "%u", value); /* INTL: ISO digit */
-          return_value.append(String(buf, CopyString));
+          snprintf(buf, sizeof(buf), "%lu", (long)value); /* INTL: ISO digit */
+          returnArray.append(String(buf, CopyString));
         } else {
-          return_value.append(value);
+          returnArray.append(value);
         }
       }
       break;
@@ -1046,7 +1048,7 @@ int string_sscanf(const char *string, const char *format, int numVars,
         double dvalue;
         *end = '\0';
         dvalue = strtod(buf, nullptr);
-        return_value.append(dvalue);
+        returnArray.append(dvalue);
       }
       break;
     } /* switch (op) */
@@ -1060,6 +1062,7 @@ done:
   } else if (nconversions < totalVars) {
     /* TODO: not all elements converted. we need to prune the list - cc */
   }
+  return_value = returnArray;
   return SCAN_SUCCESS;
 }
 

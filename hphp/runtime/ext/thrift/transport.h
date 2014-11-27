@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -22,7 +22,7 @@
 #include "hphp/util/logger.h"
 
 #include <sys/types.h>
-#include "netinet/in.h"
+#include <netinet/in.h>
 #include <unistd.h>
 #if defined(__FreeBSD__)
 # include <sys/endian.h>
@@ -93,6 +93,7 @@ class PHPTransport {
 public:
   static StaticString s_getTransport;
   static StaticString s_flush;
+  static StaticString s_onewayFlush;
   static StaticString s_write;
   static StaticString s_putBack;
   static StaticString s_read;
@@ -105,6 +106,8 @@ public:
   static StaticString s_ktype;
   static StaticString s_vtype;
   static StaticString s_etype;
+  static StaticString s_format;
+  static StaticString s_collection;
 
 public:
   Object protocol() { return p; }
@@ -112,7 +115,7 @@ public:
 protected:
   PHPTransport() {}
 
-  void construct_with_zval(CObjRef _p, size_t _buffer_size) {
+  void construct_with_zval(const Object& _p, size_t _buffer_size) {
     buffer = reinterpret_cast<char*>(malloc(_buffer_size));
     buffer_ptr = buffer;
     buffer_used = 0;
@@ -136,7 +139,7 @@ protected:
 
 class PHPOutputTransport : public PHPTransport {
 public:
-  explicit PHPOutputTransport(CObjRef _p, size_t _buffer_size = 8192) {
+  explicit PHPOutputTransport(const Object& _p, size_t _buffer_size = 8192) {
     construct_with_zval(_p, _buffer_size);
   }
 
@@ -210,9 +213,17 @@ public:
     directFlush();
   }
 
+  void onewayFlush() {
+    writeBufferToTransport();
+    directOnewayFlush();
+  }
+
 protected:
   void directFlush() {
     t->o_invoke_few_args(s_flush, 0);
+  }
+  void directOnewayFlush() {
+    t->o_invoke_few_args(s_onewayFlush, 0);
   }
   void directWrite(const char* data, size_t len) {
     t->o_invoke_few_args(s_write, 1, String(data, len, CopyString));

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,10 +15,12 @@
 */
 
 #include "hphp/runtime/debugger/cmd/cmd_extension.h"
-#include "hphp/runtime/ext/ext_array.h"
+#include <set>
+#include <vector>
+#include "hphp/runtime/ext/array/ext_array.h"
 #include "hphp/util/text-art.h"
 
-using namespace HPHP::Util::TextArt;
+using namespace HPHP::TextArt;
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
@@ -47,9 +49,9 @@ void CmdExtension::list(DebuggerClient &client) {
   } else {
     // This is cheating, assuming server has same list of extensions.
     Array exts = Extension::GetLoadedExtensions();
-    vector<std::string> items;
+    std::vector<std::string> items;
     for (ArrayIter iter(exts); iter; ++iter) {
-      items.push_back(iter.second().toString()->toCPPString());
+      items.push_back(iter.second().toString().toCppString());
     }
     client.addCompletion(items);
   }
@@ -75,7 +77,7 @@ void CmdExtension::help(DebuggerClient &client) {
 void CmdExtension::onClient(DebuggerClient &client) {
   if (DebuggerCommand::displayedHelp(client)) return;
   m_args = *client.args();
-  CmdExtensionPtr cmd = client.xend<CmdExtension>(this);
+  auto cmd = client.xend<CmdExtension>(this);
   if (cmd->m_out.empty()) {
     client.error(cmd->m_err);
   } else {
@@ -98,7 +100,7 @@ bool CmdExtension::processList(DebuggerProxy &proxy) {
     assert(ext);
     if (ext) {
       int support = ext->debuggerSupport();
-      string line;
+      std::string line;
       line += (support & IDebuggable::SupportInfo) ? "Yes     " : "        ";
       line += (support & IDebuggable::SupportDump) ? "Yes     " : "        ";
       line += (support & IDebuggable::SupportVerb) ? "Yes     " : "        ";
@@ -128,7 +130,7 @@ bool CmdExtension::onServer(DebuggerProxy &proxy) {
     return processList(proxy);
   }
 
-  string name = m_args[1];
+  std::string name = m_args[1];
   Extension *ext = Extension::GetExtension(name);
   if (ext) {
     if (m_args.size() == 2) {
@@ -148,8 +150,8 @@ bool CmdExtension::onServer(DebuggerProxy &proxy) {
       }
     } else {
       if (ext->debuggerSupport() & IDebuggable::SupportVerb) {
-        string verb = m_args[2];
-        StringVec args;
+        std::string verb = m_args[2];
+        std::vector<std::string> args;
         if (m_args.size() > 3) {
           args.insert(args.end(), m_args.begin() + 3, m_args.end());
         }

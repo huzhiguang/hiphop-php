@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -39,13 +39,18 @@ TRACE_SET_MOD(tprefix);
 namespace Trace {
 
 int levels[NumModules];
+__thread int tl_levels[NumModules];
+__thread int indentDepth = 0;
+
 static FILE* out;
 
-const char *tokNames[] = {
+static const char *tokNames[] = {
 #define TM(x) #x,
   TRACE_MODULES
 #undef TM
 };
+
+namespace {
 
 /*
  * Dummy class to get some code to run before main().
@@ -87,7 +92,8 @@ class Init {
           levels[mod] = level;
         }
         if (mod == Trace::minstr ||
-            mod == Trace::interpOne) {
+            mod == Trace::interpOne ||
+            mod == Trace::dispatchBB) {
           levels[Trace::statgroups] = std::max(levels[Trace::statgroups], 1);
         }
       }
@@ -102,6 +108,8 @@ class Init {
 
 Init i;
 
+}
+
 const char* moduleName(Module mod) {
   return tokNames[mod];
 }
@@ -114,7 +122,8 @@ void flush() {
 
 void vtrace(const char *fmt, va_list ap) {
   static pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;
-  if (moduleEnabledRelease(Trace::ringbuffer, 1)) {
+  static bool hphp_trace_ringbuffer = getenv("HPHP_TRACE_RINGBUFFER");
+  if (hphp_trace_ringbuffer) {
     vtraceRingbuffer(fmt, ap);
   } else {
     ONTRACE(1, pthread_mutex_lock(&mtx));
@@ -164,4 +173,3 @@ std::string prettyNode(const char* name, const std::string& s) {
 }
 
 } } // HPHP::Trace
-

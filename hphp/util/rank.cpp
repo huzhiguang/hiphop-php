@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,10 +13,13 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
+#include "hphp/util/rank.h"
 
+#include <cstdio>
+#include <cstdint>
 #include <stack>
+#include <cinttypes>
 
-#include "hphp/util/base.h"
 #include "hphp/util/mutex.h"
 #include "hphp/util/process.h"
 
@@ -103,7 +106,7 @@ void popRank(Rank rank) {
     }
   }
   // If you hit this, you popped a rank that was never pushed.
-  NOT_REACHED();
+  not_reached();
 }
 #endif
 

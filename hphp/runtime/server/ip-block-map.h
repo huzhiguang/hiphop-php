@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,7 +19,8 @@
 
 #include "hphp/util/hdf.h"
 #include "hphp/runtime/base/types.h"
-#include "netinet/in.h"
+#include "hphp/runtime/base/ini-setting.h"
+#include <netinet/in.h>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -27,7 +28,6 @@ namespace HPHP {
 // configuration, then is used to test candidate addresses to see if they
 // fall into one of the forbidden networks for a particular request type.
 
-DECLARE_BOOST_TYPES(IpBlockMap);
 class IpBlockMap {
 public:
   // Reads a textual IPv4 or IPv6 address, possibly including a bit count,
@@ -38,7 +38,7 @@ public:
                               int &significant_bits);
 
 public:
-  explicit IpBlockMap(Hdf config);
+  explicit IpBlockMap(const IniSetting::Map& ini, Hdf config);
 
   bool isBlocking(const std::string &command, const std::string &ip) const;
 
@@ -77,16 +77,14 @@ public:
   };
 
 private:
-  DECLARE_BOOST_TYPES(Acl);
-  class Acl {
-  public:
+  struct Acl {
     Acl();
-
     BinaryPrefixTrie m_networks; // prefix => true: allow; false: deny
   };
-  StringToAclPtrMap m_acls; // location => acl
+  hphp_string_hash_map<std::shared_ptr<Acl>,Acl> m_acls; // location => acl
 
-  static void LoadIpList(AclPtr acl, Hdf hdf, bool allow);
+  static void LoadIpList(std::shared_ptr<Acl> acl, const IniSetting::Map& ini,
+                         Hdf hdf, bool allow);
 };
 
 ///////////////////////////////////////////////////////////////////////////////

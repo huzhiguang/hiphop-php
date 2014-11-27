@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -17,8 +17,6 @@
 
 #ifndef php_mailparse_rfc822_h
 #define php_mailparse_rfc822_h
-
-#include "hphp/util/base.h"
 
 typedef struct _php_rfc822_token php_rfc822_token_t;
 typedef struct _php_rfc822_tokenized php_rfc822_tokenized_t;

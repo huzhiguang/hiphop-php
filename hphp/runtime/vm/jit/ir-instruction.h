@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,51 +17,19 @@
 #ifndef incl_HPHP_VM_IRINSTRUCTION_H_
 #define incl_HPHP_VM_IRINSTRUCTION_H_
 
-#include "hphp/runtime/vm/jit/ir.h"
+#include "hphp/runtime/vm/jit/bc-marker.h"
+#include "hphp/runtime/vm/jit/ir-opcode.h"
 #include "hphp/runtime/vm/jit/edge.h"
 #include "hphp/runtime/vm/jit/extra-data.h"
 
-namespace HPHP { namespace JIT {
+namespace HPHP { namespace jit {
+//////////////////////////////////////////////////////////////////////
 
-/*
- * BCMarker holds the location of a specific bytecode instruction, along with
- * the offset from vmfp to vmsp at the beginning of the instruction. Every
- * IRInstruction has one to keep track of which bytecode instruction it came
- * from.
- */
-struct BCMarker {
-  const Func* func;
-  Offset      bcOff;
-  int32_t     spOff;
-
-  BCMarker()
-    : func(nullptr)
-    , bcOff(0)
-    , spOff(0)
-  {}
-
-  BCMarker(const Func* f, Offset o, int32_t sp)
-    : func(f)
-    , bcOff(o)
-    , spOff(sp)
-  {
-    assert(valid());
-  }
-
-  bool operator==(BCMarker b) const {
-    return b.func == func &&
-      b.bcOff == bcOff &&
-      b.spOff == spOff;
-  }
-  bool operator!=(BCMarker b) const { return !operator==(b); }
-
-  std::string show() const;
-  bool valid() const;
-};
+class SSATmp;
 
 /*
  * IRInstructions must be arena-allocatable.
- * (Destructors are not called when they come from IRFactory.)
+ * (Destructors are not called when they come from IRUnit.)
  */
 struct IRInstruction {
   enum Id { kTransient = 0xffffffff };
@@ -69,21 +37,24 @@ struct IRInstruction {
   /*
    * Create an IRInstruction for the opcode `op'.
    *
-   * IRInstruction creation is usually done through IRFactory or
-   * TraceBuilder rather than directly.
+   * IRInstruction creation is usually done through IRUnit or
+   * IRBuilder rather than directly.
    */
   explicit IRInstruction(Opcode op,
                          BCMarker marker,
+                         Edge* edges = nullptr,
                          uint32_t numSrcs = 0,
                          SSATmp** srcs = nullptr)
-    : m_op(op)
-    , m_typeParam(Type::None)
+    : m_typeParam(folly::none)
+    , m_op(op)
     , m_numSrcs(numSrcs)
     , m_numDsts(0)
+    , m_marker(marker)
     , m_id(kTransient)
     , m_srcs(srcs)
     , m_dst(nullptr)
-    , m_marker(marker)
+    , m_block(nullptr)
+    , m_edges(edges)
     , m_extra(nullptr)
   {
     if (op != DefConst) {
@@ -166,61 +137,48 @@ struct IRInstruction {
    */
   const IRExtraData* rawExtra() const { return m_extra; }
 
-   /*
-    * Clear the extra data pointer in a IRInstruction.  Used during
-    * IRFactory::gen to avoid having dangling IRExtraData*'s into stack
-    * memory.
-    */
+  /*
+   * Clear the extra data pointer in a IRInstruction.  Used during IRUnit::gen
+   * to avoid having dangling IRExtraData*'s into stack memory.
+   */
   void clearExtra() { m_extra = nullptr; }
 
   /*
-   * Replace an instruction in place with a Nop.  This sometimes may
-   * be a result of a simplification pass.
+   * Replace an instruction in place with a Nop.  This is less general than the
+   * become() function below, but it is fairly common, and doesn't require
+   * access to an IRUnit so it might be more convenient in some cases.
    */
   void convertToNop();
 
   /*
-   * Replace a branch with a Jmp; used when we have proven the branch
-   * is always taken.
-   */
-  void convertToJmp();
-
-  /*
-   * Replace an instruction in place with a Mov. Used when we have
-   * proven that the instruction's side effects are not needed.
+   * Turns this instruction into the target instruction, without changing
+   * stable fields (id, current block, list fields).  The existing destination
+   * SSATmp(s) will continue to think they came from this instruction, and the
+   * instruction's marker will not change.
    *
-   * TODO: replace with become
-   */
-  void convertToMov();
-
-  /*
-   * Turns this instruction into the target instruction, without
-   * changing stable fields (id, current block, list fields).  The
-   * existing destination SSATmp(s) will continue to think they came
-   * from this instruction.
-   *
-   * The target instruction may be transient---we'll clone anything we
-   * need to keep, using factory for any needed memory.
+   * The target instruction may be transient---we'll clone anything we need to
+   * keep, using IRUnit for any needed memory.
    *
    * Pre: other->isTransient() || numDsts() == other->numDsts()
    */
-  void become(IRFactory&, IRInstruction* other);
+  void become(IRUnit&, IRInstruction* other);
 
   bool       is() const { return false; }
   template<typename... Args>
-  bool       is(Opcode op, Args&&... args) {
+  bool       is(Opcode op, Args&&... args) const {
     return m_op == op || is(std::forward<Args>(args)...);
   }
 
   Opcode     op()   const       { return m_op; }
-  void       setOpcode(Opcode newOpc)  { m_op = newOpc; }
-  Type       typeParam() const         { return m_typeParam; }
-  void       setTypeParam(Type t)      { m_typeParam = t; }
-  uint32_t   numSrcs()  const          { return m_numSrcs; }
-  void       setNumSrcs(uint32_t i)    {
-    assert(i <= m_numSrcs);
-    m_numSrcs = i;
+  void       setOpcode(Opcode newOpc);
+  bool       hasTypeParam() const      { return m_typeParam.hasValue(); }
+  Type       typeParam() const         { return m_typeParam.value(); }
+  folly::Optional<Type> maybeTypeParam() const { return m_typeParam; }
+  void       setTypeParam(Type t) {
+    always_assert(t != Type::Bottom);
+    m_typeParam.assign(t);
   }
+  uint32_t   numSrcs()  const          { return m_numSrcs; }
   SSATmp*    src(uint32_t i) const;
   void       setSrc(uint32_t i, SSATmp* newSrc);
   SrcRange   srcs() const {
@@ -244,7 +202,7 @@ struct IRInstruction {
    */
   SSATmp*    dst(unsigned i) const;
   DstRange   dsts();
-  Range<const SSATmp*> dsts() const;
+  folly::Range<const SSATmp*> dsts() const;
   void       setDsts(unsigned numDsts, SSATmp* newDsts) {
     assert(naryDst());
     m_numDsts = numDsts;
@@ -265,34 +223,34 @@ struct IRInstruction {
    * inserting it in any blocks.
    */
   bool       isTransient() const       { return m_id == kTransient; }
-  IRTrace* trace() const;
 
   /*
    * block() and setBlock() keep track of the block that contains this
    * instruction, as well as where the taken edge is coming from, if there
    * is a taken edge.
    */
-  Block*     block() const { return m_taken.from(); }
-  void       setBlock(Block* b) { m_taken.setFrom(b); }
+  Block* block() const { return m_block; }
+  void setBlock(Block* b) { m_block = b; }
 
   /*
    * Optional control flow edge.  If present, this instruction must
    * be the last one in the block.
    */
-  Block*     taken() const { return m_taken.to(); }
-  void       setTaken(Block* b) {
-    if (isTransient()) m_taken.setTransientTo(b);
-    else m_taken.setTo(b);
-  }
+  Block* taken() const { return succ(1); }
+  Edge* takenEdge() { return succEdge(1); }
+  void setTaken(Block* b) { return setSucc(1, b); }
 
-  bool isControlFlow() const { return bool(m_taken.to()); }
-  bool isBlockEnd() const { return m_taken.to() || isTerminal(); }
-  bool isLoad() const;
   /*
-   * Returns true if the instruction stores its source operand srcIdx to
-   * memory as a cell.
+   * Optional fall-through edge.  If present, this instruction must
+   * also have a taken edge.
    */
-  bool storesCell(uint32_t srcIdx) const;
+  Block* next() const { return succ(0); }
+  Edge* nextEdge() { return succEdge(0); }
+  void setNext(Block* b) { return setSucc(0, b); }
+
+  bool isControlFlow() const { return bool(taken()); }
+  bool isBlockEnd() const { return taken() || isTerminal(); }
+  bool isRawLoad() const;
 
   /*
    * Comparison and hashing for the purposes of CSE-equality.
@@ -306,9 +264,9 @@ struct IRInstruction {
     assert(marker.valid());
     m_marker = marker;
   }
-  const BCMarker& marker() const {
-    return m_marker;
-  }
+  const BCMarker& marker() const { return m_marker; }
+  BCMarker& marker()             { return m_marker; }
+  Offset bcOffset()        const { return marker().bcOff(); }
 
   std::string toString() const;
 
@@ -323,41 +281,60 @@ struct IRInstruction {
   bool canCSE() const;
   bool hasDst() const;
   bool naryDst() const;
-  bool hasMemEffects() const;
-  bool isNative() const;
   bool consumesReferences() const;
   bool consumesReference(int srcNo) const;
-  bool producesReference() const;
-  bool mayModifyRefs() const;
+  bool producesReference(int dstNo) const;
   bool mayRaiseError() const;
   bool isEssential() const;
   bool isTerminal() const;
+  bool hasEdges() const { return jit::hasEdges(op()); }
   bool isPassthrough() const;
+  static SSATmp* frameCommonRoot(SSATmp* fp1, SSATmp* fp2);
   SSATmp* getPassthroughValue() const;
   bool killsSources() const;
   bool killsSource(int srcNo) const;
 
   bool modifiesStack() const;
   SSATmp* modifiedStkPtr() const;
+  SSATmp* previousStkPtr() const;
   // hasMainDst provides raw access to the HasDest flag, for instructions with
   // ModifiesStack set.
   bool hasMainDst() const;
 
-  friend const Edge* takenEdge(IRInstruction*); // only for validation
+private:
+  Block* succ(int i) const {
+    assert(!m_edges || hasEdges());
+    return m_edges ? m_edges[i].to() : nullptr;
+  }
+  Edge* succEdge(int i) {
+    assert(!m_edges || hasEdges());
+    return m_edges && m_edges[i].to() ? &m_edges[i] : nullptr;
+  }
+  void setSucc(int i, Block* b) {
+    if (hasEdges()) {
+      if (isTransient()) m_edges[i].setTransientTo(b);
+      else m_edges[i].setTo(b);
+    } else {
+      assert(!b && !m_edges);
+    }
+  }
+  void clearEdges() {
+    setSucc(0, nullptr);
+    setSucc(1, nullptr);
+    m_edges = nullptr;
+  }
 
 private:
-  bool mayReenterHelper() const;
-
-private:
+  folly::Optional<Type> m_typeParam;
   Opcode            m_op;
-  Type              m_typeParam;
   uint16_t          m_numSrcs;
   uint16_t          m_numDsts;
+  BCMarker          m_marker;
   const Id          m_id;
   SSATmp**          m_srcs;
   SSATmp*           m_dst;     // if HasDest or NaryDest
-  Edge              m_taken;   // for branches, guards, and jmp
-  BCMarker          m_marker;
+  Block*            m_block;   // what block owns this instruction
+  Edge*             m_edges;   // outgoing edges, if this is a block-end.
   IRExtraData*      m_extra;
 public:
   boost::intrusive::list_member_hook<> m_listNode; // for InstructionList

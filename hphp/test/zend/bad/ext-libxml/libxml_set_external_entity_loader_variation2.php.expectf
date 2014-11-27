@@ -1,6 +1,0 @@
-string(10) "-//FOO/BAR"
-string(%d) "%sfoobar.dtd"
-HipHop Warning: %s
-bool(false)
-bool(true)
-Done.

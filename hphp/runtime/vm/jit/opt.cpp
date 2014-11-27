@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,12 +19,12 @@
 #include "hphp/util/trace.h"
 #include "hphp/runtime/vm/jit/check.h"
 #include "hphp/runtime/vm/jit/guard-relaxation.h"
-#include "hphp/runtime/vm/jit/ir-factory.h"
+#include "hphp/runtime/vm/jit/ir-builder.h"
+#include "hphp/runtime/vm/jit/ir-unit.h"
 #include "hphp/runtime/vm/jit/print.h"
-#include "hphp/runtime/vm/jit/trace-builder.h"
+#include "hphp/runtime/vm/jit/timer.h"
 
-namespace HPHP {
-namespace JIT {
+namespace HPHP { namespace jit {
 
 // insert inst after the point dst is defined
 static void insertAfter(IRInstruction* definer, IRInstruction* inst) {
@@ -42,11 +42,11 @@ static void insertAfter(IRInstruction* definer, IRInstruction* inst) {
  * a refcounted value.  The value must be something we can safely dereference
  * to check the _count field.
  */
-static void insertRefCountAsserts(IRInstruction& inst, IRFactory& factory) {
+static void insertRefCountAsserts(IRInstruction& inst, IRUnit& unit) {
   for (SSATmp& dst : inst.dsts()) {
     Type t = dst.type();
-    if (t.subtypeOf(Type::Counted | Type::StaticStr | Type::StaticArr)) {
-      insertAfter(&inst, factory.gen(DbgAssertRefCount, inst.marker(), &dst));
+    if (t <= (Type::Counted | Type::StaticStr | Type::StaticArr)) {
+      insertAfter(&inst, unit.gen(DbgAssertRefCount, inst.marker(), &dst));
     }
   }
 }
@@ -55,22 +55,21 @@ static void insertRefCountAsserts(IRInstruction& inst, IRFactory& factory) {
  * Insert a DbgAssertTv instruction for each stack location stored to by
  * a SpillStack instruction.
  */
-static void insertSpillStackAsserts(IRInstruction& inst, IRFactory& factory) {
+static void insertSpillStackAsserts(IRInstruction& inst, IRUnit& unit) {
   SSATmp* sp = inst.dst();
   auto const vals = inst.srcs().subpiece(2);
   auto* block = inst.block();
   auto pos = block->iteratorTo(&inst); ++pos;
   for (unsigned i = 0, n = vals.size(); i < n; ++i) {
     Type t = vals[i]->type();
-    if (t.subtypeOf(Type::Gen)) {
-      IRInstruction* addr = factory.gen(LdStackAddr,
-                                        inst.marker(),
-                                        Type::PtrToGen,
-                                        StackOffset(i),
-                                        sp);
+    if (t <= Type::Gen) {
+      auto const addr = unit.gen(LdStackAddr,
+                                 inst.marker(),
+                                 Type::PtrToStkGen,
+                                 StackOffset(i),
+                                 sp);
       block->insert(pos, addr);
-      IRInstruction* check = factory.gen(DbgAssertPtr, inst.marker(),
-                                         addr->dst());
+      IRInstruction* check = unit.gen(DbgAssertPtr, inst.marker(), addr->dst());
       block->insert(pos, check);
     }
   }
@@ -80,57 +79,83 @@ static void insertSpillStackAsserts(IRInstruction& inst, IRFactory& factory) {
  * Insert asserts at various points in the IR.
  * TODO: t2137231 Insert DbgAssertPtr at points that use or produces a GenPtr
  */
-static void insertAsserts(IRTrace* trace, IRFactory& factory) {
-  forEachTraceBlock(trace, [&](Block* block) {
-    for (auto it = block->begin(), end = block->end(); it != end; ) {
-      IRInstruction& inst = *it;
-      ++it;
-      if (inst.op() == SpillStack) {
-        insertSpillStackAsserts(inst, factory);
-        continue;
+static void insertAsserts(IRUnit& unit) {
+  postorderWalk(unit, [&](Block* block) {
+      for (auto it = block->begin(), end = block->end(); it != end; ) {
+        IRInstruction& inst = *it;
+        ++it;
+        if (inst.op() == SpillStack) {
+          insertSpillStackAsserts(inst, unit);
+          continue;
+        }
+        if (inst.op() == Call) {
+          SSATmp* sp = inst.dst();
+          auto const addr = unit.gen(LdStackAddr,
+                                     inst.marker(),
+                                     Type::PtrToStkGen,
+                                     StackOffset(0),
+                                     sp);
+          insertAfter(&inst, addr);
+          insertAfter(addr, unit.gen(DbgAssertPtr, inst.marker(), addr->dst()));
+          continue;
+        }
+        if (!inst.isBlockEnd()) insertRefCountAsserts(inst, unit);
       }
-      if (inst.op() == Call) {
-        SSATmp* sp = inst.dst();
-        IRInstruction* addr = factory.gen(LdStackAddr,
-                                          inst.marker(),
-                                          Type::PtrToGen,
-                                          StackOffset(0),
-                                          sp);
-        insertAfter(&inst, addr);
-        insertAfter(addr, factory.gen(DbgAssertPtr, inst.marker(),
-                                      addr->dst()));
-        continue;
-      }
-      if (!inst.isBlockEnd()) insertRefCountAsserts(inst, factory);
-    }
-  });
+    });
 }
 
-void optimizeTrace(IRTrace* trace, TraceBuilder& traceBuilder) {
-  auto& irFactory = traceBuilder.factory();
+void optimize(IRUnit& unit, IRBuilder& irBuilder, TransKind kind) {
+  Timer _t(Timer::optimize);
 
   auto finishPass = [&](const char* msg) {
-    dumpTrace(6, trace, folly::format("after {}", msg).str().c_str());
-    assert(checkCfg(trace, irFactory));
-    assert(checkTmpsSpanningCalls(trace, irFactory));
-    if (debug) forEachTraceInst(trace, assertOperandTypes);
+    if (msg) {
+      printUnit(6, unit, folly::format("after {}", msg).str().c_str());
+    }
+    assert(checkCfg(unit));
+    assert(checkTmpsSpanningCalls(unit));
+    if (debug) {
+      forEachInst(rpoSortCfg(unit), [&](IRInstruction* inst) {
+        assert(checkOperandTypes(inst, &unit));
+      });
+    }
   };
 
-  auto doPass = [&](void (*fn)(IRTrace*, IRFactory&),
-                    const char* msg) {
-    fn(trace, irFactory);
+  auto doPass = [&](void (*fn)(IRUnit&), const char* msg = nullptr) {
+    fn(unit);
     finishPass(msg);
   };
 
   auto dce = [&](const char* which) {
     if (!RuntimeOption::EvalHHIRDeadCodeElim) return;
-    eliminateDeadCode(trace, irFactory);
+    eliminateDeadCode(unit);
     finishPass(folly::format("{} DCE", which).str().c_str());
   };
 
-  if (RuntimeOption::EvalHHIRRelaxGuards) {
-    auto changed = relaxGuards(trace, irFactory, *traceBuilder.guards());
+  auto const doReoptimize = RuntimeOption::EvalHHIRExtraOptPass &&
+    (RuntimeOption::EvalHHIRCse || RuntimeOption::EvalHHIRSimplification);
+
+  if (shouldHHIRRelaxGuards()) {
+    Timer _t(Timer::optimize_relaxGuards);
+    const bool simple = kind == TransKind::Profile &&
+                        (RuntimeOption::EvalJitRegionSelector == "tracelet" ||
+                         RuntimeOption::EvalJitRegionSelector == "method");
+    RelaxGuardsFlags flags = (RelaxGuardsFlags)
+      (RelaxReflow | (simple ? RelaxSimple : RelaxNormal));
+    auto changed = relaxGuards(unit, *irBuilder.guards(), flags);
     if (changed) finishPass("guard relaxation");
+
+    if (doReoptimize) {
+      irBuilder.reoptimize();
+      finishPass("guard relaxation reoptimize");
+    }
+  }
+
+  if (RuntimeOption::EvalHHIRRefcountOpts) {
+    optimizeRefcounts(
+      unit,
+      FrameStateMgr{unit, unit.entry()->front().marker()}
+    );
+    finishPass("refcount opts");
   }
 
   dce("initial");
@@ -139,15 +164,29 @@ void optimizeTrace(IRTrace* trace, TraceBuilder& traceBuilder) {
     doPass(optimizePredictions, "prediction opts");
   }
 
-  if (RuntimeOption::EvalHHIRExtraOptPass
-      && (RuntimeOption::EvalHHIRCse
-          || RuntimeOption::EvalHHIRSimplification)) {
-    traceBuilder.reoptimize();
+  if (doReoptimize) {
+    irBuilder.reoptimize();
     finishPass("reoptimize");
-    // Cleanup any dead code left around by CSE/Simplification
-    // Ideally, this would be controlled by a flag returned
-    // by optimzeTrace indicating whether DCE is necessary
     dce("reoptimize");
+  }
+
+  if (kind != TransKind::Profile && RuntimeOption::EvalHHIRMemoryOpts) {
+    doPass(optimizeLoads);
+    dce("loadelim");
+  }
+
+  /*
+   * Note: doing this pass this late might not be ideal, in particular because
+   * we've already turned some StLoc instructions into StLocNT.
+   *
+   * But right now there are assumptions preventing us from doing it before
+   * refcount opts.  (Refcount opts needs to see all the StLocs explicitly
+   * because it makes assumptions about whether references are consumed based
+   * on that.)
+   */
+  if (kind != TransKind::Profile && RuntimeOption::EvalHHIRMemoryOpts) {
+    doPass(optimizeStores);
+    dce("storeelim");
   }
 
   if (RuntimeOption::EvalHHIRJumpOpts) {

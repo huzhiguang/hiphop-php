@@ -4,6 +4,7 @@
 #
 # ./run_test_ext.sh
 #
-HPHP_HOME=$(git rev-parse --show-toplevel)
+
+DIR="$( cd "$( dirname "$0" )" && pwd )"
 : ${FBMAKE_BIN_ROOT=_bin}
-cd $HPHP_HOME/hphp && $HPHP_HOME/$FBMAKE_BIN_ROOT/hphp/test/ext/test "$1" "$2" "$3"
+cd $DIR/../ && $DIR/../../$1 "$2" "$3" "$4"

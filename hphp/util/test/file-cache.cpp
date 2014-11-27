@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,15 +13,31 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/util/file-cache.h"
-#include "gtest/gtest.h"
+
+#include <gtest/gtest.h>
 
 namespace HPHP {
 
 static const char* kTestData = "some test data for serialization";
 
 class TestFileCache : public testing::Test {
+ protected:
+  virtual void SetUp() {
+    FileCache::UseNewCache = true;
+  }
+
+  bool makeTempDir(std::string* dir) {
+    char dir_tmpl[] = "/tmp/hhvm_unit_test.XXXXXX";
+    const char* temp = mkdtemp(dir_tmpl);
+
+    if (temp == nullptr) {
+      return false;
+    }
+
+    dir->assign(temp);
+    return true;
+  }
 };
 
 TEST_F(TestFileCache, SourceRoot) {
@@ -61,25 +77,23 @@ TEST_F(TestFileCache, WriteAndReadBack) {
 
   FileCache fc;
   fc.write("_unit_test_one_", data_fn);
-  fc.write("_unit_test_two_", false);
-  fc.write("/__invalid__/path/with/directories", true);
+  fc.write("_unit_test_two_");
+  fc.write("/__invalid__/path/with/directories");
+
+  std::string temp_dir;
+  ASSERT_TRUE(makeTempDir(&temp_dir));
+
+  std::string cache_fn(temp_dir);
+  cache_fn.append("/cache.dump");
 
   // Flush to disk.
 
-  char cache_fn[] = "/tmp/hhvm_unit_test.cache.XXXXXX";
-  close(mkstemp(cache_fn));
-
-  fc.save(cache_fn);
-
-  // Sniff around the on-disk temp file.
-
-  FileCache ondisk;
-  EXPECT_EQ(ondisk.getVersion(cache_fn), 1);
+  fc.save(cache_fn.c_str());
 
   // Read back into another cache.
 
   FileCache fc2;
-  fc2.load(cache_fn, false, 1);
+  fc2.loadMmap(cache_fn.c_str());
 
   EXPECT_TRUE(fc2.fileExists("_unit_test_one_"));
 
@@ -108,7 +122,8 @@ TEST_F(TestFileCache, WriteAndReadBack) {
 
   // Clean up the mess.
 
-  ASSERT_EQ(unlink(cache_fn), 0);
+  ASSERT_EQ(unlink(cache_fn.c_str()), 0);
+  ASSERT_EQ(rmdir(temp_dir.c_str()), 0);
   ASSERT_EQ(unlink(data_fn), 0);
 }
 
@@ -120,8 +135,8 @@ TEST_F(TestFileCache, HighlyCompressibleData) {
   FILE* f = fdopen(data_fd, "w");
   ASSERT_TRUE(f != nullptr);
 
-  string test_path = "/path/to/data";
-  string test_data;
+  std::string test_path = "/path/to/data";
+  std::string test_data;
 
   for (int i = 0; i < 10; ++i) {
     test_data.append("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
@@ -135,112 +150,34 @@ TEST_F(TestFileCache, HighlyCompressibleData) {
 
   // Flush to disk.
 
-  char cache_fn[] = "/tmp/hhvm_unit_test.cache.XXXXXX";
-  close(mkstemp(cache_fn));
+  std::string temp_dir;
+  ASSERT_TRUE(makeTempDir(&temp_dir));
 
-  fc.save(cache_fn);
+  std::string cache_fn(temp_dir);
+  cache_fn.append("/cache.dump");
 
-  // Read back into another cache without onDemandUncompress.
+  fc.save(cache_fn.c_str());
 
-  FileCache fc2;
-  fc2.load(cache_fn, false, 1);
-  fc2.dump();
-
-  ASSERT_TRUE(fc2.fileExists(test_path.c_str()));
+  // Read back into another cache.
 
   int read_len;
-  bool compressed = false;    // "I want uncompressed data"
-  const char* read_data = fc2.read(test_path.c_str(), read_len, compressed);
-
-  // FileCache::read() takes compressed as a non-const reference (!)
-  // and changes the value according to what it found...
-
-  EXPECT_FALSE(compressed);   // "I gave you uncompressed data"
-  EXPECT_EQ(test_data, read_data);
-  EXPECT_EQ(test_data.length(), read_len);
-  EXPECT_EQ(test_data.length(), fc2.fileSize(test_path.c_str(), false));
-
-  // Read back into yet another cache *with* onDemandUncmpress.
+  bool compressed;
+  const char* read_data;
 
   FileCache fc3;
-  fc3.load(cache_fn, true, 1);
+  fc3.loadMmap(cache_fn.c_str());
   fc3.dump();
 
   ASSERT_TRUE(fc3.fileExists(test_path.c_str()));
 
+  // Ask for uncompressed data (a holdover from the original API).
   compressed = false;
   read_data = fc3.read(test_path.c_str(), read_len, compressed);
-
-  // This means "you just read a blob of compressed data"...
-  EXPECT_TRUE(compressed);
-
-  // ... so these can't match.
-  EXPECT_NE(test_data, read_data);
-  EXPECT_NE(test_data.length(), read_len);
-
-  // But this always gets the uncompressed size no matter what.
-  EXPECT_EQ(test_data.length(), fc3.fileSize(test_path.c_str(), false));
-
-  // So now let's actually ask for compressed data this time.
-  compressed = true;
-  read_data = fc3.read(test_path.c_str(), read_len, compressed);
-
-  // Same conditions should hold.
-  EXPECT_TRUE(compressed);
-  EXPECT_NE(test_data, read_data);
-  EXPECT_EQ(test_data.length(), fc3.fileSize(test_path.c_str(), false));
-
-  // Clean up the mess.
-
-  ASSERT_EQ(unlink(cache_fn), 0);
-  ASSERT_EQ(unlink(data_fn), 0);
-}
-
-// As above, but using loadMmap instead (which doesn't do on-demand).
-TEST_F(TestFileCache, HighlyCompressibleDataMmap) {
-  char data_fn[] = "/tmp/hhvm_unit_test-testdata.XXXXXX";
-  int data_fd = mkstemp(data_fn);
-  ASSERT_GT(data_fd, 0);
-
-  FILE* f = fdopen(data_fd, "w");
-  ASSERT_TRUE(f != nullptr);
-
-  string test_path = "/path/to/data";
-  string test_data;
-
-  for (int i = 0; i < 10; ++i) {
-    test_data.append("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
-  }
-
-  fprintf(f, "%s", test_data.c_str());
-  fclose(f);
-
-  FileCache fc;
-  fc.write(test_path.c_str(), data_fn);
-
-  // Flush to disk.
-
-  char cache_fn[] = "/tmp/hhvm_unit_test.cache.XXXXXX";
-  close(mkstemp(cache_fn));
-
-  fc.save(cache_fn);
-
-  // Read back into another cache (onDemandUncompress is not an option).
-
-  FileCache fc2;
-  fc2.loadMmap(cache_fn, 1);
-  fc2.dump();
-
-  ASSERT_TRUE(fc2.fileExists(test_path.c_str()));
-
-  int read_len;
-  bool compressed = false;    // "I want uncompressed data"
-  const char* read_data = fc2.read(test_path.c_str(), read_len, compressed);
 
   // FileCache::read() takes compressed as a non-const reference (!)
   // and changes the value according to what it found...
 
-  // This means "you just read a blob of compressed data"...
+  // ... so this means "I just gave you compressed data".
   EXPECT_TRUE(compressed);
 
   // ... so these can't match.
@@ -248,20 +185,21 @@ TEST_F(TestFileCache, HighlyCompressibleDataMmap) {
   EXPECT_NE(test_data.length(), read_len);
 
   // But this always gets the uncompressed size no matter what.
-  EXPECT_EQ(test_data.length(), fc2.fileSize(test_path.c_str(), false));
+  EXPECT_EQ(test_data.length(), fc3.fileSize(test_path.c_str(), false));
 
   // So now let's actually ask for compressed data this time.
   compressed = true;
-  read_data = fc2.read(test_path.c_str(), read_len, compressed);
+  read_data = fc3.read(test_path.c_str(), read_len, compressed);
 
   // Same conditions should hold.
   EXPECT_TRUE(compressed);
   EXPECT_NE(test_data, read_data);
-  EXPECT_EQ(test_data.length(), fc2.fileSize(test_path.c_str(), false));
+  EXPECT_EQ(test_data.length(), fc3.fileSize(test_path.c_str(), false));
 
   // Clean up the mess.
 
-  ASSERT_EQ(unlink(cache_fn), 0);
+  ASSERT_EQ(unlink(cache_fn.c_str()), 0);
+  ASSERT_EQ(rmdir(temp_dir.c_str()), 0);
   ASSERT_EQ(unlink(data_fn), 0);
 }
 

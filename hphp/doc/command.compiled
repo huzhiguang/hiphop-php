@@ -15,16 +15,27 @@ daemon: starts an HTTP server and runs it as a daemon.
 replay: replays a previously recorded HTTP request file.
 translate: translates a hex-encoded stacktrace.
 
+= -a, --interactive
+
+Starts hhvm Read-Eval-Print-Loop (REPL). Works just like an alias for `hhvm --mode debug`.
+
 = -c, --config=FILE
 
 This reads in a configuration file to set options. FILE should be in HDF
-format.
+format. If no file is specified, the one in /etc/hhvm/config.hdf will be used
+if it exists.
 
 = -v, --config-value=STRING
 
 This sets a configuration option on the command line. STRING should be
 a line of HDF, e.g. Section.Name=Value. The options settable are the same
 as those set by --config.
+
+= -d, --define=STRING
+
+This sets an ini option on the command line. STRING should be a line in the
+format expected by ini, e.g. hhvm.option=value. The options settable are the
+same as those set by --config, when providing an .ini file.
 
 = -p, --port
 
@@ -33,7 +44,7 @@ Which port to start HTTP server on.
 = --admin-port
 
 Which port to start admin server that can take URL commands to perform
-adminstration, status queries, stats queries or debugging commands.
+administration, status queries, stats queries or debugging commands.
 
 = --debug-host
 

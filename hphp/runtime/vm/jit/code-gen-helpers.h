@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,38 +18,11 @@
 #define incl_HPHP_VM_CODEGENHELPERS_H_
 
 #include "hphp/runtime/vm/jit/type.h"
+#include "hphp/runtime/vm/jit/phys-reg.h"
+#include "hphp/runtime/vm/jit/vasm-x64.h"
+#include "hphp/util/abi-cxx.h"
 
-namespace HPHP { namespace JIT {
-
-struct CppCall {
-  template<class Ret, class... Args>
-  explicit CppCall(Ret (*pfun)(Args...))
-    : m_kind(Direct)
-    , m_fptr(reinterpret_cast<void*>(pfun))
-  {}
-
-  explicit CppCall(void* p)
-    : m_kind(Direct)
-    , m_fptr(p)
-  {}
-
-  explicit CppCall(int off) : m_kind(Virtual), m_offset(off) {}
-
-  CppCall(CppCall const&) = default;
-
-  bool isDirect()  const { return m_kind == Direct;  }
-  bool isVirtual() const { return m_kind == Virtual; }
-
-  const void* getAddress() const { return m_fptr; }
-  int         getOffset()  const { return m_offset; }
-
- private:
-  enum { Direct, Virtual } m_kind;
-  union {
-    void* m_fptr;
-    int   m_offset;
-  };
-};
+namespace HPHP { namespace jit {
 
 /*
  * SaveFP uses rVmFp, as usual. SavePC requires the caller to have
@@ -71,17 +44,22 @@ inline RegSaveFlags operator~(const RegSaveFlags& f) {
   return RegSaveFlags(~int(f));
 }
 
-int64_t ak_exist_string(ArrayData* arr, StringData* key);
-int64_t ak_exist_int(ArrayData* arr, int64_t key);
-int64_t ak_exist_string_obj(ObjectData* obj, StringData* key);
-int64_t ak_exist_int_obj(ObjectData* obj, int64_t key);
-
-TypedValue arrayIdxI(ArrayData*, int64_t, TypedValue);
-TypedValue arrayIdxS(ArrayData*, StringData*, TypedValue);
-TypedValue arrayIdxSi(ArrayData*, StringData*, TypedValue);
-
-TypedValue* ldGblAddrHelper(StringData* name);
-TypedValue* ldGblAddrDefHelper(StringData* name);
+template <class T, class F>
+Vreg cond(Vout& v, ConditionCode cc, Vreg sf, Vreg dst, T t, F f) {
+  auto fblock = v.makeBlock();
+  auto tblock = v.makeBlock();
+  auto done = v.makeBlock();
+  v << jcc{cc, sf, {fblock, tblock}};
+  v = tblock;
+  auto treg = t(v);
+  v << phijmp{done, v.makeTuple(VregList{treg})};
+  v = fblock;
+  auto freg = f(v);
+  v << phijmp{done, v.makeTuple(VregList{freg})};
+  v = done;
+  v << phidef{v.makeTuple(VregList{dst})};
+  return dst;
+}
 
 }}
 

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,98 +17,195 @@
 #ifndef incl_HPHP_VM_NAMED_ENTITY_H_
 #define incl_HPHP_VM_NAMED_ENTITY_H_
 
-#include "tbb/concurrent_unordered_map.h"
-#include <boost/operators.hpp>
+#include "hphp/runtime/base/rds.h"
+#include "hphp/runtime/base/string-data.h"
+#include "hphp/runtime/vm/type-alias.h"
 
-#include "hphp/util/atomic.h"
-#include "folly/AtomicHashMap.h"
+#include "hphp/util/portability.h"
+
+#include <folly/AtomicHashMap.h>
+
+#include <atomic>
+#include <utility>
 
 namespace HPHP {
+///////////////////////////////////////////////////////////////////////////////
 
 class Class;
-struct Typedef;
-struct TypedefReq;
 class Func;
+class String;
 
-//////////////////////////////////////////////////////////////////////
-
-/*
- * NamedEntity represents a user-defined name that may map to
- * different objects in different requests.  Classes and functions are
- * in separate namespaces, so we have a targetcache offset for
- * resolving each.
- *
- * Classes and typedefs are in the same namespace when we're naming
- * types, but different namespaces at sites that allocate classes.  If
- * a typedef is defined for a given name, we'll cache it in each
- * request at m_cachedTypedefOffset.  Classes are always cached at
- * m_cachedClassOffset.
- */
-struct NamedEntity {
-  explicit NamedEntity()
-    : m_cachedClassOffset(0)
-    , m_cachedFuncOffset(0)
-    , m_cachedTypedefOffset(0)
-    , m_clsList(nullptr)
-  {}
-
-  // Assigning these fields is protected by the targetcache lock.  We
-  // read them without locks.
-  unsigned m_cachedClassOffset;
-  unsigned m_cachedFuncOffset;
-  unsigned m_cachedTypedefOffset;
-
-  void setCachedFunc(Func *f);
-  Func* getCachedFunc() const;
-
-  void setCachedClass(Class* c);
-  Class* getCachedClass() const;
-
-  const TypedefReq* getCachedTypedef() const;
-  void setCachedTypedef(const TypedefReq&);
-
-  Class* clsList() const {
-    return m_clsList;
-  }
-
-  // Call while holding s_classesMutex.  Add or remove classes from
-  // the list.
-  void pushClass(Class* cls);
-  void removeClass(Class* goner);
-
-private:
-  Class* m_clsList;
-};
-
-//////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
 
 /*
- * Lookup a Typedef* for the supplied NamedEntity (which must be the
- * NamedEntity for `name'), if necessary invoking autoload for types
- * but not classes.
+ * StringData* comparison for AtomicHashMap entries, where -1, -2, and -3 are
+ * used as magic values.
  */
-const TypedefReq* getTypedefWithAutoload(const NamedEntity* ne,
-                                         const StringData* name);
-
-//////////////////////////////////////////////////////////////////////
-
 struct ahm_string_data_isame {
   bool operator()(const StringData *s1, const StringData *s2) const {
-    // ahm uses -1, -2, -3 as magic values
     return int64_t(s1) > 0 && s1->isame(s2);
   }
 };
 
-typedef folly::AtomicHashMap<
-  const StringData*,
-  NamedEntity,
-  string_data_hash,
-  ahm_string_data_isame
-> NamedEntityMap;
-typedef std::pair<const StringData*,const NamedEntity*> NamedEntityPair;
+///////////////////////////////////////////////////////////////////////////////
 
-//////////////////////////////////////////////////////////////////////
+/*
+ * NamedEntity represents a user-defined name that may map to different objects
+ * in different requests.
+ *
+ * Classes and functions are in separate namespaces, so we have a target cache
+ * offset for resolving each.
+ *
+ * Classes and typedefs are in the same namespace when we're naming types, but
+ * different namespaces at sites that allocate classes.  If a typedef is
+ * defined for a given name, we'll cache it in each request at m_cachedTypedef.
+ * Classes are always cached at m_cachedClass.
+ */
+struct NamedEntity {
 
+  /////////////////////////////////////////////////////////////////////////////
+  // Types.
+
+  /*
+   * Global NamedEntity map type.
+   *
+   * We hold onto references to elements of this map.  If we use a different
+   * map, we must use one that doesnt invalidate references to its elements
+   * (unless they are deleted, which never happens here).  Any standard
+   * associative container will meet this requirement.
+   */
+  typedef folly::AtomicHashMap<const StringData*,
+                               NamedEntity,
+                               string_data_hash,
+                               ahm_string_data_isame> Map;
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Constructors.
+
+  explicit NamedEntity()
+    : m_cachedClass(RDS::kInvalidHandle)
+    , m_cachedFunc(RDS::kInvalidHandle)
+    , m_cachedTypeAlias(RDS::kInvalidHandle)
+  {}
+
+  NamedEntity(NamedEntity&& ne);
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Func cache.
+
+  /*
+   * Get the RDS::Handle that caches this Func*, creating a (non-persistent)
+   * one if it doesn't exist yet.
+   */
+  RDS::Handle getFuncHandle() const;
+
+  /*
+   * Set and get the cached Func*.
+   */
+  void setCachedFunc(Func *f);
+  Func* getCachedFunc() const;
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Class cache.
+
+  /*
+   * Get the RDS::Handle that caches this Class*, creating a (non-persistent)
+   * one if it doesn't exist yet.
+   */
+  RDS::Handle getClassHandle() const;
+
+  /*
+   * Set and get the cached Class*.
+   */
+  void setCachedClass(Class* c);
+  Class* getCachedClass() const;
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Type alias cache.
+
+  /*
+   * Is the cached type alias persistent?
+   */
+  bool isPersistentTypeAlias() const;
+
+  /*
+   * Set and get the cached TypeAliasReq.
+   */
+  void setCachedTypeAlias(const TypeAliasReq&);
+  const TypeAliasReq* getCachedTypeAlias() const;
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Class list.
+
+  /*
+   * Return the head of the Class* list.
+   *
+   * The list is chained together by Class::m_nextClass.
+   */
+  Class* clsList() const;
+
+  /*
+   * Add or remove Classes from the list.
+   *
+   * Should be called while holding g_classesMutex.
+   */
+  void pushClass(Class* cls);
+  void removeClass(Class* goner);
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Global table.                                                     [static]
+
+  /*
+   * Get the NamedEntity for `str' from the global table, or create it if it
+   * doesn't exist and `allowCreate' is true.
+   *
+   * If `str' needs to be namespace-normalized, we pass the normalized result
+   * out through `normalizedStr' if it is provided.
+   */
+  static NamedEntity* get(const StringData* str,
+                          bool allowCreate = true,
+                          String* normalizedStr = nullptr) FLATTEN;
+
+  /*
+   * The global NamedEntity table.
+   *
+   * TODO(#4717225) Get rid of this.
+   */
+  static Map* table();
+
+  /*
+   * Size of the global NamedEntity table.
+   */
+  static size_t tableSize();
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Data members.
+
+public:
+  mutable RDS::Link<Class*> m_cachedClass;
+  mutable RDS::Link<Func*> m_cachedFunc;
+  mutable RDS::Link<TypeAliasReq> m_cachedTypeAlias;
+
+private:
+  std::atomic<Class*> m_clsList{nullptr};
+};
+
+/*
+ * Litstr and NamedEntity pair.
+ */
+using NamedEntityPair = std::pair<const StringData*, const NamedEntity*>;
+
+///////////////////////////////////////////////////////////////////////////////
 }
 
-#endif
+#define incl_HPHP_VM_NAMED_ENTITY_INL_H_
+#include "hphp/runtime/vm/named-entity-inl.h"
+#undef incl_HPHP_VM_NAMED_ENTITY_INL_H_
+
+#endif // incl_HPHP_VM_NAMED_ENTITY_INL_H_

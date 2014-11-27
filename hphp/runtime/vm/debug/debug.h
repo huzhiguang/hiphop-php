@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -31,7 +31,7 @@ class DebugInfo {
 
   void recordTracelet(TCRange range,
                       const Func* func,
-                      const Opcode *instr, bool exit,
+                      const Op* instr, bool exit,
                       bool inPrologue);
   void recordStub(TCRange range,
                   const char* name);
@@ -39,23 +39,42 @@ class DebugInfo {
                      bool inPrologue);
   void recordBCInstr(TCRange range, uint32_t op);
 
+  static void recordDataMap(void* from, void* to, const std::string& desc);
+
   void debugSync();
   static DebugInfo* Get();
-
+  static void setPidMapOverlay(void* from, void* to) {
+    pidMapOverlayStart = from;
+    pidMapOverlayEnd = to;
+  }
  private:
-  /* maintain separate dwarf info for a and astubs, so that we
+  void generatePidMapOverlay();
+  void recordDataMapImpl(void* from, void* to, const std::string& desc);
+
+  /* maintain separate dwarf info for a and acold, so that we
    * don't emit dwarf info for the two in the same ELF file.
    * gdb tends to get confused when it sees dwarf info for
    * widely separated addresses ranges in the same ELF file.
    */
   DwarfInfo m_aDwarfInfo;
-  DwarfInfo m_astubsDwarfInfo;
+  DwarfInfo m_acoldDwarfInfo;
   /*
    * Stuff to output symbol names to /tmp/perf-%d.map files.  This stuff
    * can be read by perf top/record, etc.
    */
   FILE* m_perfMap;
   char m_perfMapName[64];
+
+  /*
+   * Similar to perfMap, but for data addresses. Perf doesn't use
+   * it directly, but we can write tools based on perf script that
+   * do.
+   */
+  FILE* m_dataMap;
+  char m_dataMapName[64];
+
+  static void* pidMapOverlayStart;
+  static void* pidMapOverlayEnd;
 };
 
 /*

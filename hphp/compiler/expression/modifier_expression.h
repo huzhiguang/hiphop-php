@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,6 +18,7 @@
 #define incl_HPHP_MODIFIER_EXPRESSION_H_
 
 #include "hphp/compiler/expression/expression.h"
+#include <vector>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -31,10 +32,23 @@ public:
   DECLARE_BASE_EXPRESSION_VIRTUAL_FUNCTIONS;
 
   void add(int modifier);
+  void remove(int modifier);
   int getCount() const { return m_modifiers.size();}
   int operator[](int index);
 
+  bool hasDuplicates() const;
+
+  /**
+   * Whether the modifiers combine to mean public, including the implicit
+   * public access that occurs when none of public|private|protected are
+   * supplied.
+   */
   bool isPublic() const;
+  /**
+   * Use isPublic unless you care about the difference between no-modifiers
+   * implicit public and public-keyword-appears explicitly public.
+   */
+  bool isExplicitlyPublic() const;
   bool isProtected() const;
   bool isPrivate() const;
   bool isStatic() const;
@@ -46,6 +60,7 @@ public:
 
   bool validForFunction() const;
   bool validForClosure() const;
+  bool validForTraitAliasRule() const;
 
   void setHasPrivacy(bool f) { m_hasPrivacy = f; }
 

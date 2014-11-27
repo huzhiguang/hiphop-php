@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,11 +20,11 @@
 #include "hphp/util/hdf.h"
 #include "hphp/runtime/base/types.h"
 #include "hphp/runtime/server/ip-block-map.h"
+#include "hphp/runtime/base/ini-setting.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-DECLARE_BOOST_TYPES(VirtualHost);
 class VirtualHost {
 public:
   static VirtualHost &GetDefault();
@@ -37,9 +37,9 @@ public:
   static void SortAllowedDirectories(std::vector<std::string>& dirs);
 public:
   VirtualHost();
-  explicit VirtualHost(Hdf vh);
+  explicit VirtualHost(const IniSetting::Map& ini, Hdf vh);
 
-  void init(Hdf vh);
+  void init(const IniSetting::Map& ini, Hdf vh);
   void addAllowedDirectories(const std::vector<std::string>& dirs);
   int getRequestTimeoutSeconds(int defaultTimeout) const;
 
@@ -55,8 +55,13 @@ public:
   bool match(const std::string &host) const;
   bool disabled() const { return m_disabled; }
 
+  // whether to check (and serve) files that exist before applying rewrite rules
+  bool checkExistenceBeforeRewrite() const {
+    return m_checkExistenceBeforeRewrite;
+  }
+
   // url rewrite rules
-  bool rewriteURL(CStrRef host, String &url, bool &qsa, int &redirect) const;
+  bool rewriteURL(const String& host, String &url, bool &qsa, int &redirect) const;
 
   // ip blocking rules
   bool isBlocking(const std::string &command, const std::string &ip) const;
@@ -73,15 +78,15 @@ private:
     };
     Type type;
     std::string pattern;
-    bool negate;
+    bool negate = false;
   };
 
   struct RewriteRule {
     std::string pattern;
     std::string to;
-    bool qsa;      // whether to append original query string
-    bool encode_backrefs;
-    int redirect;  // redirect status code (301 or 302) or 0 for no redirect
+    bool qsa = false; // whether to append original query string
+    bool encode_backrefs = false;
+    int redirect = 0;  // redirect status code (301 or 302) or 0 for no redirect
     std::vector<RewriteCond> rewriteConds;
   };
 
@@ -93,14 +98,15 @@ private:
 
   struct VhostRuntimeOption {
   public:
-    int requestTimeoutSeconds;
-    int64_t maxPostSize;
-    int64_t uploadMaxFileSize;
+    int requestTimeoutSeconds = -1;
+    int64_t maxPostSize = -1;
+    int64_t uploadMaxFileSize = -1;
     std::vector<std::string> allowedDirectories;
   };
 
-  void initRuntimeOption(Hdf overwrite);
-  bool m_disabled;
+  void initRuntimeOption(const IniSetting::Map& ini, Hdf overwrite);
+  bool m_disabled = false;
+  bool m_checkExistenceBeforeRewrite = true;
   std::string m_name;
   std::string m_prefix;
   std::string m_pattern;
@@ -111,7 +117,7 @@ private:
   std::string m_documentRoot;
 
   std::vector<RewriteRule> m_rewriteRules;
-  IpBlockMapPtr m_ipBlocks;
+  std::shared_ptr<IpBlockMap> m_ipBlocks;
   std::vector<QueryStringFilter> m_queryStringFilters;
 
   VhostRuntimeOption m_runtimeOption;

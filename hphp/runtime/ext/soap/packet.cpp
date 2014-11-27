@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -14,24 +14,28 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
-#include "hphp/runtime/ext/ext_soap.h"
 #include "hphp/runtime/ext/soap/packet.h"
+
+#include <memory>
+#include "hphp/runtime/ext/soap/ext_soap.h"
+#include "hphp/util/hash-map-typedefs.h"
 
 #include "hphp/system/systemlib.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-static void add_soap_fault(c_SoapClient *client, CStrRef code, CStrRef fault) {
+static void add_soap_fault(SoapClient *client, const String& code,
+                           const String& fault) {
   client->m_soap_fault =
     Object(SystemLib::AllocSoapFaultObject(String(code, CopyString), fault));
 }
 
 /* SOAP client calls this function to parse response from SOAP server */
-bool parse_packet_soap(c_SoapClient *obj, const char *buffer,
-                       int buffer_size, sdlFunctionPtr fn, const char *fn_name,
-                       Variant &return_value, Variant &soap_headers) {
+bool parse_packet_soap(SoapClient *obj, const char *buffer,
+                       int buffer_size,
+                       std::shared_ptr<sdlFunction> fn, const char *fn_name,
+                       Variant &return_value, Array& soap_headers) {
   char* envelope_ns = NULL;
   xmlNodePtr trav, env, head, body, resp, cur, fault;
   xmlAttrPtr attr;
@@ -39,7 +43,8 @@ bool parse_packet_soap(c_SoapClient *obj, const char *buffer,
   int soap_version = SOAP_1_1;
   sdlSoapBindingFunctionHeaderMap *hdrs = NULL;
 
-  return_value.reset();
+  assert(return_value.asTypedValue()->m_type == KindOfUninit);
+  return_value.asTypedValue()->m_type = KindOfNull;
 
   /* Response for one-way opearation */
   if (buffer_size == 0) {
@@ -272,7 +277,7 @@ bool parse_packet_soap(c_SoapClient *obj, const char *buffer,
       sdlParamPtr h_param, param;
       xmlNodePtr val = NULL;
       const char *name, *ns = NULL;
-      Variant tmp;
+      Variant tmp(Variant::NullInit{});
       sdlSoapBindingFunctionPtr fnb =
         (sdlSoapBindingFunctionPtr)fn->bindingAttributes;
       int res_count;
@@ -330,7 +335,6 @@ bool parse_packet_soap(c_SoapClient *obj, const char *buffer,
 
           if (!val) {
             /* TODO: may be "nil" is not OK? */
-            tmp.reset();
 /*
             add_soap_fault(obj, "Client", "Can't find response data");
             xmlFreeDoc(response);
@@ -344,7 +348,7 @@ bool parse_packet_soap(c_SoapClient *obj, const char *buffer,
               tmp = master_to_zval(encodePtr(), val);
             }
           }
-          return_value.set(String(param->paramName), tmp);
+          return_value.toArrRef().set(String(param->paramName), tmp);
           param_count++;
         }
       }
@@ -361,17 +365,19 @@ bool parse_packet_soap(c_SoapClient *obj, const char *buffer,
             Variant tmp = master_to_zval(encodePtr(), val);
             if (val->name) {
               String key((char*)val->name, CopyString);
-              if (return_value.toArray().exists(key)) {
-                return_value.lvalAt(key).append(tmp);
+              if (return_value.toCArrRef().exists(key)) {
+                auto& lval = return_value.toArrRef().lvalAt(key);
+                if (!lval.isArray()) lval = lval.toArray();
+                lval.toArrRef().append(tmp);
               } else if (val->next && get_node(val->next, (char*)val->name)) {
                 Array arr = Array::Create();
                 arr.append(tmp);
-                return_value.set(key, arr);
+                return_value.toArrRef().set(key, arr);
               } else {
-                return_value.set(key, tmp);
+                return_value.toArrRef().set(key, tmp);
               }
             } else {
-              return_value.append(tmp);
+              return_value.toArrRef().append(tmp);
             }
             ++param_count;
           }
@@ -383,7 +389,7 @@ bool parse_packet_soap(c_SoapClient *obj, const char *buffer,
 
   if (return_value.isArray()) {
     if (param_count == 0) {
-      return_value.reset();
+      return_value = init_null();
     } else if (param_count == 1) {
       Array arr = return_value.toArray();
       ArrayIter iter(arr);
@@ -397,7 +403,7 @@ bool parse_packet_soap(c_SoapClient *obj, const char *buffer,
       if (trav->type == XML_ELEMENT_NODE) {
         encodePtr enc;
         if (hdrs && !hdrs->empty()) {
-          string key;
+          std::string key;
           if (trav->ns) {
             key += (char*)trav->ns->href;
             key += ':';

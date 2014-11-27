@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,26 +18,48 @@
 #define incl_HPHP_RUNTIME_VM_JIT_GUARD_RELAXATION_H_
 
 #include "hphp/runtime/base/datatype.h"
-#include "hphp/runtime/vm/jit/ir.h"
 #include "hphp/runtime/vm/jit/region-selection.h"
 #include "hphp/runtime/vm/jit/type.h"
 
-namespace HPHP { namespace JIT {
+#include "hphp/runtime/vm/jit/block.h"
 
+namespace HPHP { namespace jit {
+
+struct GuardConstraints;
+struct IRUnit;
 struct SSATmp;
-struct IRTrace;
-struct IRFactory;
 
-IRInstruction* guardForLocal(uint32_t locId, SSATmp* fp);
-bool relaxGuards(IRTrace* trace, const IRFactory& factory,
-                 const GuardConstraints& guards);
+enum RelaxGuardsFlags {
+  RelaxNormal =      0,
+  RelaxSimple = 1 << 0,
+  RelaxReflow = 1 << 1,
+};
+
+bool shouldHHIRRelaxGuards();
+
+/*
+ * Given a possibly null SSATmp*, determine if the type of that tmp may be
+ * loosened by guard relaxation.
+ */
+bool typeMightRelax(const SSATmp* tmp);
+
+bool relaxGuards(IRUnit&, const GuardConstraints& guards,
+                 RelaxGuardsFlags flags);
 
 typedef std::function<void(const RegionDesc::Location&, Type)> VisitGuardFn;
-void visitGuards(IRTrace* trace, const VisitGuardFn& func);
+void visitGuards(IRUnit&, const VisitGuardFn& func);
 
-bool typeFitsConstraint(Type t, DataTypeCategory cat);
-DataTypeCategory categoryForType(Type t);
-Type relaxType(Type t, DataTypeCategory cat);
+/*
+ * Returns true iff `t' is specific enough to fit `cat', meaning a consumer
+ * constraining a value with `cat' would be satisfied with `t' as the value's
+ * type after relaxation.
+ */
+bool typeFitsConstraint(Type t, TypeConstraint cat);
+
+Type relaxType(Type t, TypeConstraint cat);
+TypeConstraint relaxConstraint(const TypeConstraint origTc,
+                               const Type knownType, const Type toRelax);
+TypeConstraint applyConstraint(TypeConstraint origTc, TypeConstraint newTc);
 
 } }
 

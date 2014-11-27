@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,10 +15,11 @@
 */
 
 #include "hphp/compiler/expression/expression.h"
+#include <vector>
 #include "hphp/compiler/analysis/code_error.h"
 #include "hphp/compiler/parser/parser.h"
 #include "hphp/parser/hphp.tab.hpp"
-#include "hphp/util/util.h"
+#include "hphp/util/text-util.h"
 #include "hphp/compiler/analysis/class_scope.h"
 #include "hphp/compiler/analysis/function_scope.h"
 #include "hphp/compiler/expression/scalar_expression.h"
@@ -71,7 +72,6 @@ ExpressionPtr Expression::replaceValue(ExpressionPtr rep) {
     rep->clearContext(AssignmentRHS);
     rep = el;
   }
-  if (isChildOfYield()) rep->setChildOfYield();
   if (rep->is(KindOfSimpleVariable) && !is(KindOfSimpleVariable)) {
     static_pointer_cast<SimpleVariable>(rep)->setAlwaysStash();
   }
@@ -316,20 +316,6 @@ void Expression::resetTypes() {
   m_implementedType.reset();
 }
 
-TypePtr Expression::inferAndCheck(AnalysisResultPtr ar, TypePtr type,
-                                  bool coerce) {
-  IMPLEMENT_INFER_AND_CHECK_ASSERT(getScope());
-  assert(type);
-  resetTypes();
-  TypePtr actualType = inferTypes(ar, type, coerce);
-  if (type->is(Type::KindOfSome) || type->is(Type::KindOfAny)) {
-    m_actualType = actualType;
-    m_expectedType.reset();
-    return actualType;
-  }
-  return checkTypesImpl(ar, type, actualType, coerce);
-}
-
 TypePtr Expression::checkTypesImpl(AnalysisResultConstPtr ar,
                                    TypePtr expectedType,
                                    TypePtr actualType, bool coerce) {
@@ -370,14 +356,14 @@ void Expression::setTypes(AnalysisResultConstPtr ar, TypePtr actualType,
   }
 
   if (m_actualType->isSpecificObject()) {
-    boost::const_pointer_cast<AnalysisResult>(ar)->
+    std::const_pointer_cast<AnalysisResult>(ar)->
       addClassDependency(getFileScope(), m_actualType->getName());
   }
 }
 
 void Expression::setDynamicByIdentifier(AnalysisResultPtr ar,
                                         const std::string &value) {
-  string id = Util::toLower(value);
+  string id = toLower(value);
   size_t c = id.find("::");
   FunctionScopePtr fi;
   ClassScopePtr ci;
@@ -451,57 +437,6 @@ bool Expression::CheckVarNR(ExpressionPtr value,
            value->isScalar()));
 }
 
-TypePtr Expression::inferAssignmentTypes(AnalysisResultPtr ar, TypePtr type,
-                                         bool coerce, ExpressionPtr variable,
-                                         ExpressionPtr
-                                         value /* =ExpressionPtr() */) {
-  assert(type);
-  TypePtr ret = type;
-  if (value) {
-    ret = value->inferAndCheck(ar, Type::Some, false);
-    if (value->isLiteralNull()) {
-      ret = Type::Null;
-    }
-    assert(ret);
-  }
-
-  BlockScopePtr scope = getScope();
-  if (variable->is(Expression::KindOfConstantExpression)) {
-    // ...as in ClassConstant statement
-    ConstantExpressionPtr exp =
-      dynamic_pointer_cast<ConstantExpression>(variable);
-    BlockScope *defScope = nullptr;
-    std::vector<std::string> bases;
-    scope->getConstants()->check(getScope(), exp->getName(), ret,
-                                 true, ar, variable,
-                                 bases, defScope);
-  }
-
-  m_implementedType.reset();
-  TypePtr vt = variable->inferAndCheck(ar, ret, true);
-  if (!coerce && type->is(Type::KindOfAny)) {
-    ret = vt;
-  } else {
-    TypePtr it = variable->getCPPType();
-    if (!Type::SameType(it, ret)) {
-      m_implementedType = it;
-    }
-  }
-
-  if (value) {
-    TypePtr vat(value->getActualType());
-    TypePtr vet(value->getExpectedType());
-    TypePtr vit(value->getImplementedType());
-    if (vat && !vet && vit &&
-        Type::IsMappedToVariant(vit) &&
-        Type::HasFastCastMethod(vat)) {
-      value->setExpectedType(vat);
-    }
-  }
-
-  return ret;
-}
-
 ExpressionPtr Expression::MakeConstant(AnalysisResultConstPtr ar,
                                        BlockScopePtr scope,
                                        LocationPtr loc,
@@ -510,13 +445,7 @@ ExpressionPtr Expression::MakeConstant(AnalysisResultConstPtr ar,
                               scope, loc,
                               value, false));
   if (value == "true" || value == "false") {
-    if (ar->getPhase() >= AnalysisResult::PostOptimize) {
-      exp->m_actualType = Type::Boolean;
-    }
   } else if (value == "null") {
-    if (ar->getPhase() >= AnalysisResult::PostOptimize) {
-      exp->m_actualType = Type::Variant;
-    }
   } else {
     assert(false);
   }
@@ -671,7 +600,10 @@ void Expression::computeLocalExprAltered() {
 
 bool Expression::isArray() const {
   if (is(KindOfUnaryOpExpression)) {
-    return static_cast<const UnaryOpExpression*>(this)->getOp() == T_ARRAY;
+    return static_cast<const UnaryOpExpression*>(this)->getOp() == T_ARRAY ||
+      static_cast<const UnaryOpExpression*>(this)->getOp() == T_VARRAY ||
+      static_cast<const UnaryOpExpression*>(this)->getOp() == T_MIARRAY ||
+      static_cast<const UnaryOpExpression*>(this)->getOp() == T_MSARRAY;
   }
   return false;
 }
@@ -692,7 +624,7 @@ bool Expression::isUnquotedScalar() const {
 ExpressionPtr Expression::MakeScalarExpression(AnalysisResultConstPtr ar,
                                                BlockScopePtr scope,
                                                LocationPtr loc,
-                                               CVarRef value) {
+                                               const Variant& value) {
   if (value.isArray()) {
     ExpressionListPtr el(new ExpressionList(scope, loc,
                                             ExpressionList::ListKindParam));

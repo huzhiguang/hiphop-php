@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -25,11 +25,9 @@
 
 namespace HPHP {
 
-IMPLEMENT_OBJECT_ALLOCATION_NO_DEFAULT_SWEEP(DateTime);
 ///////////////////////////////////////////////////////////////////////////////
 // statics
 
-StaticString DateTime::s_class_name("DateTime");
 IMPLEMENT_REQUEST_LOCAL(DateTime::LastErrors, DateTime::s_lastErrors);
 
 const char *DateTime::DateFormatRFC822     = "D, d M y H:i:s O";
@@ -102,7 +100,7 @@ bool DateTime::IsValid(int y, int m, int d) {
 }
 
 SmartResource<DateTime> DateTime::Current(bool utc /* = false */) {
-  return NEWOBJ(DateTime)(time(0), utc);
+  return newres<DateTime>(time(0), utc);
 }
 
 const StaticString
@@ -150,12 +148,46 @@ const StaticString
     ret.set(name, (int)parsed_time->elem);              \
   }
 
-Array DateTime::Parse(CStrRef datetime) {
-  struct timelib_error_container *error;
-  timelib_time *parsed_time =
-    timelib_strtotime((char*)datetime.data(), datetime.size(), &error,
+Array DateTime::Parse(const String& datetime) {
+  struct timelib_error_container* error;
+  timelib_time* parsed_time =
+    timelib_strtotime((char *)datetime.data(), datetime.size(), &error,
                       TimeZone::GetDatabase(), TimeZone::GetTimeZoneInfoRaw);
+  return DateTime::ParseTime(parsed_time, error);
+}
 
+Array DateTime::Parse(const String& format, const String& date) {
+  struct timelib_error_container* error;
+  timelib_time* parsed_time =
+    timelib_parse_from_format((char *)format.data(), (char *)date.data(),
+                              date.size(), &error, TimeZone::GetDatabase(),
+                              TimeZone::GetTimeZoneInfoRaw);
+  return DateTime::ParseTime(parsed_time, error);
+}
+
+Array DateTime::ParseAsStrptime(const String& format, const String& date) {
+  struct tm parsed_time;
+  memset(&parsed_time, 0, sizeof(parsed_time));
+  char* unparsed_part = strptime(date.data(), format.data(), &parsed_time);
+  if (unparsed_part == nullptr) {
+    return Array();
+  }
+
+  return make_map_array(
+    s_tm_sec,  parsed_time.tm_sec,
+    s_tm_min,  parsed_time.tm_min,
+    s_tm_hour, parsed_time.tm_hour,
+    s_tm_mday, parsed_time.tm_mday,
+    s_tm_mon,  parsed_time.tm_mon,
+    s_tm_year, parsed_time.tm_year,
+    s_tm_wday, parsed_time.tm_wday,
+    s_tm_yday, parsed_time.tm_yday,
+    s_unparsed, String(unparsed_part, CopyString)
+  );
+}
+
+Array DateTime::ParseTime(timelib_time* parsed_time,
+                          struct timelib_error_container* error) {
   Array ret;
   PHP_DATE_PARSE_DATE_SET_TIME_ELEMENT(s_year,      y);
   PHP_DATE_PARSE_DATE_SET_TIME_ELEMENT(s_month,     m);
@@ -230,27 +262,6 @@ Array DateTime::Parse(CStrRef datetime) {
   return ret;
 }
 
-Array DateTime::Parse(CStrRef ts, CStrRef format) {
-  struct tm parsed_time;
-  memset(&parsed_time, 0, sizeof(parsed_time));
-  char *unparsed_part = strptime(ts.data(), format.data(), &parsed_time);
-  if (unparsed_part == nullptr) {
-    return Array();
-  }
-
-  ArrayInit ret(9);
-  ret.set(s_tm_sec,  parsed_time.tm_sec);
-  ret.set(s_tm_min,  parsed_time.tm_min);
-  ret.set(s_tm_hour, parsed_time.tm_hour);
-  ret.set(s_tm_mday, parsed_time.tm_mday);
-  ret.set(s_tm_mon,  parsed_time.tm_mon);
-  ret.set(s_tm_year, parsed_time.tm_year);
-  ret.set(s_tm_wday, parsed_time.tm_wday);
-  ret.set(s_tm_yday, parsed_time.tm_yday);
-  ret.set(s_unparsed, String(unparsed_part, CopyString));
-  return ret.create();
-}
-
 ///////////////////////////////////////////////////////////////////////////////
 // constructors
 
@@ -263,6 +274,11 @@ DateTime::DateTime(int64_t timestamp, bool utc /* = false */) {
   fromTimeStamp(timestamp, utc);
 }
 
+DateTime::DateTime(int64_t timestamp, SmartResource<TimeZone> tz): m_tz(tz) {
+  fromTimeStamp(timestamp);
+}
+
+
 void DateTime::fromTimeStamp(int64_t timestamp, bool utc /* = false */) {
   m_timestamp = timestamp;
   m_timestampSet = true;
@@ -271,7 +287,9 @@ void DateTime::fromTimeStamp(int64_t timestamp, bool utc /* = false */) {
   if (utc) {
     timelib_unixtime2gmt(t, (timelib_sll)m_timestamp);
   } else {
-    m_tz = TimeZone::Current();
+    if (!m_tz.get()) {
+      m_tz = TimeZone::Current();
+    }
     t->tz_info = m_tz->get();
     t->zone_type = TIMELIB_ZONETYPE_ID;
     timelib_unixtime2local(t, (timelib_sll)m_timestamp);
@@ -421,15 +439,41 @@ void DateTime::setTimezone(SmartResource<TimeZone> timezone) {
   }
 }
 
-void DateTime::modify(CStrRef diff) {
+void DateTime::modify(const String& diff) {
   timelib_time *tmp_time = timelib_strtotime((char*)diff.data(), diff.size(),
                                              nullptr, TimeZone::GetDatabase(),
                                              TimeZone::GetTimeZoneInfoRaw);
-  internalModify(&(tmp_time->relative), tmp_time->have_relative, 1);
+  internalModify(tmp_time);
   timelib_time_dtor(tmp_time);
 }
 
-void DateTime::internalModify(timelib_rel_time *rel,
+void DateTime::internalModify(timelib_time *t) {
+  // TIMELIB_UNSET (and other constants) defined in timelib.h
+  // (see hhvm-third-party)
+  if (t->y != TIMELIB_UNSET) {
+    m_time->y = t->y;
+  }
+  if (t->m != TIMELIB_UNSET) {
+    m_time->m = t->m;
+  }
+  if (t->d != TIMELIB_UNSET) {
+    m_time->d = t->d;
+  }
+  if (t->h != TIMELIB_UNSET) {
+    m_time->h = t->h;
+    m_time->i = 0;
+    m_time->s = 0;
+    if (t->i != TIMELIB_UNSET) {
+      m_time->i = t->i;
+      if (t->s != TIMELIB_UNSET) {
+        m_time->s = t->s;
+      }
+    }
+  }
+  internalModifyRelative(&(t->relative), t->have_relative, 1);
+}
+
+void DateTime::internalModifyRelative(timelib_rel_time *rel,
                               bool have_relative, char bias) {
   m_time->relative.y = rel->y * bias;
   m_time->relative.m = rel->m * bias;
@@ -440,7 +484,10 @@ void DateTime::internalModify(timelib_rel_time *rel,
   m_time->relative.weekday = rel->weekday;
   m_time->have_relative = have_relative;
 #ifdef TIMELIB_HAVE_INTERVAL
+  m_time->relative.special = rel->special;
+  m_time->relative.have_special_relative = rel->have_special_relative;
   m_time->relative.have_weekday_relative = rel->have_weekday_relative;
+  m_time->relative.weekday_behavior = rel->weekday_behavior;
 #endif
   m_time->sse_uptodate = 0;
   update();
@@ -449,12 +496,12 @@ void DateTime::internalModify(timelib_rel_time *rel,
 
 void DateTime::add(const SmartResource<DateInterval> &interval) {
   timelib_rel_time *rel = interval->get();
-  internalModify(rel, true, TIMELIB_REL_INVERT(rel) ? -1 :  1);
+  internalModifyRelative(rel, true, TIMELIB_REL_INVERT(rel) ? -1 :  1);
 }
 
 void DateTime::sub(const SmartResource<DateInterval> &interval) {
   timelib_rel_time *rel = interval->get();
-  internalModify(rel, true, TIMELIB_REL_INVERT(rel) ?  1 : -1);
+  internalModifyRelative(rel, true, TIMELIB_REL_INVERT(rel) ?  1 : -1);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -526,7 +573,7 @@ int64_t DateTime::toInteger(char format) const {
   return -1;
 }
 
-String DateTime::toString(CStrRef format, bool stdc /* = false */) const {
+String DateTime::toString(const String& format, bool stdc /* = false */) const {
   if (format.empty()) return String();
   return stdc ? stdcFormat(format) : rfcFormat(format);
 }
@@ -549,7 +596,7 @@ String DateTime::toString(DateFormat format) const {
   return String();
 }
 
-String DateTime::rfcFormat(CStrRef format) const {
+String DateTime::rfcFormat(const String& format) const {
   StringBuffer s;
   bool rfc_colon = false;
   bool error;
@@ -589,24 +636,55 @@ String DateTime::rfcFormat(CStrRef format) const {
     case 'P': rfc_colon = true; /* break intentionally missing */
     case 'O':
       if (utc()) {
-        s.printf("+0%s0", rfc_colon ? ":" : "");
+        s.printf("+00%s00", rfc_colon ? ":" : "");
       } else {
-        int offset = m_tz->offset(toTimeStamp(error));
+        int offset = this->offset();
         s.printf("%c%02d%s%02d",
                  (offset < 0 ? '-' : '+'), abs(offset / 3600),
                  rfc_colon ? ":" : "", abs((offset % 3600) / 60));
       }
       break;
-    case 'T': s.append(utc() ? "GMT" : m_time->tz_abbr); break;
-    case 'e': s.append(utc() ? "UTC" : m_tz->name()); break;
-    case 'Z': s.append(utc() ? 0 : m_tz->offset(toTimeStamp(error)));
+    case 'T':
+      if (utc()) {
+        s.append("GMT");
+      } else {
+        if (m_time->zone_type != TIMELIB_ZONETYPE_OFFSET) {
+          s.append(m_time->tz_abbr);
+        } else {
+          auto offset = m_time->z * -60;
+          char abbr[9] = {0};
+          snprintf(abbr, 9, "GMT%c%02d%02d",
+            ((offset < 0) ? '-' : '+'),
+            abs(offset / 3600),
+            abs((offset % 3600) / 60));
+          s.append(abbr);
+        }
+      }
       break;
+    case 'e':
+      if (utc()) {
+        s.append("UTC");
+      } else {
+        if (m_time->zone_type != TIMELIB_ZONETYPE_OFFSET) {
+          s.append(m_tz->name());
+        } else {
+          auto offset = m_time->z * -60;
+          char abbr[7] = {0};
+          snprintf(abbr, 7, "%c%02d:%02d",
+            ((offset < 0) ? '-' : '+'),
+            abs(offset / 3600),
+            abs((offset % 3600) / 60));
+          s.append(abbr);
+        }
+      }
+      break;
+    case 'Z': s.append(utc() ? 0 : this->offset()); break;
     case 'c':
       if (utc()) {
-        s.printf("%04d-%02d-%02dT%02d:%02d:%02d+0:0",
+        s.printf("%04d-%02d-%02dT%02d:%02d:%02d+00:00",
                  year(), month(), day(), hour(), minute(), second());
       } else {
-        int offset = m_tz->offset(toTimeStamp(error));
+        int offset = this->offset();
         s.printf("%04d-%02d-%02dT%02d:%02d:%02d%c%02d:%02d",
                  year(), month(), day(), hour(), minute(), second(),
                  (offset < 0 ? '-' : '+'),
@@ -615,11 +693,11 @@ String DateTime::rfcFormat(CStrRef format) const {
       break;
     case 'r':
       if (utc()) {
-        s.printf("%3s, %02d %3s %04d %02d:%02d:%02d +00",
+        s.printf("%3s, %02d %3s %04d %02d:%02d:%02d +0000",
                  shortWeekdayName(), day(), shortMonthName(), year(),
                  hour(), minute(), second());
       } else {
-        int offset = m_tz->offset(toTimeStamp(error));
+        int offset = this->offset();
         s.printf("%3s, %02d %3s %04d %02d:%02d:%02d %c%02d%02d",
                  shortWeekdayName(), day(), shortMonthName(), year(),
                  hour(), minute(), second(),
@@ -638,7 +716,7 @@ String DateTime::rfcFormat(CStrRef format) const {
   return s.detach();
 }
 
-String DateTime::stdcFormat(CStrRef format) const {
+String DateTime::stdcFormat(const String& format) const {
   struct tm ta;
   timelib_time_offset *offset = nullptr;
   ta.tm_sec  = second();
@@ -684,58 +762,61 @@ String DateTime::stdcFormat(CStrRef format) const {
 }
 
 Array DateTime::toArray(ArrayFormat format) const {
-  Array ret;
   bool error;
   switch (format) {
   case ArrayFormat::TimeMap:
-    ret.set(s_seconds, second());
-    ret.set(s_minutes, minute());
-    ret.set(s_hours,   hour());
-    ret.set(s_mday,    day());
-    ret.set(s_wday,    dow());
-    ret.set(s_mon,     month());
-    ret.set(s_year,    year());
-    ret.set(s_yday,    doy());
-    ret.set(s_weekday, weekdayName());
-    ret.set(s_month,   monthName());
-    ret.set(0,         toTimeStamp(error));
-    break;
+    return make_map_array(
+      s_seconds, second(),
+      s_minutes, minute(),
+      s_hours,   hour(),
+      s_mday,    day(),
+      s_wday,    dow(),
+      s_mon,     month(),
+      s_year,    year(),
+      s_yday,    doy(),
+      s_weekday, weekdayName(),
+      s_month,   monthName(),
+      0,         toTimeStamp(error)
+    );
   case ArrayFormat::TmMap:
     {
       struct tm tm;
       toTm(tm);
-      ret.set(s_tm_sec,   tm.tm_sec);
-      ret.set(s_tm_min,   tm.tm_min);
-      ret.set(s_tm_hour,  tm.tm_hour);
-      ret.set(s_tm_mday,  tm.tm_mday);
-      ret.set(s_tm_mon,   tm.tm_mon);
-      ret.set(s_tm_year,  tm.tm_year);
-      ret.set(s_tm_wday,  tm.tm_wday);
-      ret.set(s_tm_yday,  tm.tm_yday);
-      ret.set(s_tm_isdst, tm.tm_isdst);
+      return make_map_array(
+        s_tm_sec,   tm.tm_sec,
+        s_tm_min,   tm.tm_min,
+        s_tm_hour,  tm.tm_hour,
+        s_tm_mday,  tm.tm_mday,
+        s_tm_mon,   tm.tm_mon,
+        s_tm_year,  tm.tm_year,
+        s_tm_wday,  tm.tm_wday,
+        s_tm_yday,  tm.tm_yday,
+        s_tm_isdst, tm.tm_isdst
+      );
     }
-    break;
   case ArrayFormat::TmVector:
     {
       struct tm tm;
       toTm(tm);
-      ret.append(tm.tm_sec);
-      ret.append(tm.tm_min);
-      ret.append(tm.tm_hour);
-      ret.append(tm.tm_mday);
-      ret.append(tm.tm_mon);
-      ret.append(tm.tm_year);
-      ret.append(tm.tm_wday);
-      ret.append(tm.tm_yday);
-      ret.append(tm.tm_isdst);
+      return make_packed_array(
+        tm.tm_sec,
+        tm.tm_min,
+        tm.tm_hour,
+        tm.tm_mday,
+        tm.tm_mon,
+        tm.tm_year,
+        tm.tm_wday,
+        tm.tm_yday,
+        tm.tm_isdst
+      );
     }
-    break;
   }
-  return ret;
+  return empty_array();
 }
 
-bool DateTime::fromString(CStrRef input, SmartResource<TimeZone> tz,
-                          const char* format /*=NUL*/) {
+bool DateTime::fromString(const String& input, SmartResource<TimeZone> tz,
+                          const char* format /*=NUL*/,
+                          bool throw_on_error /*= true*/) {
   struct timelib_error_container *error;
   timelib_time *t;
   if (format) {
@@ -744,7 +825,7 @@ bool DateTime::fromString(CStrRef input, SmartResource<TimeZone> tz,
                                   input.size(), &error, TimeZone::GetDatabase(),
                                   TimeZone::GetTimeZoneInfoRaw);
 #else
-    throw NotImplementedException("timelib version too old");
+    throw_not_implemented("timelib version too old");
 #endif
   } else {
     t = timelib_strtotime((char*)input.data(), input.size(),
@@ -753,6 +834,21 @@ bool DateTime::fromString(CStrRef input, SmartResource<TimeZone> tz,
   }
   int error1 = error->error_count;
   setLastErrors(error);
+  if (error1) {
+    timelib_time_dtor(t);
+    if (!throw_on_error) {
+      return false;
+    }
+    auto msg = folly::format(
+      "DateTime::__construct(): Failed to parse time string "
+      "({}) at position {} ({}): {}",
+      input.data(),
+      error->error_messages[0].position,
+      error->error_messages[0].character,
+      error->error_messages[0].message
+    ).str();
+    throw Object(SystemLib::AllocExceptionObject(msg));
+  }
 
   if (m_timestamp == -1) {
     fromTimeStamp(0);
@@ -777,14 +873,14 @@ bool DateTime::fromString(CStrRef input, SmartResource<TimeZone> tz,
 
   m_time = TimePtr(t, time_deleter());
   if (t->tz_info != m_tz->get()) {
-    m_tz = NEWOBJ(TimeZone)(timelib_tzinfo_clone(t->tz_info));
+    m_tz = newres<TimeZone>(t->tz_info);
   }
   return true;
 }
 
 SmartResource<DateTime> DateTime::cloneDateTime() const {
   bool err;
-  SmartResource<DateTime> ret(NEWOBJ(DateTime)(toTimeStamp(err), true));
+  SmartResource<DateTime> ret(newres<DateTime>(toTimeStamp(err), true));
   ret->setTimezone(m_tz);
   return ret;
 }
@@ -799,10 +895,10 @@ DateTime::diff(SmartResource<DateTime> datetime2, bool absolute) {
   if (absolute) {
     TIMELIB_REL_INVERT_SET(rel, 0);
   }
-  SmartResource<DateInterval> di(NEWOBJ(DateInterval)(rel));
+  SmartResource<DateInterval> di(newres<DateInterval>(rel));
   return di;
 #else
-  throw NotImplementedException("timelib version too old");
+  throw_not_implemented("timelib version too old");
 #endif
 }
 
@@ -915,19 +1011,11 @@ Variant DateTime::getSunInfo(SunInfoFormat retformat,
                     "SUNFUNCS_RET_DOUBLE");
     return false;
   }
-  bool error;
   double altitude = 90 - zenith;
-  if (utc_offset == -99999.0) {
-    if (utc()) {
-      utc_offset = 0;
-    } else {
-      utc_offset = m_tz->offset(toTimeStamp(error)) / 3600;
-    }
-  }
-
-  double h_rise, h_set; timelib_sll sunrise, sunset, transit;
+  double h_rise, h_set;
+  timelib_sll sunrise, sunset, transit;
   int rs = timelib_astro_rise_set_altitude(m_time.get(), longitude, latitude,
-                                           altitude, altitude > -1 ? 1 : 0,
+                                           altitude, 1,
                                            &h_rise, &h_set, &sunrise, &sunset,
                                            &transit);
   if (rs != 0) {

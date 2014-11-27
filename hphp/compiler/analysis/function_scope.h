@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,10 +18,15 @@
 #define incl_HPHP_FUNCTION_SCOPE_H_
 
 #include "hphp/compiler/expression/user_attribute.h"
+#include <list>
+#include <set>
+#include <utility>
+#include <vector>
 #include "hphp/compiler/analysis/block_scope.h"
 #include "hphp/compiler/option.h"
+#include "hphp/compiler/json.h"
 
-#include "hphp/util/json.h"
+#include "hphp/util/hash-map-typedefs.h"
 #include "hphp/parser/parser.h"
 
 namespace HPHP {
@@ -79,12 +84,12 @@ public:
    * System functions.
    */
   FunctionScope(bool method, const std::string &name, bool reference);
-  void setParamCounts(AnalysisResultConstPtr ar, int minParam, int maxParam);
+  void setParamCounts(AnalysisResultConstPtr ar,
+                      int minParam, int numDeclParam);
   void setParamSpecs(AnalysisResultPtr ar);
   void setParamName(int index, const std::string &name);
   void setParamDefault(int index, const char* value, int64_t len,
                        const std::string &text);
-  CStrRef getParamDefault(int index);
   void setRefParam(int index);
   bool hasRefParam(int max) const;
 
@@ -96,6 +101,7 @@ public:
    * What kind of function this is.
    */
   bool isUserFunction() const { return !m_system && !isNative(); }
+  bool isSystem() const { return m_system; }
   bool isDynamic() const { return m_dynamic; }
   bool isPublic() const;
   bool isProtected() const;
@@ -105,6 +111,7 @@ public:
   bool isNative() const;
   bool isFinal() const;
   bool isMagic() const;
+  bool isBuiltin() const override { return !getStmt() || isNative(); }
   bool isRefParam(int index) const;
   bool isRefReturn() const { return m_refReturn;}
   bool isDynamicInvoke() const { return m_dynamicInvoke; }
@@ -112,13 +119,11 @@ public:
   bool hasImpl() const;
   void setDirectInvoke() { m_directInvoke = true; }
   bool hasDirectInvoke() const { return m_directInvoke; }
-  bool isZendParamMode() const;
+  bool isParamCoerceMode() const;
   bool mayContainThis();
   bool isClosure() const;
   bool isGenerator() const { return m_generator; }
   void setGenerator(bool f) { m_generator = f; }
-  int allocYieldLabel() { return ++m_yieldLabelCount; }
-  int getYieldLabelCount() const { return m_yieldLabelCount; }
   bool isAsync() const { return m_async; }
   void setAsync(bool f) { m_async = f; }
 
@@ -155,8 +160,6 @@ public:
   const std::string &name() const {
     return getName();
   }
-
-  virtual std::string getId() const;
 
   int getRedeclaringId() const {
     return m_redeclaring;
@@ -196,10 +199,11 @@ public:
   /**
    * Whether this function can take variable number of arguments.
    */
-  bool isVariableArgument() const;
+  bool allowsVariableArguments() const;
+  bool hasVariadicParam() const;
+  bool usesVariableArgumentFunc() const;
   bool isReferenceVariableArgument() const;
   void setVariableArgument(int reference);
-  bool isMixedVariableArgument() const;
 
   /**
    * Whether this function has no side effects
@@ -216,14 +220,16 @@ public:
   /*
    * If this is a builtin function and does not need an ActRec
    */
-  bool needsActRec() const;
-  void setNeedsActRec();
+  bool noFCallBuiltin() const;
+  void setNoFCallBuiltin();
 
   /*
    * If this is a builtin (C++ or PHP) and can be redefined
    */
   bool allowOverride() const;
   void setAllowOverride();
+
+  bool needsFinallyLocals() const;
 
   /**
    * Whether this function is a runtime helper function
@@ -246,9 +252,12 @@ public:
   /**
    * How many parameters a caller should provide.
    */
-  int getMinParamCount() const { return m_minParam;}
-  int getMaxParamCount() const { return m_maxParam;}
-  int getOptionalParamCount() const { return m_maxParam - m_minParam;}
+  int getMinParamCount() const { return m_minParam; }
+  int getDeclParamCount() const { return m_numDeclParams; }
+  int getMaxParamCount() const {
+    return hasVariadicParam() ? (m_numDeclParams-1) : m_numDeclParams;
+  }
+  int getOptionalParamCount() const { return getMaxParamCount() - m_minParam;}
 
   /**
    * What is the inferred type of this function's return.
@@ -323,13 +332,6 @@ public:
    */
   bool matchParams(FunctionScopePtr func);
 
-  /**
-   * What is the inferred type of this function's parameter at specified
-   * index. Returns number of extra arguments to put into ArgumentArray.
-   */
-  int inferParamTypes(AnalysisResultPtr ar, ConstructPtr exp,
-                      ExpressionListPtr params, bool &valid);
-
   TypePtr setParamType(AnalysisResultConstPtr ar, int index, TypePtr type);
   TypePtr getParamType(int index);
   TypePtr getParamTypeSpec(int index) { return m_paramTypeSpecs[index]; }
@@ -338,6 +340,8 @@ public:
     string_eqstri> UserAttributeMap;
 
   UserAttributeMap& userAttributes() { return m_userAttributes;}
+
+  std::vector<std::string> getUserAttributeStringParams(const std::string& key);
 
   /**
    * Override BlockScope::outputPHP() to generate return type.
@@ -375,16 +379,12 @@ public:
   void getClosureUseVars(ParameterExpressionPtrIdxPairVec &useVars,
                          bool filterUsed = true);
 
-  bool needsAnonClosureClass(ParameterExpressionPtrVec &useVars);
-
-  bool needsAnonClosureClass(ParameterExpressionPtrIdxPairVec &useVars);
-
   void addCaller(BlockScopePtr caller, bool careAboutReturn = true);
   void addNewObjCaller(BlockScopePtr caller);
 
   ReadWriteMutex &getInlineMutex() { return m_inlineMutex; }
 
-  DECLARE_BOOST_TYPES(FunctionInfo);
+  DECLARE_EXTENDED_BOOST_TYPES(FunctionInfo);
 
   static void RecordFunctionInfo(std::string fname, FunctionScopePtr func);
 
@@ -394,7 +394,15 @@ public:
   public:
     explicit FunctionInfo(int rva = -1)
       : m_maybeStatic(false)
-      , m_maybeRefReturn(false)
+      /*
+       * Note: m_maybeRefReturn used to implement an optimization to
+       * avoid unbox checks when we call functions where we know no
+       * function with that name returns by reference.  This isn't
+       * correct, however, because __call can return by reference, so
+       * it's disabled here.  (The default to enable it should be
+       * 'false'.)
+       */
+      , m_maybeRefReturn(true)
       , m_refVarArg(rva)
     {}
 
@@ -431,12 +439,12 @@ private:
   static StringToFunctionInfoPtrMap s_refParamInfo;
 
   int m_minParam;
-  int m_maxParam;
+  int m_numDeclParams;
   int m_attribute;
   std::vector<std::string> m_paramNames;
   TypePtrVec m_paramTypes;
   TypePtrVec m_paramTypeSpecs;
-  std::vector<String> m_paramDefaults;
+  std::vector<std::string> m_paramDefaults;
   std::vector<std::string> m_paramDefaultTexts;
   std::vector<bool> m_refs;
   TypePtr m_returnType;
@@ -484,7 +492,6 @@ private:
   ExpressionListPtr m_closureValues;
   ReadWriteMutex m_inlineMutex;
   unsigned m_nextID; // used when cloning generators for traits
-  int m_yieldLabelCount; // number of allocated yield labels
   std::list<FunctionScopeRawPtr> m_clonedTraitOuterScope;
 };
 

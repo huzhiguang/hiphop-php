@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,10 +19,10 @@
 #include <unistd.h>
 #include <sys/param.h>
 #include "hphp/runtime/base/http-client.h"
-#include "hphp/runtime/ext/ext_json.h"
-#include "hphp/runtime/ext/ext_mb.h"
-#include "hphp/runtime/ext/ext_url.h"
-#include "hphp/runtime/ext/ext_file.h"
+#include "hphp/runtime/ext/json/ext_json.h"
+#include "hphp/runtime/ext/mbstring/ext_mbstring.h"
+#include "hphp/runtime/ext/std/ext_std_file.h"
+#include "hphp/runtime/ext/url/ext_url.h"
 
 using namespace HPHP;
 
@@ -43,7 +43,7 @@ bool TestLogger::initializeRun() {
   gethostname(buf, sizeof(buf));
   hostname = buf;
 
-  ArrayInit data(8);
+  ArrayInit data(8, ArrayInit::Map{});
   data.set(String("startedTime"),  time(nullptr));
   data.set(String("stillRunning"), true);
   data.set(String("hostname"),     hostname);
@@ -51,17 +51,15 @@ bool TestLogger::initializeRun() {
   data.set(String("repository"),   getRepoRoot());
   data.set(String("svnRevision"),  getSVNRevision());
   data.set(String("gitRevision"),  getGitRevision());
-  data.set(String("tags"),         CREATE_VECTOR2("hphp", "c++"));
+  data.set(String("tags"),         make_packed_array("hphp", "c++"));
 
   Array dataArr(data.create());
 
-  Array response = postData(CREATE_MAP1("runData", dataArr));
+  Array response = postData(make_map_array("runData", dataArr));
 
   if (!response[s_result].toBoolean()) {
     return false;
   }
-
-  run_id = response[s_result][s_runId].toInt32();
 
   return true;
 }
@@ -72,8 +70,8 @@ bool TestLogger::finishRun() {
   if (run_id <= 0)
     return false;
 
-  Array data = CREATE_MAP2("runId",   run_id,
-                           "runData", CREATE_MAP1("stillRunning", false));
+  Array data = make_map_array("runId",   run_id,
+                              "runData", make_map_array("stillRunning", false));
 
   Array response = postData(data);
   if (response[s_result].toBoolean()) {
@@ -88,9 +86,9 @@ bool TestLogger::logTest(Array test) {
   if (run_id <= 0)
     return false;
 
-  Array data = CREATE_MAP3("runId",   run_id,
-                           "runData", CREATE_MAP1("stillRunning", true),
-                           "tests",   CREATE_VECTOR1(test));
+  Array data = make_map_array("runId",   run_id,
+                              "runData", make_map_array("stillRunning", true),
+                              "tests",   make_packed_array(test));
 
   Array response = postData(data);
   if (response[s_result].toBoolean()) {
@@ -107,14 +105,14 @@ Array TestLogger::postData(Array arr) {
   HttpClient client;
   StringBuffer response;
 
-  Array data = CREATE_MAP2("method", "recordTestResults",
-                           "args", f_json_encode(CREATE_VECTOR1(arr)));
+  Array data = make_map_array("method", "recordTestResults", "args",
+                              HHVM_FN(json_encode)(make_packed_array(arr)));
 
-  String str = f_http_build_query(data);
+  String str = HHVM_FN(http_build_query)(data, "", "");
 
   client.post(log_url, str.c_str(), str.length(), response);
 
-  return f_json_decode(response.detach(), true).toArray();
+  return HHVM_FN(json_decode)(response.detach(), true).toArray();
 }
 
 std::string TestLogger::getRepoRoot() {
@@ -128,7 +126,7 @@ std::string TestLogger::getRepoRoot() {
 
     // Need to normalize of this commands succeeds
     if (getOutput("git rev-parse --show-cdup", out) != -1)
-      return f_realpath(String(out)).toString().data();
+      return HHVM_FN(realpath)(String(out)).toString().data();
   }
 
   // Fall back to our current directory
@@ -151,15 +149,6 @@ std::string TestLogger::getGitRevision() {
 }
 
 std::string TestLogger::getSVNRevision() {
-  std::string out;
-
-  // Redirect stderr to stdout so we don't get annoying messages
-  if (getOutput("svn info 2>&1", out) != -1) {
-    Variant regs;
-    f_mb_ereg("^Revision: (\\d+)$", out, ref(regs));
-    return regs[1].getStringData()->data();
-  }
-
   return "";
 }
 

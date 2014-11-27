@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,17 +17,20 @@
 #ifndef incl_HPHP_TIMEZONE_H_
 #define incl_HPHP_TIMEZONE_H_
 
-#include "hphp/runtime/base/types.h"
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/resource-data.h"
+#include "hphp/runtime/base/type-string.h"
 
 extern "C" {
 #include <timelib.h>
+#include <map>
+#include <memory>
 }
 
 namespace HPHP {
 
-typedef boost::shared_ptr<timelib_tzinfo> TimeZoneInfo;
-typedef std::map<std::string, TimeZoneInfo> MapStringToTimeZoneInfo;
+class Array;
+template <typename T> class SmartResource;
+
 ///////////////////////////////////////////////////////////////////////////////
 
 /**
@@ -42,14 +45,14 @@ public:
    */
   static String CurrentName();            // current timezone's name
   static SmartResource<TimeZone> Current(); // current timezone
-  static bool SetCurrent(CStrRef name);   // returns false if invalid
+  static bool SetCurrent(const String& name);   // returns false if invalid
 
   /**
    * TimeZone database queries.
    */
-  static bool IsValid(CStrRef name);
-  static Array GetNames();
+  static bool IsValid(const String& name);
   static Array GetAbbreviations();
+  static Array GetNamesToCountryCodes();
   static String AbbreviationToName(String abbr, int utcoffset = -1,
                                    bool isdst = true);
 
@@ -58,12 +61,15 @@ public:
    * Constructing a timezone object by name or a raw pointer (internal).
    */
   TimeZone();
-  explicit TimeZone(CStrRef name);
+  explicit TimeZone(const String& name);
   explicit TimeZone(timelib_tzinfo *tzi);
 
-  static StaticString s_class_name;
+  static StaticString& classnameof() {
+    static StaticString result("TimeZone");
+    return result;
+  }
   // overriding ResourceData
-  CStrRef o_getClassNameHook() const { return s_class_name; }
+  const String& o_getClassNameHook() const { return classnameof(); }
 
   /**
    * Whether this represents a valid timezone.
@@ -79,12 +85,12 @@ public:
   /**
    * Get offset from UTC at the specified timestamp under this timezone.
    */
-  int offset(int timestamp) const;
+  int offset(int64_t timestamp) const;
 
   /**
    * Test whether it was running under DST at specified timestamp.
    */
-  bool dst(int timestamp) const;
+  bool dst(int64_t timestamp) const;
 
   /**
    * Query transition times for DST.
@@ -117,30 +123,22 @@ protected:
   /**
    * Returns raw pointer. For internal use only.
    */
-  timelib_tzinfo *get() const { return m_tzi.get();}
+  timelib_tzinfo *get() const { return m_tzi; }
 
 private:
-  struct tzinfo_deleter {
-    void operator()(timelib_tzinfo *tzi) {
-      if (tzi) {
-        timelib_tzinfo_dtor(tzi);
-      }
-    }
-  };
-
   static const timelib_tzdb *GetDatabase();
 
   /**
    * Look up cache and if found return it, otherwise, read it from database.
    */
-  static TimeZoneInfo GetTimeZoneInfo(char* name, const timelib_tzdb* db);
-  /**
-   * only for timelib, don't use it unless you are passing to a timelib func
-   */
   static timelib_tzinfo* GetTimeZoneInfoRaw(char* name, const timelib_tzdb* db);
 
-  TimeZoneInfo m_tzi; // raw pointer
+  timelib_tzinfo* m_tzi;
 };
+
+///////////////////////////////////////////////////////////////////////////////
+
+void timezone_init();
 
 ///////////////////////////////////////////////////////////////////////////////
 }

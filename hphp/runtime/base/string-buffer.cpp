@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,11 +21,10 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 
-#include "folly/Conv.h"
+#include <folly/Conv.h>
 
 #include "hphp/runtime/base/file.h"
 #include "hphp/runtime/base/zend-functions.h"
-#include "hphp/runtime/ext/ext_json.h"
 
 #include "hphp/util/alloc.h"
 
@@ -37,9 +36,9 @@ StringBuffer::StringBuffer(int initialSize /* = SmallStringReserve */)
   , m_maxBytes(kDefaultOutputLimit)
   , m_len(0)
 {
-  assert(initialSize > 0);
+  assert(initialSize >= 0);
   m_str = StringData::Make(initialSize);
-  MutableSlice s = m_str->mutableSlice();
+  auto const s = m_str->bufferSlice();
   m_buffer = s.ptr;
   m_cap = s.len;
 }
@@ -71,7 +70,7 @@ String StringBuffer::detach() {
     m_cap = 0;
     return String(str); // causes incref
   }
-  return empty_string;
+  return empty_string();
 }
 
 String StringBuffer::copy() const {
@@ -91,7 +90,7 @@ void StringBuffer::absorb(StringBuffer& buf) {
     if (str) {
       buf.m_buffer = (char*)str->data();
       buf.m_len = str->size();
-      buf.m_cap = str->capacity() - 1;
+      buf.m_cap = str->capacity();
     } else {
       buf.m_buffer = 0;
       buf.m_len = 0;
@@ -138,7 +137,7 @@ char* StringBuffer::appendCursor(int size) {
       m_str->release();
       m_str = tmp;
     }
-    auto const s = m_str->mutableSlice();
+    auto const s = m_str->bufferSlice();
     m_buffer = s.ptr;
     m_cap = s.len;
   }
@@ -147,12 +146,13 @@ char* StringBuffer::appendCursor(int size) {
 
 void StringBuffer::append(int n) {
   char buf[12];
-  int is_negative;
   int len;
   const StringData *sd = String::GetIntegerStringData(n);
   char *p;
   if (!sd) {
-    p = conv_10(n, &is_negative, buf + 12, &len);
+    auto sl = conv_10(n, buf + 12);
+    p = const_cast<char*>(sl.ptr);
+    len = sl.len;
   } else {
     p = (char *)sd->data();
     len = sd->size();
@@ -162,12 +162,13 @@ void StringBuffer::append(int n) {
 
 void StringBuffer::append(int64_t n) {
   char buf[21];
-  int is_negative;
   int len;
   const StringData *sd = String::GetIntegerStringData(n);
   char *p;
   if (!sd) {
-    p = conv_10(n, &is_negative, buf + 21, &len);
+    auto sl = conv_10(n, buf + 21);
+    p = const_cast<char*>(sl.ptr);
+    len = sl.len;
   } else {
     p = (char *)sd->data();
     len = sd->size();
@@ -175,18 +176,26 @@ void StringBuffer::append(int64_t n) {
   append(p, len);
 }
 
-void StringBuffer::append(CVarRef v) {
+void StringBuffer::append(const Variant& v) {
   auto const cell = v.asCell();
   switch (cell->m_type) {
-  case KindOfStaticString:
-  case KindOfString:
-    append(cell->m_data.pstr);
-    break;
-  case KindOfInt64:
-    append(cell->m_data.num);
-    break;
-  default:
-    append(v.toString());
+    case KindOfInt64:
+      append(cell->m_data.num);
+      break;
+    case KindOfStaticString:
+    case KindOfString:
+      append(cell->m_data.pstr);
+      break;
+    case KindOfUninit:
+    case KindOfNull:
+    case KindOfBoolean:
+    case KindOfDouble:
+    case KindOfArray:
+    case KindOfObject:
+    case KindOfResource:
+    case KindOfRef:
+    case KindOfClass:
+      append(v.toString());
   }
 }
 
@@ -203,7 +212,7 @@ void StringBuffer::makeValid(int minCap) {
   assert(!m_len);
   m_str = StringData::Make(std::max(m_initialCap, minCap));
   m_buffer = (char*)m_str->data();
-  m_cap = m_str->capacity() - 1;
+  m_cap = m_str->capacity();
 }
 
 void StringBuffer::appendHelper(const char *s, int len) {
@@ -308,7 +317,7 @@ void StringBuffer::growBy(int spaceRequired) {
     m_str->release();
     m_str = tmp;
   }
-  auto const s = m_str->mutableSlice();
+  auto const s = m_str->bufferSlice();
   m_buffer = s.ptr;
   m_cap = s.len;
 }
@@ -316,7 +325,7 @@ void StringBuffer::growBy(int spaceRequired) {
 //////////////////////////////////////////////////////////////////////
 
 CstrBuffer::CstrBuffer(int cap)
-  : m_buffer((char*)Util::safe_malloc(cap + 1)), m_len(0), m_cap(cap) {
+  : m_buffer((char*)safe_malloc(cap + 1)), m_len(0), m_cap(cap) {
   assert(unsigned(cap) <= kMaxCap);
 }
 
@@ -331,7 +340,7 @@ CstrBuffer::CstrBuffer(const char *filename)
       throw StringBufferLimitException(kMaxCap, String(str.c_str()));
     }
     m_cap = sb.st_size;
-    m_buffer = (char *)Util::safe_malloc(m_cap + 1);
+    m_buffer = (char *)safe_malloc(m_cap + 1);
 
     int fd = ::open(filename, O_RDONLY);
     if (fd != -1) {
@@ -360,15 +369,17 @@ void CstrBuffer::append(StringSlice slice) {
   auto const data = slice.ptr;
   auto const len = slice.len;
 
-  assert(m_buffer && len >= 0);
+  static_assert(std::is_unsigned<typeof(len)>::value,
+                "len is supposed to be unsigned");
+  assert(m_buffer);
 
   unsigned newlen = m_len + len;
   if (newlen + 1 > m_cap) {
     if (newlen + 1 > kMaxCap) {
       throw StringBufferLimitException(kMaxCap, detach());
     }
-    unsigned newcap = Util::nextPower2(newlen + 1);
-    m_buffer = (char*)Util::safe_realloc(m_buffer, newcap);
+    unsigned newcap = folly::nextPowTwo(newlen + 1);
+    m_buffer = (char*)safe_realloc(m_buffer, newcap);
     m_cap = newcap - 1;
     assert(newlen + 1 <= m_cap);
   }

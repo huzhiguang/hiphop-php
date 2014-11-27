@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,20 +19,23 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <dirent.h>
-#include "folly/String.h"
+#include <map>
+#include <memory>
+#include <set>
+#include <utility>
+#include <vector>
+#include <folly/String.h>
 #include "hphp/compiler/analysis/analysis_result.h"
 #include "hphp/compiler/parser/parser.h"
 #include "hphp/compiler/analysis/symbol_table.h"
 #include "hphp/compiler/analysis/variable_table.h"
 #include "hphp/compiler/option.h"
+#include "hphp/compiler/json.h"
 #include "hphp/util/process.h"
-#include "hphp/util/util.h"
 #include "hphp/util/logger.h"
-#include "hphp/util/json.h"
-#include "hphp/util/db-conn.h"
-#include "hphp/util/db-query.h"
 #include "hphp/util/exception.h"
 #include "hphp/util/job-queue.h"
+#include "hphp/runtime/base/file-util.h"
 #include "hphp/runtime/base/execution-context.h"
 
 using namespace HPHP;
@@ -43,9 +46,9 @@ using std::set;
 Package::Package(const char *root, bool bShortTags /* = true */,
                  bool bAspTags /* = false */)
   : m_files(4000), m_dispatcher(0), m_lineCount(0), m_charCount(0) {
-  m_root = Util::normalizeDir(root);
+  m_root = FileUtil::normalizeDir(root);
   m_ar = AnalysisResultPtr(new AnalysisResult());
-  m_fileCache = FileCachePtr(new FileCache());
+  m_fileCache = std::make_shared<FileCache>();
 }
 
 void Package::addAllFiles(bool force) {
@@ -107,10 +110,10 @@ void Package::addDirectory(const char *path, bool force) {
 void Package::addPHPDirectory(const char *path, bool force) {
   vector<string> files;
   if (force) {
-    Util::find(files, m_root, path, true);
+    FileUtil::find(files, m_root, path, true);
   } else {
-    Util::find(files, m_root, path, true,
-               &Option::PackageExcludeDirs, &Option::PackageExcludeFiles);
+    FileUtil::find(files, m_root, path, true,
+                   &Option::PackageExcludeDirs, &Option::PackageExcludeFiles);
     Option::FilterFiles(files, Option::PackageExcludePatterns);
   }
   int rootSize = m_root.size();
@@ -132,13 +135,13 @@ void Package::getFiles(std::vector<std::string> &files) const {
   }
 }
 
-FileCachePtr Package::getFileCache() {
+std::shared_ptr<FileCache> Package::getFileCache() {
   for (set<string>::const_iterator iter = m_directories.begin();
        iter != m_directories.end(); ++iter) {
     vector<string> files;
-    Util::find(files, m_root, iter->c_str(), false,
-               &Option::PackageExcludeStaticDirs,
-               &Option::PackageExcludeStaticFiles);
+    FileUtil::find(files, m_root, iter->c_str(), false,
+                   &Option::PackageExcludeStaticDirs,
+                   &Option::PackageExcludeStaticFiles);
     Option::FilterFiles(files, Option::PackageExcludeStaticPatterns);
     for (unsigned int i = 0; i < files.size(); i++) {
       string &file = files[i];
@@ -152,7 +155,7 @@ FileCachePtr Package::getFileCache() {
   for (set<string>::const_iterator iter = m_staticDirectories.begin();
        iter != m_staticDirectories.end(); ++iter) {
     vector<string> files;
-    Util::find(files, m_root, iter->c_str(), false);
+    FileUtil::find(files, m_root, iter->c_str(), false);
     for (unsigned int i = 0; i < files.size(); i++) {
       string &file = files[i];
       string rpath = file.substr(m_root.size());
@@ -193,14 +196,14 @@ FileCachePtr Package::getFileCache() {
 ///////////////////////////////////////////////////////////////////////////////
 
 class ParserWorker :
-    public JobQueueWorker<std::pair<const char *,bool>, true, true> {
+    public JobQueueWorker<std::pair<const char *,bool>, Package*, true, true> {
 public:
   bool m_ret;
   ParserWorker() : m_ret(true) {}
   virtual void doJob(JobType job) {
     bool ret;
     try {
-      Package *package = (Package*)m_opaque;
+      Package *package = m_context;
       ret = package->parseImpl(job.first);
     } catch (Exception &e) {
       Logger::Error("%s", e.getMessage().c_str());
@@ -220,10 +223,11 @@ public:
 void Package::addSourceFile(const char *fileName, bool check /* = false */) {
   if (fileName && *fileName) {
     Lock lock(m_mutex);
-    bool inserted = m_filesToParse.insert(Util::canonicalize(fileName)).second;
+    auto canonFileName =
+      FileUtil::canonicalize(String(fileName)).toCppString();
+    bool inserted = m_filesToParse.insert(canonFileName).second;
     if (inserted && m_dispatcher) {
-      ((JobQueueDispatcher<ParserWorker::JobType,
-        ParserWorker>*)m_dispatcher)->enqueue(
+      ((JobQueueDispatcher<ParserWorker>*)m_dispatcher)->enqueue(
           std::make_pair(m_files.add(fileName), check));
     }
   }
@@ -240,7 +244,7 @@ bool Package::parse(bool check) {
   }
   if (threadCount <= 0) threadCount = 1;
 
-  JobQueueDispatcher<ParserWorker::JobType, ParserWorker>
+  JobQueueDispatcher<ParserWorker>
     dispatcher(threadCount, true, 0, false, this);
 
   m_dispatcher = &dispatcher;
@@ -297,7 +301,7 @@ bool Package::parseImpl(const char *fileName) {
   int lines = 0;
   try {
     Logger::Verbose("parsing %s ...", fullPath.c_str());
-    Scanner scanner(fullPath.c_str(), Option::GetScannerType(), true);
+    Scanner scanner(fullPath, Option::GetScannerType(), true);
     Compiler::Parser parser(scanner, fileName, m_ar, sb.st_size);
     parser.parse();
     lines = parser.line1();
@@ -354,55 +358,12 @@ void Package::saveStatsToFile(const char *filename, int totalSeconds) const {
 
     ms.add("VariableTableFunctions");
     JSON::CodeError::ListStream ls(o);
-    BOOST_FOREACH(const std::string &f, m_ar->m_variableTableFunctions) {
+    for (const std::string &f: m_ar->m_variableTableFunctions) {
       ls << f;
     }
     ls.done();
 
     ms.done();
     f.close();
-  }
-}
-
-int Package::saveStatsToDB(ServerDataPtr server, int totalSeconds,
-                           const std::string &branch, int revision) const {
-  std::map<std::string, int> counts;
-  SymbolTable::CountTypes(counts);
-  m_ar->countReturnTypes(counts);
-  std::ostringstream sout;
-  JSON::CodeError::OutputStream o(sout, m_ar);
-  o << counts;
-
-  DBConn conn;
-  conn.open(server);
-
-  const char *sql = "INSERT INTO hphp_run (branch, revision, file, line, "
-    "byte, program, function, class, types, time)";
-  DBQuery q(&conn, "%s", sql);
-  q.insert("'%s', %d, %d, %d, %d, %d, %d, %d, '%s', %d",
-           branch.c_str(), revision,
-           getFileCount(), getLineCount(), getCharCount(),
-           1, m_ar->getFunctionCount(),
-           m_ar->getClassCount(), sout.str().c_str(), totalSeconds);
-  q.execute();
-  return conn.getLastInsertId();
-}
-
-void Package::commitStats(ServerDataPtr server, int runId) const {
-  DBConn conn;
-  conn.open(server);
-
-  {
-    DBQuery q(&conn, "UPDATE hphp_dep");
-    q.setField("parent_file = parent");
-    q.filterBy("run = %d", runId);
-    q.filterBy("kind IN ('PHPInclude', 'PHPTemplate')");
-    q.execute();
-  }
-  {
-    DBQuery q(&conn, "UPDATE hphp_run");
-    q.setField("committed = 1");
-    q.filterBy("id = %d", runId);
-    q.execute();
   }
 }

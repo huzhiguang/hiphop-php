@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -35,15 +35,18 @@ struct HhbcExtFuncInfo {
 struct HhbcExtMethodInfo {
   const char* m_name;
   TypedValue* (*m_pGenericMethod)(ActRec* ar);
+  void* m_nativeFunc;
 };
 
 struct HhbcExtClassInfo {
   const char* m_name;
-  ObjectData* (*m_instanceCtor)(HPHP::Class*);
-  int m_sizeof;
+  BuiltinCtorFunction m_instanceCtor;
+  BuiltinDtorFunction m_instanceDtor;
+  size_t m_totalSize;
+  ptrdiff_t m_objectDataOffset;
   long long m_methodCount;
   const HhbcExtMethodInfo* m_methods;
-  HPHP::Class** m_clsPtr;
+  LowClassPtr* m_clsPtr;
 };
 
 extern const long long hhbc_ext_funcs_count;

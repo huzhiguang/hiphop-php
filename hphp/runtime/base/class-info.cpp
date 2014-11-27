@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,6 +15,8 @@
 */
 
 #include "hphp/runtime/base/class-info.h"
+#include <vector>
+#include "hphp/runtime/base/static-string-table.h"
 #include "hphp/runtime/base/array-util.h"
 #include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/base/externals.h"
@@ -22,7 +24,6 @@
 #include "hphp/runtime/base/variable-serializer.h"
 #include "hphp/runtime/base/variable-unserializer.h"
 #include "hphp/runtime/ext/extension.h"
-#include "hphp/util/util.h"
 #include "hphp/util/lock.h"
 #include "hphp/util/logger.h"
 
@@ -30,66 +31,30 @@ namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 // statics
 
+using std::string;
+
 bool ClassInfo::s_loaded = false;
 ClassInfo *ClassInfo::s_systemFuncs = nullptr;
 ClassInfo::ClassMap ClassInfo::s_class_like;
-ClassInfoHook *ClassInfo::s_hook = nullptr;
 
-Array ClassInfo::GetSystemFunctions() {
-  assert(s_loaded);
-
-  Array ret = Array::Create();
-  if (s_systemFuncs) {
-    const MethodVec &methods = s_systemFuncs->getMethodsVec();
-    for (unsigned i = 0; i < methods.size(); i++) {
-      ret.append(methods[i]->name);
-    }
-  }
-  return ret;
-}
-
-Array ClassInfo::GetUserFunctions() {
-  assert(s_loaded);
-
-  Array ret = Array::Create();
-  if (s_hook) {
-    Array dyn = s_hook->getUserFunctions();
-    if (!dyn.isNull()) {
-      ret.merge(dyn);
-      // De-dup values, then renumber (for aesthetics).
-      ret = ArrayUtil::StringUnique(ret).toArrRef();
-      ret->renumber();
-    }
-  }
-  return ret;
-}
-
-const ClassInfo::MethodInfo *ClassInfo::FindSystemFunction(CStrRef name) {
+const ClassInfo::MethodInfo *ClassInfo::FindSystemFunction(const String& name) {
   assert(!name.isNull());
   assert(s_loaded);
 
   return s_systemFuncs->getMethodInfo(name);
 }
 
-const ClassInfo::MethodInfo *ClassInfo::FindFunction(CStrRef name) {
+const ClassInfo::MethodInfo *ClassInfo::FindFunction(const String& name) {
   assert(!name.isNull());
   assert(s_loaded);
 
   const MethodInfo *ret = s_systemFuncs->getMethodInfo(name);
-  if (ret == nullptr && s_hook) {
-    ret = s_hook->findFunction(name);
-  }
   return ret;
 }
 
-const ClassInfo *ClassInfo::FindClassInterfaceOrTrait(CStrRef name) {
+const ClassInfo *ClassInfo::FindClassInterfaceOrTrait(const String& name) {
   assert(!name.isNull());
   assert(s_loaded);
-
-  if (s_hook) {
-    const ClassInfo *r = s_hook->findClassLike(name);
-    if (r) return r;
-  }
 
   ClassMap::const_iterator iter = s_class_like.find(name);
   if (iter != s_class_like.end()) {
@@ -99,28 +64,29 @@ const ClassInfo *ClassInfo::FindClassInterfaceOrTrait(CStrRef name) {
   return 0;
 }
 
-const ClassInfo *ClassInfo::FindClass(CStrRef name) {
+const ClassInfo *ClassInfo::FindClass(const String& name) {
   if (const ClassInfo *r = FindClassInterfaceOrTrait(name)) {
     return r->getAttribute() & (IsTrait|IsInterface) ? 0 : r;
   }
   return 0;
 }
 
-const ClassInfo *ClassInfo::FindInterface(CStrRef name) {
+const ClassInfo *ClassInfo::FindInterface(const String& name) {
   if (const ClassInfo *r = FindClassInterfaceOrTrait(name)) {
     return r->getAttribute() & IsInterface ? r : 0;
   }
   return 0;
 }
 
-const ClassInfo *ClassInfo::FindTrait(CStrRef name) {
+const ClassInfo *ClassInfo::FindTrait(const String& name) {
   if (const ClassInfo *r = FindClassInterfaceOrTrait(name)) {
     return r->getAttribute() & IsTrait ? r : 0;
   }
   return 0;
 }
 
-const ClassInfo *ClassInfo::FindSystemClassInterfaceOrTrait(CStrRef name) {
+const ClassInfo *
+ClassInfo::FindSystemClassInterfaceOrTrait(const String& name) {
   assert(!name.isNull());
   assert(s_loaded);
 
@@ -133,21 +99,21 @@ const ClassInfo *ClassInfo::FindSystemClassInterfaceOrTrait(CStrRef name) {
   return 0;
 }
 
-const ClassInfo *ClassInfo::FindSystemClass(CStrRef name) {
+const ClassInfo *ClassInfo::FindSystemClass(const String& name) {
   if (const ClassInfo *r = FindSystemClassInterfaceOrTrait(name)) {
     return r->getAttribute() & (IsTrait|IsInterface) ? 0 : r;
   }
   return 0;
 }
 
-const ClassInfo *ClassInfo::FindSystemInterface(CStrRef name) {
+const ClassInfo *ClassInfo::FindSystemInterface(const String& name) {
   if (const ClassInfo *r = FindSystemClassInterfaceOrTrait(name)) {
     return r->getAttribute() & IsInterface ? r : 0;
   }
   return 0;
 }
 
-const ClassInfo *ClassInfo::FindSystemTrait(CStrRef name) {
+const ClassInfo *ClassInfo::FindSystemTrait(const String& name) {
   if (const ClassInfo *r = FindSystemClassInterfaceOrTrait(name)) {
     return r->getAttribute() & IsTrait ? r : 0;
   }
@@ -161,34 +127,33 @@ Array ClassInfo::GetClassLike(unsigned mask, unsigned value) {
   for (ClassMap::const_iterator iter = s_class_like.begin();
        iter != s_class_like.end(); ++iter) {
     const ClassInfo *info = iter->second->getDeclared();
+
     if (!info || (info->m_attribute & mask) != value) continue;
     ret.append(info->m_name);
   }
-  if (s_hook) {
-    if (value & IsInterface) {
-      Array dyn = s_hook->getInterfaces();
-      if (!dyn.isNull()) {
-        ret.merge(dyn);
-        // De-dup values, then renumber (for aesthetics).
-        ret = ArrayUtil::StringUnique(ret).toArrRef();
-        ret->renumber();
-      }
-    } else if (value & IsTrait) {
-      Array dyn = s_hook->getTraits();
-      if (!dyn.isNull()) {
-        ret.merge(dyn);
-        // De-dup values, then renumber (for aesthetics).
-        ret = ArrayUtil::StringUnique(ret).toArrRef();
-        ret->renumber();
-      }
-    } else {
-      Array dyn = s_hook->getClasses();
-      if (!dyn.isNull()) {
-        ret.merge(dyn);
-        // De-dup values, then renumber (for aesthetics).
-        ret = ArrayUtil::StringUnique(ret).toArrRef();
-        ret->renumber();
-      }
+  if (value & IsInterface) {
+    Array dyn = Unit::getInterfacesInfo();
+    if (!dyn.isNull()) {
+      ret.merge(dyn);
+      // De-dup values, then renumber (for aesthetics).
+      ret = ArrayUtil::StringUnique(ret).toArrRef();
+      ret->renumber();
+    }
+  } else if (value & IsTrait) {
+    Array dyn = Unit::getTraitsInfo();
+    if (!dyn.isNull()) {
+      ret.merge(dyn);
+      // De-dup values, then renumber (for aesthetics).
+      ret = ArrayUtil::StringUnique(ret).toArrRef();
+      ret->renumber();
+    }
+  } else {
+    Array dyn = Unit::getClassesInfo();
+    if (!dyn.isNull()) {
+      ret.merge(dyn);
+      // De-dup values, then renumber (for aesthetics).
+      ret = ArrayUtil::StringUnique(ret).toArrRef();
+      ret->renumber();
     }
   }
   return ret;
@@ -198,10 +163,10 @@ ClassInfo::ConstantInfo::ConstantInfo() :
     valueLen(0), callback(nullptr), deferred(true) {
 }
 
-CVarRef ClassInfo::ConstantInfo::getDeferredValue() const {
+const Variant& ClassInfo::ConstantInfo::getDeferredValue() const {
   assert(deferred);
   if (callback) {
-    CVarRef (*f)()=(CVarRef(*)())callback;
+    const Variant& (*f)()=(const Variant&(*)())callback;
     return (*f)();
   }
   EnvConstants* g = get_env_constants();
@@ -217,21 +182,23 @@ Variant ClassInfo::ConstantInfo::getValue() const {
       VariableUnserializer vu(svalue.data(), svalue.size(),
                               VariableUnserializer::Type::Serialize);
       return vu.unserialize();
-    } catch (Exception &e) {
+    } catch (ResourceExceededException&) {
+      throw;
+    } catch (Exception&) {
       assert(false);
     }
   }
   return value;
 }
 
-void ClassInfo::ConstantInfo::setValue(CVarRef value) {
+void ClassInfo::ConstantInfo::setValue(const Variant& value) {
   VariableSerializer vs(VariableSerializer::Type::Serialize);
   String s = vs.serialize(value, true);
-  svalue = string(s.data(), s.size());
+  svalue = std::string(s.data(), s.size());
   deferred = false;
 }
 
-void ClassInfo::ConstantInfo::setStaticValue(CVarRef v) {
+void ClassInfo::ConstantInfo::setStaticValue(const Variant& v) {
   value = v;
   value.setEvalScalar();
   deferred = false;
@@ -272,12 +239,12 @@ Variant ClassInfo::UserAttributeInfo::getValue() const {
   return value;
 }
 
-void ClassInfo::UserAttributeInfo::setStaticValue(CVarRef v) {
+void ClassInfo::UserAttributeInfo::setStaticValue(const Variant& v) {
   value = v;
   value.setEvalScalar();
 }
 
-bool ClassInfo::GetClassMethods(MethodVec &ret, CStrRef classname,
+bool ClassInfo::GetClassMethods(MethodVec &ret, const String& classname,
                                 int type /* = 0 */) {
   if (classname.empty()) return false;
 
@@ -308,7 +275,7 @@ bool ClassInfo::GetClassMethods(MethodVec &ret, const ClassInfo *classInfo) {
   ret.insert(ret.end(), methods.begin(), methods.end());
 
   if (!(classInfo->getAttribute() & (IsInterface|IsTrait))) {
-    CStrRef parentClass = classInfo->getParentClass();
+    const String& parentClass = classInfo->getParentClass();
     if (!parentClass.empty()) {
       if (!GetClassMethods(ret, parentClass, 1)) return false;
     }
@@ -321,112 +288,6 @@ bool ClassInfo::GetClassMethods(MethodVec &ret, const ClassInfo *classInfo) {
   }
 
   return true;
-}
-
-void ClassInfo::GetClassSymbolNames(CArrRef names, bool interface, bool trait,
-                                    std::vector<String> &classes,
-                                    std::vector<String> *clsMethods,
-                                    std::vector<String> *clsProperties,
-                                    std::vector<String> *clsConstants) {
-  if (clsMethods || clsProperties || clsConstants) {
-    for (ArrayIter iter(names); iter; ++iter) {
-      String clsname = iter.second().toString();
-      classes.push_back(clsname);
-
-      const ClassInfo *cls;
-      if (interface) {
-        cls = FindInterface(clsname.data());
-      } else if (trait) {
-        cls = FindTrait(clsname.data());
-      } else {
-        try {
-          cls = FindClass(clsname.data());
-        } catch (Exception &e) {
-          Logger::Error("Caught exception %s", e.getMessage().c_str());
-          continue;
-        } catch(...) {
-          Logger::Error("Caught unknown exception");
-          continue;
-        }
-      }
-      assert(cls);
-      if (clsMethods) {
-        const ClassInfo::MethodVec &methods = cls->getMethodsVec();
-        for (unsigned int i = 0; i < methods.size(); i++) {
-          clsMethods->push_back(clsname + "::" + methods[i]->name);
-        }
-      }
-      if (clsProperties) {
-        const ClassInfo::PropertyVec &properties = cls->getPropertiesVec();
-        for (ClassInfo::PropertyVec::const_iterator iter = properties.begin();
-             iter != properties.end(); ++iter) {
-          clsProperties->push_back(clsname + "::$" + (*iter)->name);
-        }
-      }
-      if (clsConstants) {
-        const ClassInfo::ConstantVec &constants = cls->getConstantsVec();
-        for (ClassInfo::ConstantVec::const_iterator iter = constants.begin();
-             iter != constants.end(); ++iter) {
-          clsConstants->push_back(clsname + "::" + (*iter)->name);
-        }
-      }
-    }
-  } else {
-    for (ArrayIter iter(names); iter; ++iter) {
-      classes.push_back(iter.second().toString());
-    }
-  }
-}
-
-void ClassInfo::GetSymbolNames(std::vector<String> &classes,
-                               std::vector<String> &functions,
-                               std::vector<String> &constants,
-                               std::vector<String> *clsMethods,
-                               std::vector<String> *clsProperties,
-                               std::vector<String> *clsConstants) {
-  static unsigned int methodSize = 128;
-  static unsigned int propSize   = 128;
-  static unsigned int constSize  = 128;
-
-  if (clsMethods) {
-    clsMethods->reserve(methodSize);
-  }
-  if (clsProperties) {
-    clsProperties->reserve(propSize);
-  }
-  if (clsConstants) {
-    clsConstants->reserve(constSize);
-  }
-
-  GetClassSymbolNames(GetClasses(), false, false, classes,
-                      clsMethods, clsProperties, clsConstants);
-  GetClassSymbolNames(GetInterfaces(), true, false, classes,
-                      clsMethods, clsProperties, clsConstants);
-
-  if (clsMethods && methodSize < clsMethods->size()) {
-    methodSize = clsMethods->size();
-  }
-  if (clsProperties && propSize < clsProperties->size()) {
-    propSize = clsProperties->size();
-  }
-  if (constSize && constSize < clsConstants->size()) {
-    constSize = clsConstants->size();
-  }
-
-  Array funcs1 = ClassInfo::GetSystemFunctions();
-  Array funcs2 = ClassInfo::GetUserFunctions();
-  functions.reserve(funcs1.size() + funcs2.size());
-  for (ArrayIter iter(funcs1); iter; ++iter) {
-    functions.push_back(iter.second().toString());
-  }
-  for (ArrayIter iter(funcs2); iter; ++iter) {
-    functions.push_back(iter.second().toString());
-  }
-  Array consts = StringData::GetConstants();
-  constants.reserve(consts.size());
-  for (ArrayIter iter(consts); iter; ++iter) {
-    constants.push_back(iter.first().toString());
-  }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -443,12 +304,12 @@ const ClassInfo *ClassInfo::getDeclared() const {
 }
 
 const ClassInfo *ClassInfo::getParentClassInfo() const {
-  CStrRef parentName = getParentClass();
+  const String& parentName = getParentClass();
   if (parentName.empty()) return nullptr;
   return FindClass(parentName);
 }
 
-ClassInfo::MethodInfo *ClassInfo::getMethodInfo(CStrRef name) const {
+ClassInfo::MethodInfo *ClassInfo::getMethodInfo(const String& name) const {
   assert(!name.isNull());
 
   const MethodMap &methods = getMethods();
@@ -463,7 +324,7 @@ ClassInfo::MethodInfo *ClassInfo::getMethodInfo(CStrRef name) const {
   return nullptr;
 }
 
-ClassInfo::MethodInfo *ClassInfo::hasMethod(CStrRef name,
+ClassInfo::MethodInfo *ClassInfo::hasMethod(const String& name,
                                             ClassInfo* &classInfo,
                                             bool interfaces /* = false */)
 const {
@@ -493,18 +354,18 @@ const {
 ///////////////////////////////////////////////////////////////////////////////
 // load functions
 
-static String makeStaticString(const char *s) {
+static String staticString(const char *s) {
   if (!s) {
-    return null_string;
+    return String();
   }
-  return StringData::GetStaticString(s);
+  return makeStaticString(s);
 }
 
 void ClassInfo::ReadUserAttributes(const char **&p,
                                    std::vector<const UserAttributeInfo*> &userAttrVec) {
   while (*p) {
     UserAttributeInfo *userAttr = new UserAttributeInfo();
-    userAttr->name = makeStaticString(*p++);
+    userAttr->name = staticString(*p++);
 
     const char *len = *p++;
     const char *valueText = *p++;
@@ -526,7 +387,7 @@ ClassInfo::MethodInfo *ClassInfo::MethodInfo::getDeclared() {
 
 ClassInfo::MethodInfo::MethodInfo(const char **&p) {
   attribute = (Attribute)(int64_t)(*p++);
-  name = makeStaticString(*p++);
+  name = staticString(*p++);
   docComment = "";
   if (attribute & ClassInfo::IsRedeclared) {
     volatile_redec_offset = (int)(int64_t)(*p++);
@@ -545,7 +406,9 @@ ClassInfo::MethodInfo::MethodInfo(const char **&p) {
     docComment = *p++;
 
     if (attribute & IsSystem) {
-      returnType = (DataType)(int64_t)(*p++);
+      auto dt = static_cast<DataType>((int64_t)(*p++));
+      returnType = dt == kInvalidDataType ? folly::none
+                                          : MaybeDataType(dt);
     }
     while (*p) {
       ParameterInfo *parameter = new ParameterInfo();
@@ -553,7 +416,9 @@ ClassInfo::MethodInfo::MethodInfo(const char **&p) {
       parameter->name = *p++;
       parameter->type = *p++;
       if (attribute & IsSystem) {
-        parameter->argType = (DataType)(int64_t)(*p++);
+        auto dt = static_cast<DataType>((int64_t)(*p++));
+        parameter->argType = dt == kInvalidDataType ? folly::none
+                                                    : MaybeDataType(dt);
       }
       parameter->value = *p++;
       parameter->valueLen = (int64_t)*p++;
@@ -569,7 +434,7 @@ ClassInfo::MethodInfo::MethodInfo(const char **&p) {
 
     while (*p) {
       ConstantInfo *staticVariable = new ConstantInfo();
-      staticVariable->name = makeStaticString(*p++);
+      staticVariable->name = staticString(*p++);
       staticVariable->valueLen = (int64_t)(*p++);
       staticVariable->valueText = *p++;
       VariableUnserializer vu(staticVariable->valueText,
@@ -598,8 +463,8 @@ ClassInfoUnique::ClassInfoUnique(const char **&p) {
   // from hphp_process_init() in the thread-neutral initialization phase.
   // It is OK to create StaticStrings here, and throw the smart ptrs away,
   // because the underlying static StringData will not be released.
-  m_name = makeStaticString(*p++);
-  m_parent = makeStaticString(*p++);
+  m_name = staticString(*p++);
+  m_parent = staticString(*p++);
   m_parentInfo = 0;
 
   m_file = *p++;
@@ -613,7 +478,7 @@ ClassInfoUnique::ClassInfoUnique(const char **&p) {
   m_docComment = *p++;
 
   while (*p) {
-    String iface_name = makeStaticString(*p++);
+    String iface_name = staticString(*p++);
     assert(m_interfaces.find(iface_name) == m_interfaces.end());
     m_interfaces.insert(iface_name);
     m_interfacesVec.push_back(iface_name);
@@ -632,8 +497,10 @@ ClassInfoUnique::ClassInfoUnique(const char **&p) {
   while (*p) {
     PropertyInfo *property = new PropertyInfo();
     property->attribute = (Attribute)(int64_t)(*p++);
-    property->name = makeStaticString(*p++);
-    property->type = DataType((int)uintptr_t(*p++));
+    property->name = staticString(*p++);
+    auto dt = static_cast<DataType>((int)uintptr_t(*p++));
+    property->type = dt == kInvalidDataType ? folly::none
+                                            : MaybeDataType(dt);
     property->owner = this;
     assert(m_properties.find(property->name) == m_properties.end());
     m_properties[property->name] = property;
@@ -643,7 +510,7 @@ ClassInfoUnique::ClassInfoUnique(const char **&p) {
 
   while (*p) {
     ConstantInfo *constant = new ConstantInfo();
-    constant->name = makeStaticString(*p++);
+    constant->name = staticString(*p++);
     const char *len_or_cw = *p++;
     constant->valueText = *p++;
 
@@ -654,7 +521,9 @@ ClassInfoUnique::ClassInfoUnique(const char **&p) {
                               VariableUnserializer::Type::Serialize);
       try {
         constant->setStaticValue(vu.unserialize());
-      } catch (Exception &e) {
+      } catch (ResourceExceededException&) {
+        throw;
+      } catch (Exception&) {
         assert(false);
       }
     } else if (constant->valueText) {
@@ -662,7 +531,7 @@ ClassInfoUnique::ClassInfoUnique(const char **&p) {
       constant->valueLen = 0;
       constant->valueText = nullptr;
       Variant v;
-      if (dt == KindOfUnknown) {
+      if (dt == kInvalidDataType) {
         constant->valueLen = intptr_t(len_or_cw);
       } else {
         v = ClassInfo::GetVariant(dt, len_or_cw);
@@ -680,7 +549,7 @@ ClassInfoUnique::ClassInfoUnique(const char **&p) {
 
   while (*p) {
     UserAttributeInfo *userAttr = new UserAttributeInfo();
-    userAttr->name = makeStaticString(*p++);
+    userAttr->name = staticString(*p++);
 
     const char *len = *p++;
     const char *valueText = *p++;
@@ -767,16 +636,14 @@ ClassInfo::ParameterInfo::~ParameterInfo() {
 
 ClassInfo::MethodInfo::~MethodInfo() {
   if (attribute & ClassInfo::IsRedeclared) {
-    for (vector<const ParameterInfo *>::iterator it = parameters.begin();
-         it != parameters.end(); ++it) {
+    for (auto it = parameters.begin(); it != parameters.end(); ++it) {
       delete (MethodInfo*)(void*)*it;
     }
   } else {
-    for (vector<const ParameterInfo *>::iterator it = parameters.begin();
-         it != parameters.end(); ++it) {
+    for (auto it = parameters.begin(); it != parameters.end(); ++it) {
       delete *it;
     }
-    for (vector<const ConstantInfo *>::iterator it = staticVariables.begin();
+    for (auto it = staticVariables.begin();
          it != staticVariables.end(); ++it) {
       delete *it;
     }
@@ -788,4 +655,3 @@ ClassInfo::MethodInfo::~MethodInfo() {
 
 ///////////////////////////////////////////////////////////////////////////////
 }
-

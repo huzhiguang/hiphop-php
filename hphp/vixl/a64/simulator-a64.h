@@ -27,6 +27,9 @@
 #ifndef VIXL_A64_SIMULATOR_A64_H_
 #define VIXL_A64_SIMULATOR_A64_H_
 
+#include <iosfwd>
+#include <stack>
+
 #include "hphp/vixl/globals.h"
 #include "hphp/vixl/utils.h"
 #include "hphp/vixl/a64/instructions-a64.h"
@@ -57,12 +60,12 @@ enum ReverseByteMode {
 //    x0: The format string
 // x1-x7: Optional arguments, if type == CPURegister::kRegister
 // d0-d7: Optional arguments, if type == CPURegister::kFPRegister
-const Instr kPrintfOpcode = 0xdeb1;
-const unsigned kPrintfTypeOffset = 1 * kInstructionSize;
-const unsigned kPrintfLength = 2 * kInstructionSize;
+constexpr Instr kPrintfOpcode = 0xdeb1;
+constexpr unsigned kPrintfTypeOffset = 1 * kInstructionSize;
+constexpr unsigned kPrintfLength = 2 * kInstructionSize;
 
-const Instr kHostCallOpcode = 0xdeb4;
-const unsigned kHostCallCountOffset = 1 * kInstructionSize;
+constexpr Instr kHostCallOpcode = 0xdeb4;
+constexpr unsigned kHostCallCountOffset = 1 * kInstructionSize;
 
 // The proper way to initialize a simulated system register (such as NZCV) is as
 // follows:
@@ -118,7 +121,7 @@ class SimSystemRegister {
 
 class Simulator : public DecoderVisitor {
  public:
-  explicit Simulator(Decoder* decoder, FILE* stream = stdout);
+  explicit Simulator(Decoder* decoder, std::ostream& stream);
   ~Simulator();
 
   void ResetState();
@@ -136,12 +139,26 @@ class Simulator : public DecoderVisitor {
     float s;
   };
 
+  // When an exception is thrown through simulated code, call this hook. The
+  // hook returns a new instruction pointer at which to resume execution, or
+  // nullptr to continue execution normally.
+  typedef Instruction*(*ExceptionHook)(Simulator*, std::exception_ptr);
+  void set_exception_hook(ExceptionHook hook) {
+    exception_hook_ = hook;
+  }
+
+  void resume_last_exception() {
+    auto exn = exns_in_flight_.top();
+    exns_in_flight_.pop();
+    std::rethrow_exception(exn);
+  }
+
   // Run the simulator.
   virtual void Run();
   void RunFrom(Instruction* first);
 
   // Simulation helpers.
-  inline Instruction* pc() { return pc_; }
+  inline Instruction* pc() const { return pc_; }
   inline void set_pc(Instruction* new_pc) {
     pc_ = new_pc;
     pc_modified_ = true;
@@ -206,6 +223,12 @@ class Simulator : public DecoderVisitor {
     }
     registers_[code].x = 0;  // First clear the register top bits.
     registers_[code].w = value;
+  }
+
+  template<typename T>
+  inline void set_xreg(unsigned code, T* value,
+                       Reg31Mode r31mode = Reg31IsZeroRegister) {
+    set_xreg(code, reinterpret_cast<int64_t>(value), r31mode);
   }
 
   inline void set_xreg(unsigned code, int64_t value,
@@ -373,16 +396,14 @@ class Simulator : public DecoderVisitor {
       disasm_trace_ = value;
     }
   }
-  inline void set_instruction_stats(bool value) {
-    if (value != instruction_stats_) {
-      if (value) {
-        decoder_->AppendVisitor(instrumentation_);
-      } else {
-        decoder_->RemoveVisitor(instrumentation_);
-      }
-      instruction_stats_ = value;
-    }
+
+  bool is_on_stack(void* ptr) const {
+    return uint64_t((byte*)ptr - stack_) < (uint64_t)stack_size_;
   }
+
+  uint64_t load_count() const { return load_count_; }
+  uint64_t store_count() const { return store_count_; }
+  uint64_t instr_count() const { return instr_count_; }
 
  protected:
   // Simulation helpers ------------------------------------
@@ -498,11 +519,15 @@ class Simulator : public DecoderVisitor {
   // Processor state ---------------------------------------
 
   // Output stream.
-  FILE* stream_;
+  std::ostream& stream_;
   PrintDisassembler* print_disasm_;
 
   // Instruction statistics instrumentation.
   Instrument* instrumentation_;
+
+  // Hook to handle exceptions being thrown through simulated code.
+  ExceptionHook exception_hook_ = nullptr;
+  std::stack<std::exception_ptr> exns_in_flight_;
 
   // General purpose registers. Register 31 is the stack pointer.
   SimRegister registers_[kNumberOfRegisters];
@@ -547,8 +572,8 @@ class Simulator : public DecoderVisitor {
   // Stack
   byte* stack_;
   static const int stack_protection_size_ = 256;
-  // 2 KB stack.
-  static const int stack_size_ = 2 * 1024 + 2 * stack_protection_size_;
+  // 512 KB stack.
+  static const int stack_size_ = (512 << 10) + 2 * stack_protection_size_;
   byte* stack_limit_;
 
   Decoder* decoder_;
@@ -556,6 +581,12 @@ class Simulator : public DecoderVisitor {
   // automatically incremented.
   bool pc_modified_;
   Instruction* pc_;
+
+  // Counters for basic simulated-system events. Note that the load counter does
+  // not count instruction fetches, only explicit loads.
+  uint64_t load_count_ = 0;
+  uint64_t store_count_ = 0;
+  uint64_t instr_count_ = 0;
 
   static const char* xreg_names[];
   static const char* wreg_names[];
@@ -570,9 +601,6 @@ class Simulator : public DecoderVisitor {
 
   // Indicates whether the disassembly trace is active.
   bool disasm_trace_;
-
-  // Indicates whether the instruction instrumentation is active.
-  bool instruction_stats_;
 };
 }  // namespace vixl
 

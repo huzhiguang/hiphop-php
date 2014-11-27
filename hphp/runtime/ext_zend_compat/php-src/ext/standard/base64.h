@@ -21,16 +21,18 @@
 #ifndef BASE64_H
 #define BASE64_H
 
-#include "hphp/runtime/ext/ext_url.h"
+PHP_FUNCTION(base64_decode);
+PHP_FUNCTION(base64_encode);
 
-PHPAPI inline unsigned char *php_base64_decode_ex(const unsigned char *str, int length, int *ret_length, zend_bool strict) {
-  HPHP::Variant ret = f_base64_decode(HPHP::String(str, length, HPHP::CopyString), strict);
-  HPHP::String stringRet = ret.toString();
-  *ret_length = stringRet.size();
-  return stringRet.data();
-}
-PHPAPI inline unsigned char *php_base64_decode(const unsigned char *str, int length, int *ret_length) {
-  return php_base64_decode_ex(str, length, ret_length, 0);
-}
+PHPAPI extern unsigned char *php_base64_encode(const unsigned char *, int, int *);
+PHPAPI extern unsigned char *php_base64_decode_ex(const unsigned char *, int, int *, zend_bool);
+PHPAPI extern unsigned char *php_base64_decode(const unsigned char *, int, int *);
 
 #endif /* BASE64_H */
+
+/*
+ * Local variables:
+ * tab-width: 4
+ * c-basic-offset: 4
+ * End:
+ */

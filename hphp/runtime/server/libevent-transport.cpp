@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,7 +18,6 @@
 #include "hphp/runtime/server/libevent-server.h"
 #include "hphp/runtime/server/server.h"
 #include "hphp/runtime/base/runtime-option.h"
-#include "hphp/util/util.h"
 #include "hphp/util/logger.h"
 
 namespace HPHP {
@@ -33,19 +32,14 @@ LibEventTransport::LibEventTransport(LibEventServer *server,
                                      evhttp_request *request,
                                      int workerId)
   : m_server(server), m_request(request), m_eventBasePostData(nullptr),
-    m_workerId(workerId), m_sendStarted(false), m_sendEnded(false) {
+    m_workerId(workerId), m_sendStarted(false) {
   // HttpProtocol::PrepareSystemVariables needs this
   evbuffer *buf = m_request->input_buffer;
   assert(buf);
   m_requestSize = EVBUFFER_LENGTH(buf);
-  if (m_requestSize) {
-    evbuffer_expand(buf, m_requestSize + 1); // allowing NULL termination
-    // EVBUFFER_DATA(buf) might change after evbuffer_expand
-    ((char*)EVBUFFER_DATA(buf))[m_requestSize] = '\0';
-  }
-
   m_remote_host = m_request->remote_host;
   m_remote_port = m_request->remote_port;
+  m_remote_ip = folly::IPAddress(m_remote_host);
 
   {
     char buf[6];
@@ -101,6 +95,12 @@ uint16_t LibEventTransport::getRemotePort() {
   return m_remote_port;
 }
 
+const char *LibEventTransport::getServerAddr() {
+  return m_remote_ip.isV6() ?
+    RuntimeOption::ServerPrimaryIPv6.c_str() :
+    RuntimeOption::ServerPrimaryIPv4.c_str();
+}
+
 const void *LibEventTransport::getPostData(int &size) {
   if (m_sendEnded) {
     size = 0;
@@ -148,9 +148,6 @@ const void *LibEventTransport::getMorePostData(int &size) {
     buf = m_request->input_buffer;
     assert(buf);
     size = EVBUFFER_LENGTH(buf);
-    evbuffer_expand(buf, size + 1); // allowing NULL termination
-    // EVBUFFER_DATA(buf) might change after evbuffer_expand
-    ((char*)EVBUFFER_DATA(buf))[size] = '\0';
     if (m_request->ntoread == 0) {
       if (m_eventBasePostData != nullptr) {
         event_base_free(m_eventBasePostData);

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,10 +14,10 @@
    +----------------------------------------------------------------------+
 */
 
-#include "hphp/runtime/base/complex-types.h"
-#include "hphp/runtime/base/variable-serializer.h"
-#include "hphp/runtime/base/execution-context.h"
+#include "hphp/runtime/base/type-resource.h"
+
 #include "hphp/runtime/base/builtin-functions.h"
+#include "hphp/runtime/base/type-string.h"
 
 #include "hphp/system/systemlib.h"
 
@@ -27,15 +27,23 @@ namespace HPHP {
 const Resource Resource::s_nullResource = Resource();
 
 Resource::~Resource() {
-  if (LIKELY(m_px != 0)) {
-    if (UNLIKELY(m_px->decRefCount() == 0)) {
-      delete m_px;
-    }
-  }
+  // force it out of line
+}
+
+String Resource::toString() const {
+  return m_px ? m_px->o_toString() : String();
 }
 
 Array Resource::toArray() const {
   return m_px ? m_px->o_toArray() : Array();
+}
+
+const char* Resource::classname_cstr() const {
+  return m_px->o_getClassName().c_str();
+}
+
+void Resource::compileTimeAssertions() {
+  static_assert(sizeof(Resource) == sizeof(ResourceBase), "Fix this.");
 }
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,6 +15,7 @@
 */
 
 #include "hphp/compiler/statement/global_statement.h"
+#include <set>
 #include "hphp/compiler/statement/block_statement.h"
 #include "hphp/compiler/expression/expression_list.h"
 #include "hphp/compiler/analysis/block_scope.h"
@@ -97,42 +98,15 @@ StatementPtr GlobalStatement::preOptimize(AnalysisResultConstPtr ar) {
   return StatementPtr();
 }
 
-StatementPtr GlobalStatement::postOptimize(AnalysisResultConstPtr ar) {
-  if (!m_exp->getCount()) {
-    return NULL_STATEMENT();
-  }
-  return StatementPtr();
-}
+///////////////////////////////////////////////////////////////////////////////
 
-void GlobalStatement::inferTypes(AnalysisResultPtr ar) {
-  IMPLEMENT_INFER_AND_CHECK_ASSERT(getScope());
-
-  BlockScopePtr scope = getScope();
-  for (int i = 0; i < m_exp->getCount(); i++) {
-    ExpressionPtr exp = (*m_exp)[i];
-    VariableTablePtr variables = scope->getVariables();
-    variables->setAttribute(VariableTable::NeedGlobalPointer);
-    if (exp->is(Expression::KindOfSimpleVariable)) {
-      SimpleVariablePtr var = dynamic_pointer_cast<SimpleVariable>(exp);
-      const std::string &name = var->getName();
-      /* If we have already seen this variable in the current scope and
-         it is not a global variable, record this variable as "redeclared"
-         which will force Variant type.
-       */
-      variables->setAttribute(VariableTable::InsideGlobalStatement);
-      variables->checkRedeclared(name, KindOfGlobalStatement);
-      variables->addLocalGlobal(name);
-      var->setContext(Expression::Declaration);
-      var->inferAndCheck(ar, Type::Any, true);
-      variables->forceVariant(ar, name, VariableTable::AnyVars);
-      variables->clearAttribute(VariableTable::InsideGlobalStatement);
-    } else {
-      variables->forceVariants(ar, VariableTable::AnyVars);
-      variables->setAttribute(VariableTable::ContainsLDynamicVariable);
-      assert(exp->is(Expression::KindOfDynamicVariable));
-      exp->inferAndCheck(ar, Type::Any, true);
-    }
-  }
+void GlobalStatement::outputCodeModel(CodeGenerator &cg) {
+  cg.printObjectHeader("GlobalStatement", 2);
+  cg.printPropertyHeader("expressions");
+  cg.printExpressionVector(m_exp);
+  cg.printPropertyHeader("sourceLocation");
+  cg.printLocation(this->getLocation());
+  cg.printObjectFooter();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

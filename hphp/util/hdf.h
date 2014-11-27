@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,11 +17,16 @@
 #ifndef incl_HPHP_CONFIG_HDF_H_
 #define incl_HPHP_CONFIG_HDF_H_
 
-#include "hphp/util/base.h"
-#include <boost/container/flat_set.hpp>
 #include <string>
+#include <map>
+#include <set>
+#include <vector>
+
+#include <boost/container/flat_set.hpp>
+
 #include "hphp/util/exception.h"
-#include "hphp/util/case-insensitive.h"
+#include "hphp/util/hash-map-typedefs.h"
+#include "hphp/util/functional.h"
 #include "hphp/neo/neo_hdf.h"
 
 namespace HPHP {
@@ -117,25 +122,32 @@ public:
    * any values that are not entirely parsable to be a number, it will return
    * default value instead.
    */
-  bool getBool(bool defValue = false) const;
-  const char *get(const char *defValue = nullptr) const;
-  std::string getString(const std::string &defValue = "") const;
-  char   getByte  (char   defValue = 0) const;
-  uchar  getUByte (uchar  defValue = 0) const;
-  int16_t  getInt16 (int16_t  defValue = 0) const;
-  uint16_t getUInt16(uint16_t defValue = 0) const;
-  int32_t  getInt32 (int32_t  defValue = 0) const;
-  uint32_t getUInt32(uint32_t defValue = 0) const;
-  int64_t  getInt64 (int64_t  defValue = 0) const;
-  uint64_t getUInt64(uint64_t defValue = 0) const;
-  double getDouble(double defValue = 0) const;
+  bool configGetBool(bool defValue = false) const;
+  const char *configGet(const char *defValue = nullptr) const;
+  std::string configGetString(const std::string &defValue = "") const;
+  char configGetByte(char defValue = 0) const;
+  unsigned char configGetUByte (unsigned char defValue = 0) const;
+  int16_t configGetInt16(int16_t  defValue = 0) const;
+  uint16_t configGetUInt16(uint16_t defValue = 0) const;
+  int32_t configGetInt32(int32_t  defValue = 0) const;
+  uint32_t configGetUInt32(uint32_t defValue = 0) const;
+  int64_t configGetInt64(int64_t  defValue = 0) const;
+  uint64_t configGetUInt64(uint64_t defValue = 0) const;
+  double configGetDouble(double defValue = 0) const;
 
-  void get(std::vector<std::string> &values) const;
-  void get(std::set<std::string> &values) const;
-  void get(std::set<std::string, stdltistr> &values) const;
-  void get(boost::container::flat_set<std::string> &values) const;
-  void get(std::map<std::string, std::string> &values) const;
-  void get(hphp_string_imap<std::string> &values) const;
+  void configGet(std::vector<std::string> &values) const;
+  void configGet(std::set<std::string> &values) const;
+  void configGet(std::set<std::string, stdltistr> &values) const;
+  void configGet(boost::container::flat_set<std::string> &values) const;
+  void configGet(std::map<std::string, std::string> &values) const;
+  void configGet(hphp_string_imap<std::string> &values) const;
+
+  /**
+   * Helper function to convert a config string value to bool.
+   */
+
+  static bool convertRawConfigToBool(const char *v);
+
 
   /**
    * Set this node's value.
@@ -144,7 +156,7 @@ public:
   void set(const std::string &value) { set(value.c_str());}
   void set(bool   value) { set(value ? "1" : "0");}
   void set(char   value) { set((int64_t)value);}
-  void set(uchar  value) { set((uint64_t)value);}
+  void set(unsigned char  value) { set((uint64_t)value);}
   void set(int16_t  value) { set((int64_t)value);}
   void set(uint16_t value) { set((uint64_t)value);}
   void set(int32_t  value) { set((int64_t)value);}
@@ -157,7 +169,7 @@ public:
   Hdf &operator=(const std::string &value) { set(value); return *this;}
   Hdf &operator=(bool   value) { set(value); return *this;}
   Hdf &operator=(char   value) { set(value); return *this;}
-  Hdf &operator=(uchar  value) { set(value); return *this;}
+  Hdf &operator=(unsigned char  value) { set(value); return *this;}
   Hdf &operator=(int16_t  value) { set(value); return *this;}
   Hdf &operator=(uint16_t value) { set(value); return *this;}
   Hdf &operator=(int32_t  value) { set(value); return *this;}
@@ -202,7 +214,7 @@ public:
   /**
    * Note that this is NOT testing existence, but reading a boolean value.
    */
-  bool operator!() const { return !getBool();}
+  bool operator!() const { return !configGetBool();}
 
   /**
    * Removes a sub-node from parent.
@@ -228,7 +240,7 @@ public:
   int compare(const char *v) const;
   int compare(const std::string &v) const;
   int compare(char   v) const;
-  int compare(uchar  v) const;
+  int compare(unsigned char  v) const;
   int compare(int16_t  v) const;
   int compare(uint16_t v) const;
   int compare(int32_t  v) const;
@@ -258,12 +270,12 @@ public:
   bool operator> (char v) const { return compare(v) >  0;}
   bool operator< (char v) const { return compare(v) <  0;}
 
-  bool operator==(uchar v) const { return compare(v) == 0;}
-  bool operator!=(uchar v) const { return compare(v) != 0;}
-  bool operator>=(uchar v) const { return compare(v) >= 0;}
-  bool operator<=(uchar v) const { return compare(v) <= 0;}
-  bool operator> (uchar v) const { return compare(v) >  0;}
-  bool operator< (uchar v) const { return compare(v) <  0;}
+  bool operator==(unsigned char v) const { return compare(v) == 0;}
+  bool operator!=(unsigned char v) const { return compare(v) != 0;}
+  bool operator>=(unsigned char v) const { return compare(v) >= 0;}
+  bool operator<=(unsigned char v) const { return compare(v) <= 0;}
+  bool operator> (unsigned char v) const { return compare(v) >  0;}
+  bool operator< (unsigned char v) const { return compare(v) <  0;}
 
   bool operator==(int16_t v) const { return compare(v) == 0;}
   bool operator!=(int16_t v) const { return compare(v) != 0;}
@@ -385,7 +397,7 @@ class HdfDataValueException : public HdfException {
 public:
   explicit HdfDataValueException(const Hdf *hdf, const char *expected = "")
     : HdfException("HDF node [%s]'s value \"%s\" is not expected %s",
-                   hdf->getFullPath().c_str(), hdf->get(""), expected) {
+                   hdf->getFullPath().c_str(), hdf->configGet(""), expected) {
   }
   EXCEPTION_COMMON_IMPL(HdfDataValueException);
 };

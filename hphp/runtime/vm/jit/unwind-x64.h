@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,44 +21,112 @@
 #include <sstream>
 #include <string>
 #include <unwind.h>
-#include <boost/shared_ptr.hpp>
+#include <memory>
+#include <exception>
+#include <typeinfo>
 
-#include "hphp/util/assertions.h"
+#include "hphp/runtime/base/rds.h"
+#include "hphp/runtime/base/typed-value.h"
 #include "hphp/runtime/base/types.h"
 #include "hphp/runtime/vm/jit/types.h"
 #include "hphp/runtime/vm/tread-hash-map.h"
-#include "hphp/runtime/vm/jit/types.h"
 #include "hphp/util/asm-x64.h"
-#include "hphp/runtime/vm/jit/runtime-type.h"
+#include "hphp/util/assertions.h"
 
-namespace HPHP { namespace Transl {
+namespace HPHP { namespace jit {
 
 //////////////////////////////////////////////////////////////////////
 
 typedef TreadHashMap<CTCA, TCA, ctca_identity_hash> CatchTraceMap;
 
-//////////////////////////////////////////////////////////////////////
+/*
+ * Information the unwinder needs stored in RDS, and the RDS::Link for
+ * it.  Used to pass values between unwinder code and catch traces.
+ */
+struct UnwindRDS {
+  int64_t unwinderScratch;
+  TypedValue unwinderTv;
+  bool doSideExit;
+};
+extern RDS::Link<UnwindRDS> unwindRdsInfo;
 
-inline const std::type_info& typeInfoFromUnwindException(
-  _Unwind_Exception* exceptionObj)
-{
-  constexpr size_t kTypeInfoOff = 112;
-  return **reinterpret_cast<std::type_info**>(
-    reinterpret_cast<char*>(exceptionObj + 1) - kTypeInfoOff);
+inline ptrdiff_t unwinderScratchOff() {
+  return unwindRdsInfo.handle() + offsetof(UnwindRDS, unwinderScratch);
 }
 
+inline ptrdiff_t unwinderSideExitOff() {
+  return unwindRdsInfo.handle() + offsetof(UnwindRDS, doSideExit);
+}
+
+inline ptrdiff_t unwinderTvOff() {
+  return unwindRdsInfo.handle() + offsetof(UnwindRDS, unwinderTv);
+}
+
+//////////////////////////////////////////////////////////////////////
+
+/*
+ * Meant to work like __cxxabiv1::__is_dependent_exception
+ * See libstdc++-v3/libsupc++/unwind-cxx.h in GCC
+ */
+static inline bool isDependentException(uint64_t c)
+{
+  return (c & 1);
+}
+
+/**
+ * Meant to work like __cxxabiv1::__get_object_from_ue() but with a specific
+ * return type.
+ * See libstdc++-v3/libsupc++/unwind-cxx.h in GCC
+ */
 inline std::exception* exceptionFromUnwindException(
   _Unwind_Exception* exceptionObj)
 {
-  return reinterpret_cast<std::exception*>(exceptionObj + 1);
+  constexpr size_t sizeOfDependentException = 112;
+  if (isDependentException(exceptionObj->exception_class)) {
+    return *reinterpret_cast<std::exception**>(
+      reinterpret_cast<char*>(exceptionObj + 1) - sizeOfDependentException);
+  } else {
+    return reinterpret_cast<std::exception*>(exceptionObj + 1);
+  }
+}
+
+inline const std::type_info& typeInfoFromUnwindException(
+  _Unwind_Exception* exceptionObj
+  )
+{
+  if (isDependentException(exceptionObj->exception_class)) {
+    // like __cxxabiv1::__get_refcounted_exception_header_from_obj()
+    constexpr size_t sizeOfRefcountedException = 128;
+    char * obj = reinterpret_cast<char*>(
+        exceptionFromUnwindException(exceptionObj));
+    char * header = obj - sizeOfRefcountedException;
+    // Dereference the exc field, the type_info* is the first field inside that
+    constexpr size_t excOffset = 16;
+    return *reinterpret_cast<std::type_info*>(header + excOffset);
+  } else {
+    // like __cxxabiv1::__get_exception_header_from_ue()
+    constexpr size_t sizeOfCxaException = 112;
+    return **reinterpret_cast<std::type_info**>(
+      reinterpret_cast<char*>(exceptionObj + 1) - sizeOfCxaException);
+  }
 }
 
 /*
  * Called whenever we create a new translation cache for the whole
  * region of code.
  */
-typedef boost::shared_ptr<void> UnwindInfoHandle;
+typedef std::shared_ptr<void> UnwindInfoHandle;
 UnwindInfoHandle register_unwind_region(unsigned char* address, size_t size);
+
+/*
+ * The personality routine for code emitted by the jit.
+ */
+_Unwind_Reason_Code
+tc_unwind_personality(int version,
+                      _Unwind_Action actions,
+                      uint64_t exceptionClass,
+                      _Unwind_Exception* exceptionObj,
+                      _Unwind_Context* context);
 
 //////////////////////////////////////////////////////////////////////
 

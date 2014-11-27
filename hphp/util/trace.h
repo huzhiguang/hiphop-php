@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,7 +21,10 @@
 #include <vector>
 #include <stdarg.h>
 
-#include "folly/Format.h"
+#include <folly/Format.h>
+
+#include "hphp/util/assertions.h"
+#include "hphp/util/portability.h"
 #include "hphp/util/text-color.h"
 
 /*
@@ -29,12 +32,12 @@
  * level associated with it;  Enable tracing a module by setting the TRACE
  * environment variable to a comma-separated list of module:level pairs. E.g.:
  *
- * env TRACE=tx64:1,bcinterp:3,tmp0:1 ./hhvm/hhvm ...
+ * env TRACE=mcg:1,bcinterp:3,tmp0:1 ./hhvm/hhvm ...
  *
  * In a source file, select the compilation unit's module by calling the
- * TRACE_SET_MODE macro. E.g.,
+ * TRACE_SET_MOD macro. E.g.,
  *
- *   TRACE_SET_MOD(tx64);
+ *   TRACE_SET_MOD(mcg);
  *
  *   ...
  *   TRACE(0, "See this for any trace-enabled build: %d\n", foo);
@@ -54,63 +57,108 @@
  * obviously a tty.
  */
 
+/*
+ * Trace levels can be bumped on a per-module, per-scope basis.  This
+ * lets you run code that has a set of trace levels in a mode as if
+ * they were all higher.
+ *
+ * Example:
+ *
+ *   {
+ *     Trace::Bump bumper{Trace::mcg, 2};
+ *     FTRACE(1, "asd\n");  // only fires at level >= 3
+ *   }
+ *   FTRACE(1, "asd\n");    // back to normal
+ *
+ *
+ * There is also support for conditionally bumping in the bumper:
+ *
+ *   {
+ *     Trace::Bump bumper{Trace::mcg, 2, somePredicate(foo)};
+ *     // Only bumped if somePredicate(foo) returned true.
+ *   }
+ *
+ * Note however that if you use that form, `somePredicate' will be
+ * evaluated even if tracing is off.
+ */
+
 namespace HPHP {
 namespace Trace {
 
 #define TRACE_MODULES \
-      TM(tprefix)     /* Meta: prefix with string */          \
-      TM(ringbuffer)  /* Meta: trace to ram */                \
+      TM(tprefix)     /* Meta: prefix with string */  \
       TM(traceAsync)  /* Meta: lazy writes to disk */ \
-      TM(trans)       \
-      TM(tx64)        \
-      TM(tx64stats)   \
-      TM(ustubs)      \
-      TM(unwind)      \
-      TM(txlease)     \
-      TM(fixup)       \
-      TM(tcspace)     \
-      TM(targetcache) \
-      TM(treadmill)   \
-      TM(regalloc)    \
-      TM(bcinterp)    \
-      TM(interpOne)   \
-      TM(refcount)    \
-      TM(asmx64)      \
-      TM(runtime)     \
-      TM(debugger)    \
-      TM(debuggerflow) \
-      TM(debuginfo)   \
-      TM(stats)       \
-      TM(emitter)     \
-      TM(hhbc)        \
-      TM(stat)        \
-      TM(fr)          \
-      TM(intercept)   \
-      TM(txdeps)      \
-      TM(typeProfile) \
-      TM(hhir)        \
-      TM(printir)     \
-      TM(pgo)         \
+      TM(asmx64)        \
+      TM(atomicvector)  \
+      TM(bcinterp)      \
+      TM(datablock)     \
+      TM(debugger)      \
+      TM(debuggerflow)  \
+      TM(debuginfo)     \
+      TM(dispatchBB)    \
+      TM(emitter)       \
+      TM(fixup)         \
+      TM(fr)            \
+      TM(gc)            \
+      TM(heap)          \
+      TM(hhas)          \
+      TM(hhbbc)         \
+      TM(hhbbc_dce)     \
+      TM(hhbbc_dump)    \
+      TM(hhbbc_emit)    \
+      TM(hhbbc_index)   \
+      TM(hhbbc_time)    \
+      TM(hhbc)          \
+      TM(vasm)          \
+      TM(hhir)          \
       TM(hhirTracelets) \
-      TM(gc)          \
-      TM(instancebits)\
-      TM(hhas)        \
-      TM(statgroups)  \
-      TM(minstr)      \
-      TM(region)      \
-      TM(atomicvector)\
-      TM(datablock)   \
+      TM(hhir_dce)      \
+      TM(hhir_meme)     \
+      TM(hhir_aloc)     \
+      TM(hhir_load)     \
+      TM(llvm)          \
+      TM(hhir_refcount) \
+      TM(inlining)      \
+      TM(instancebits)  \
+      TM(intercept)     \
+      TM(interpOne)     \
+      TM(jittime)       \
+      TM(libxml)        \
+      TM(mcg)           \
+      TM(mcgstats)      \
+      TM(minstr)        \
+      TM(pgo)           \
+      TM(printir)       \
+      TM(rat)           \
+      TM(refcount)      \
+      TM(regalloc)      \
+      TM(region)        \
+      TM(ringbuffer)    \
+      TM(runtime)       \
+      TM(servicereq)    \
+      TM(smartalloc)    \
+      TM(stat)          \
+      TM(statgroups)    \
+      TM(stats)         \
+      TM(targetcache)   \
+      TM(tcspace)       \
+      TM(trans)         \
+      TM(treadmill)     \
+      TM(txdeps)        \
+      TM(txlease)       \
+      TM(typeProfile)   \
+      TM(unwind)        \
+      TM(ustubs)        \
+      TM(xenon)         \
+      TM(objprof)       \
+      TM(xls)           \
       /* Stress categories, to exercise rare paths */ \
-      TM(stress_txInterpPct)    \
-      TM(stress_txInterpSeed)   \
+      TM(stress_txInterpPct)  \
+      TM(stress_txInterpSeed) \
       /* Jit bisection interval */ \
-      TM(txOpBisectLow) \
-      TM(txOpBisectHigh) \
-      /* smart alloc */ \
-      TM(smartalloc) \
-      /* Heap tracing */ \
-      TM(heap) \
-      /* Temporary catetories, to save compilation time */ \
+      TM(txOpBisectLow)   \
+      TM(txOpBisectHigh)  \
+      /* Temporary categories, to save compilation time */ \
       TM(tmp0)  TM(tmp1)  TM(tmp2)  TM(tmp3)               \
       TM(tmp4)  TM(tmp5)  TM(tmp6)  TM(tmp7)               \
       TM(tmp8)  TM(tmp9)  TM(tmp10) TM(tmp11)              \
@@ -124,6 +172,7 @@ enum Module {
   NumModules
 };
 
+//////////////////////////////////////////////////////////////////////
 
 /*
  * S-expression style structured pretty-printing. Implement
@@ -134,7 +183,6 @@ enum Module {
  *
  * E.g.:
  *    (Location Stack 1)
- *    (RuntimeType (Location Stack 1) (Home (Location Local 1)))
  *
  * The repetitve prettyNode() templates are intended to aid
  * implementing pretty().
@@ -174,6 +222,11 @@ std::string prettyNode(const char* name, const P1& p1, const P2& p2) {
 void traceRelease(const char*, ...) ATTRIBUTE_PRINTF(1,2);
 void traceRelease(const std::string& s);
 
+template<typename... Args>
+void ftraceRelease(Args&&... args) {
+  traceRelease("%s", folly::format(std::forward<Args>(args)...).str().c_str());
+}
+
 // Trace to the global ring buffer in all builds, and also trace normally
 // via the standard TRACE(n, ...) macro.
 #define TRACE_RB(n, ...)                            \
@@ -182,15 +235,55 @@ void traceRelease(const std::string& s);
 void traceRingBufferRelease(const char* fmt, ...) ATTRIBUTE_PRINTF(1,2);
 
 extern int levels[NumModules];
+extern __thread int tl_levels[NumModules];
 const char* moduleName(Module mod);
 inline bool moduleEnabledRelease(Module tm, int level = 1) {
-  return levels[tm] >= level;
+  return levels[tm] + tl_levels[tm] >= level;
 }
+
+// Trace::Bump that is on for release tracing.
+struct BumpRelease {
+  BumpRelease(Module mod, int adjust, bool condition = true)
+    : m_live(condition)
+    , m_mod(mod)
+    , m_adjust(adjust)
+  {
+    if (m_live) tl_levels[m_mod] -= m_adjust;
+  }
+
+  BumpRelease(BumpRelease&& o) noexcept
+    : m_live(o.m_live)
+    , m_mod(o.m_mod)
+    , m_adjust(o.m_adjust)
+  {
+    o.m_live = false;
+  }
+
+  ~BumpRelease() {
+    if (m_live) tl_levels[m_mod] += m_adjust;
+  }
+
+  BumpRelease(const BumpRelease&) = delete;
+  BumpRelease& operator=(const BumpRelease&) = delete;
+
+private:
+  bool m_live;
+  Module m_mod;
+  int m_adjust;
+};
+
+//////////////////////////////////////////////////////////////////////
 
 #if (defined(DEBUG) || defined(USE_TRACE)) /* { */
 #  ifndef USE_TRACE
 #    define USE_TRACE 1
 #  endif
+
+//////////////////////////////////////////////////////////////////////
+/*
+ * Implementation of for when tracing is enabled.
+ */
+
 inline bool moduleEnabled(Module tm, int level = 1) {
   return moduleEnabledRelease(tm, level);
 }
@@ -218,7 +311,36 @@ const bool enabled = true;
   ONTRACE_MOD(mod, level, HPHP::Trace::trace("%s",      \
              folly::format(__VA_ARGS__).str().c_str()))
 #define TRACE_SET_MOD(name)  \
-  static const HPHP::Trace::Module TRACEMOD = HPHP::Trace::name;
+  UNUSED static const HPHP::Trace::Module TRACEMOD = HPHP::Trace::name;
+
+/*
+ * The Indent struct and ITRACE are used for tracing with nested
+ * indentation. Create an Indent object on the stack to increase the nesting
+ * level, then use ITRACE just as you would use FTRACE.
+ */
+extern __thread int indentDepth;
+struct Indent {
+  explicit Indent(int n = 2) : n(n) { indentDepth += n; }
+  ~Indent()                         { indentDepth -= n; }
+
+  int n;
+};
+
+// See doc comment above for usage.
+using Bump = BumpRelease;
+
+inline std::string indent() {
+  return std::string(indentDepth, ' ');
+}
+
+template<typename... Args>
+inline void itraceImpl(const char* fmtRaw, Args&&... args) {
+  auto const fmt = indent() + fmtRaw;
+  Trace::ftraceRelease(fmt, std::forward<Args>(args)...);
+}
+#define ITRACE(level, ...) ONTRACE((level), Trace::itraceImpl(__VA_ARGS__));
+#define ITRACE_MOD(mod, level, ...)                             \
+  ONTRACE_MOD(mod, level, Trace::itraceImpl(__VA_ARGS__));
 
 void trace(const char *, ...) ATTRIBUTE_PRINTF(1,2);
 void trace(const std::string&);
@@ -228,11 +350,16 @@ inline void trace(Pretty p) { trace(p.pretty() + std::string("\n")); }
 
 void vtrace(const char *fmt, va_list args) ATTRIBUTE_PRINTF(1,0);
 void dumpRingbuffer();
+
+//////////////////////////////////////////////////////////////////////
+
 #else /* } (defined(DEBUG) || defined(USE_TRACE)) { */
+
+//////////////////////////////////////////////////////////////////////
 /*
- * Compile everything out of release builds. gcc is smart enough to
- * kill code hiding behind if (false) { ... }.
+ * Implementation for when tracing is disabled.
  */
+
 #define ONTRACE(...)    do { } while (0)
 #define TRACE(...)      do { } while (0)
 #define FTRACE(...)     do { } while (0)
@@ -241,6 +368,22 @@ void dumpRingbuffer();
 #define TRACE_SET_MOD(name) \
   DEBUG_ONLY static const HPHP::Trace::Module TRACEMOD = HPHP::Trace::name;
 
+#define ITRACE(...)     do { } while (0)
+struct Indent {
+  Indent() {
+    always_assert(true && "If this struct is completely empty we get unused "
+                  "variable warnings in code that uses it.");
+  }
+};
+inline std::string indent() { return std::string(); }
+
+struct Bump {
+  Bump(Module mod, int adjust, bool condition = true) {
+    always_assert(true && "If this struct is completely empty we get unused "
+                  "variable warnings in code that uses it.");
+  }
+};
+
 const bool enabled = false;
 
 inline void trace(const char*, ...)      { }
@@ -248,9 +391,10 @@ inline void trace(const std::string&)    { }
 inline void vtrace(const char*, va_list) { }
 inline bool moduleEnabled(Module t, int level = 1) { return false; }
 inline int moduleLevel(Module tm) { return 0; }
-#endif /* } (defined(DEBUG) || defined(USE_TRACE)) */
 
 //////////////////////////////////////////////////////////////////////
+
+#endif /* } (defined(DEBUG) || defined(USE_TRACE)) */
 
 } // Trace
 
@@ -300,4 +444,3 @@ struct FormatValue<Val,
 }
 
 #endif /* incl_HPHP_TRACE_H_ */
-

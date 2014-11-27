@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,9 +17,9 @@
 #include "hphp/runtime/vm/debug/gdb-jit.h"
 #include <elf.h>
 #include <gelf.h>
-#include <elf.h>
 #include <string>
 #include <vector>
+#include <iostream>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -27,9 +27,9 @@
 #include "hphp/util/asm-x64.h"
 
 #include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/vm/jit/translator-x64.h"
+#include "hphp/runtime/vm/jit/mc-generator.h"
 
-using namespace HPHP::Transl;
+using namespace HPHP::jit;
 
 namespace HPHP {
 namespace Debug {
@@ -37,12 +37,13 @@ namespace Debug {
 TRACE_SET_MOD(debuginfo);
 static const uint8_t CFA_OFFSET = 16;
 
-void ElfWriter::logError(const string& msg) {
+void ElfWriter::logError(const std::string& msg) {
   perror("");
   std::cerr << msg << '\n';
 }
 
-int ElfWriter::dwarfCallback(char *name, int size, Dwarf_Unsigned type,
+int ElfWriter::dwarfCallback(
+  LIBDWARF_CALLBACK_NAME_TYPE name, int size, Dwarf_Unsigned type,
   Dwarf_Unsigned flags, Dwarf_Unsigned link, Dwarf_Unsigned info) {
   if (!strncmp(name, ".rel", 4))
     return 0;
@@ -81,7 +82,7 @@ bool ElfWriter::initElfHeader() {
   return true;
 }
 
-int ElfWriter::addSectionString(const string& name) {
+int ElfWriter::addSectionString(const std::string& name) {
   int off = m_strtab.size();
   for (unsigned int i = 0; i < name.size(); i++) {
     m_strtab.push_back(name[i]);
@@ -94,10 +95,16 @@ void ElfWriter::initStrtab() {
   addSectionString("");
 }
 
+#if defined(LIBDWARF_USE_INIT_C) || defined(FACEBOOK)
 bool ElfWriter::initDwarfProducer() {
   Dwarf_Error error = 0;
   /* m_dwarfProducer is the handle used for interaction for libdwarf */
-  m_dwarfProducer = dwarf_producer_init_c(
+  m_dwarfProducer =
+#ifdef FACEBOOK
+    dwarf_producer_init_b(
+#else
+    dwarf_producer_init_c(
+#endif
     DW_DLC_WRITE | DW_DLC_SIZE_64 | DW_DLC_SYMBOLIC_RELOCATIONS,
     g_dwarfCallback,
     nullptr,
@@ -110,6 +117,27 @@ bool ElfWriter::initDwarfProducer() {
   }
   return true;
 }
+#else
+bool ElfWriter::initDwarfProducer() {
+  Dwarf_Error error = 0;
+  auto ret = dwarf_producer_init(
+    DW_DLC_WRITE | DW_DLC_SIZE_64 | DW_DLC_SYMBOLIC_RELOCATIONS,
+    g_dwarfCallback,
+    nullptr,
+    nullptr,
+    reinterpret_cast<Dwarf_Ptr>(this),
+    "x86_64",
+    "V2",
+    nullptr,
+    &m_dwarfProducer,
+    &error);
+  if (ret != DW_DLV_OK) {
+    logError("Unable to create dwarf producer");
+    return false;
+  }
+  return true;
+}
+#endif
 
 Dwarf_P_Die ElfWriter::addFunctionInfo(FunctionInfo* f, Dwarf_P_Die type) {
   Dwarf_Error error = 0;
@@ -449,7 +477,7 @@ bool ElfWriter::addFrameInfo(DwarfChunk* d) {
   return true;
 }
 
-int ElfWriter::newSection(char *name,
+int ElfWriter::newSection(LIBDWARF_CALLBACK_NAME_TYPE name,
   uint64_t size, uint32_t type, uint64_t flags,
   uint64_t addr/* = 0*/) {
   Elf_Scn *scn = elf_newscn(m_elf);
@@ -532,14 +560,15 @@ int ElfWriter::writeStringSection() {
 
 int ElfWriter::writeTextSection() {
   int section = -1;
-  CodeBlock& a = TranslatorX64::Get()->mainCode;
+  auto& code = mcg->code;
   if ((section = newSection(
-      ".text.tracelets", a.capacity(), SHT_NOBITS, SHF_ALLOC | SHF_EXECINSTR,
-      reinterpret_cast<uint64_t>(a.base()))) < 0) {
+         ".text.tracelets", code.codeSize(),
+         SHT_NOBITS, SHF_ALLOC | SHF_EXECINSTR,
+         reinterpret_cast<uint64_t>(code.base()))) < 0) {
     logError("unable to create text section");
     return -1;
   }
-  if (!addSectionData(section, nullptr, a.capacity())) {
+  if (!addSectionData(section, nullptr, code.codeSize())) {
     logError("unable to add text data");
     return -1;
   }
@@ -551,7 +580,7 @@ ElfWriter::ElfWriter(DwarfChunk* d):
   off_t elf_size;
   char *symfile;
 
-  m_filename = string("/tmp/vm_dwarf.XXXXXX");
+  m_filename = std::string("/tmp/vm_dwarf.XXXXXX");
   m_fd = mkstemp((char *)m_filename.c_str());
   if (m_fd < 0) {
     logError("Unable to open file for writing.");

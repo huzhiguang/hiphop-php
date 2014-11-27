@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,32 +18,30 @@
 
 #include <memory>
 #include <utility>
+#include <vector>
+
 #include <boost/container/flat_map.hpp>
-#include <boost/range/iterator_range.hpp>
 
-#include "folly/Format.h"
+#include <folly/Format.h>
 
-#include "hphp/runtime/base/smart-containers.h"
-#include "hphp/runtime/vm/srckey.h"
+#include "hphp/runtime/vm/jit/containers.h"
 #include "hphp/runtime/vm/jit/type.h"
 #include "hphp/runtime/vm/jit/types.h"
+#include "hphp/runtime/vm/func.h"
+#include "hphp/runtime/vm/srckey.h"
 
-namespace HPHP {
+namespace HPHP { namespace jit {
 
-namespace Transl {
-struct Tracelet;
-struct TranslatorX64;
-}
-
-namespace JIT {
-
-using boost::container::flat_map;
-using boost::container::flat_multimap;
+struct MCGenerator;
+struct ProfData;
+struct TransCFG;
 
 //////////////////////////////////////////////////////////////////////
 
 /*
- * RegionDesc is a description of a code region.
+ * RegionDesc is a description of a code region.  This includes the
+ * list of blocks in the region, and also the list of control-flow
+ * arcs within the region.
  *
  * It consists of a list of unique SrcKey ranges, with type
  * annotations that may come from profiling or other sources.
@@ -53,22 +51,70 @@ using boost::container::flat_multimap;
  */
 struct RegionDesc {
   struct Block;
+  struct Arc;
   struct Location;
   struct TypePred;
   struct ReffinessPred;
   typedef std::shared_ptr<Block> BlockPtr;
+  typedef TransID BlockId;
+  // BlockId Encoding:
+  //   - Non-negative numbers are blocks that correspond
+  //     to the start of a TransProfile translation, and therefore can
+  //     be used to index into ProfData.
+  //   - Negative numbers are used for other blocks, which correspond
+  //     to blocks created by inlining and which don't correspond to
+  //     the beginning of a profiling translation.
+  typedef boost::container::flat_set<BlockId> BlockIdSet;
+  typedef std::vector<BlockPtr> BlockVec;
 
-  template<typename... Args>
-  Block* addBlock(Args&&... args) {
-    blocks.push_back(
-      std::make_shared<Block>(std::forward<Args>(args)...));
-    return blocks.back().get();
-  }
+  bool              empty() const;
+  SrcKey            start() const;
+  BlockPtr          entry() const;
+  const BlockVec&   blocks() const;
+  BlockPtr          block(BlockId id) const;
+  const BlockIdSet& succs(BlockId bid) const;
+  const BlockIdSet& preds(BlockId bid) const;
+  const BlockIdSet& sideExitingBlocks() const;
+  bool              isExit(BlockId bid) const;
+  Block*            addBlock(SrcKey sk, int length, Offset spOffset);
+  void              deleteBlock(BlockId bid);
+  void              renumberBlock(BlockId oldId, BlockId newId);
+  void              addArc(BlockId src, BlockId dst);
+  void              setSideExitingBlock(BlockId bid);
+  bool              isSideExitingBlock(BlockId bid) const;
+  void              append(const RegionDesc&  other);
+  void              prepend(const RegionDesc& other);
+  uint32_t          instrSize() const;
+  std::string       toString() const;
 
-  std::vector<BlockPtr> blocks;
+  template<class Work>
+  void              forEachArc(Work w) const;
+
+ private:
+  struct BlockData {
+    BlockPtr   block;
+    BlockIdSet preds;
+    BlockIdSet succs;
+    explicit BlockData(BlockPtr b = nullptr) : block(b) {}
+  };
+
+  bool       hasBlock(BlockId id) const;
+  BlockData& data(BlockId id);
+  void       copyBlocksFrom(const RegionDesc& other,
+                            BlockVec::iterator where);
+  void       copyArcsFrom(const RegionDesc& other);
+
+  std::vector<BlockPtr>             m_blocks;
+  hphp_hash_map<BlockId, BlockData> m_data;
+  // Set of blocks that that can possibly side exit the region. This
+  // is just a hint to the region translator.
+  BlockIdSet                        m_sideExitingBlocks;
 };
 
-typedef std::shared_ptr<RegionDesc> RegionDescPtr;
+typedef std::shared_ptr<RegionDesc>                      RegionDescPtr;
+typedef std::vector<RegionDescPtr>                       RegionVec;
+typedef hphp_hash_set<RegionDescPtr,
+                      smart_pointer_hash<RegionDescPtr>> RegionSet;
 
 /*
  * Specification of an HHBC-visible location that can have a type
@@ -85,7 +131,10 @@ struct RegionDesc::Location {
     Stack,
   };
   struct Local { uint32_t locId;  };
-  struct Stack { uint32_t offset; };
+  struct Stack {
+    uint32_t offset;   // offset from SP
+    uint32_t fpOffset; // offset from FP
+  };
 
   /* implicit */ Location(Local l) : m_tag{Tag::Local}, m_local(l) {}
   /* implicit */ Location(Stack s) : m_tag{Tag::Stack}, m_stack(s) {}
@@ -102,10 +151,16 @@ struct RegionDesc::Location {
     return m_stack.offset;
   }
 
+  uint32_t stackOffsetFromFp() const {
+    assert(m_tag == Tag::Stack);
+    return m_stack.fpOffset;
+  }
+
   bool operator==(const Location& other) const {
     return (m_tag == other.m_tag) &&
       ((m_tag == Tag::Local && localId() == other.localId()) ||
-       (m_tag == Tag::Stack && stackOffset() == other.stackOffset()));
+       (m_tag == Tag::Stack &&
+        stackOffsetFromFp() == other.stackOffsetFromFp()));
   }
 
   bool operator!=(const Location& other) const {
@@ -125,6 +180,11 @@ private:
   };
 };
 
+struct RegionDesc::Arc {
+  BlockId src;
+  BlockId dst;
+};
+
 /*
  * A type prediction for somewhere in the middle of or start of a
  * region.
@@ -138,6 +198,11 @@ struct RegionDesc::TypePred {
   Location location;
   Type type;
 };
+
+inline bool operator==(const RegionDesc::TypePred& a,
+                       const RegionDesc::TypePred& b) {
+  return a.location == b.location && a.type == b.type;
+}
 
 typedef std::vector<RegionDesc::TypePred> PostConditions;
 
@@ -157,18 +222,24 @@ struct RegionDesc::ReffinessPred {
   int64_t arSpOffset;
 };
 
+inline bool operator==(const RegionDesc::ReffinessPred& a,
+                       const RegionDesc::ReffinessPred& b) {
+  return a.mask == b.mask && a.vals == b.vals && a.arSpOffset == b.arSpOffset;
+}
+
 /*
  * A basic block in the region, with type predictions for conditions
  * at various execution points, including at entry to the block.
  */
 class RegionDesc::Block {
-  typedef flat_multimap<SrcKey, TypePred> TypePredMap;
-  typedef flat_map<SrcKey, bool> ParamByRefMap;
-  typedef flat_multimap<SrcKey, ReffinessPred> RefPredMap;
-  typedef flat_map<SrcKey, const Func*> KnownFuncMap;
+  typedef boost::container::flat_multimap<SrcKey, TypePred> TypePredMap;
+  typedef boost::container::flat_map<SrcKey, bool> ParamByRefMap;
+  typedef boost::container::flat_multimap<SrcKey, ReffinessPred> RefPredMap;
+  typedef boost::container::flat_map<SrcKey, const Func*> KnownFuncMap;
 
 public:
-  explicit Block(const Func* func, Offset start, int length);
+  explicit Block(const Func* func, bool resumed, Offset start, int length,
+                 Offset initSpOff);
 
   Block& operator=(const Block&) = delete;
 
@@ -176,13 +247,22 @@ public:
    * Accessors for the func, unit, length (in HHBC instructions), and
    * starting SrcKey of this Block.
    */
-  const Unit* unit() const { return m_func->unit(); }
-  const Func* func() const { return m_func; }
-  SrcKey start() const { return SrcKey { m_func, m_start }; }
-  SrcKey last() const { return SrcKey { m_func, m_last }; }
-  int length() const { return m_length; }
-  bool empty() const { return length() == 0; }
-  bool contains(SrcKey sk) const;
+  BlockId     id()                const { return m_id; }
+  const Unit* unit()              const { return m_func->unit(); }
+  const Func* func()              const { return m_func; }
+  SrcKey      start()             const { return SrcKey { m_func, m_start,
+                                                          m_resumed }; }
+  SrcKey      last()              const { return SrcKey { m_func, m_last,
+                                                          m_resumed }; }
+  int         length()            const { return m_length; }
+  bool        empty()             const { return length() == 0; }
+  bool        contains(SrcKey sk) const;
+  Offset      initialSpOffset()   const { return m_initialSpOffset; }
+
+  void setId(BlockId id) {
+    m_id = id;
+  }
+  void setInitialSpOffset(int32_t sp) { m_initialSpOffset = sp; }
 
   /*
    * Set and get whether or not this block ends with an inlined FCall. Inlined
@@ -254,10 +334,15 @@ private:
   void checkMetadata() const;
 
 private:
+  static BlockId s_nextId;
+
+  BlockId        m_id;
   const Func*    m_func;
+  const bool     m_resumed;
   const Offset   m_start;
   Offset         m_last;
   int            m_length;
+  Offset         m_initialSpOffset;
   const Func*    m_inlinedCallee;
 
   TypePredMap    m_typePreds;
@@ -284,8 +369,9 @@ struct RegionContext {
   const Func* func;
   Offset bcOffset;
   Offset spOffset;
-  smart::vector<LiveType> liveTypes;
-  smart::vector<PreLiveAR> preLiveARs;
+  bool resumed;
+  jit::vector<LiveType> liveTypes;
+  jit::vector<PreLiveAR> preLiveARs;
 };
 
 /*
@@ -310,41 +396,115 @@ struct RegionContext::PreLiveAR {
 
 //////////////////////////////////////////////////////////////////////
 
+template<class Work> inline
+void RegionDesc::forEachArc(Work w) const {
+  for (auto& src : m_blocks) {
+    auto srcId = src->id();
+    for (auto dstId : succs(srcId)) {
+      w(srcId, dstId);
+    }
+  }
+}
+
+//////////////////////////////////////////////////////////////////////
+
 /*
  * Select a compilation region corresponding to the given context.
  * The shape of the region selected is controlled by
- * RuntimeOption::EvalJitRegionSelector.  If the specified shape is
- * 'tracelet', then the input argument t is used to build the region.
+ * RuntimeOption::EvalJitRegionSelector.
  *
  * This function may return nullptr.
  *
- * For now this is hooked up in TranslatorX64::translateWork, and
+ * For now this is hooked up in MCGenerator::translateWork, and
  * returning nullptr causes it to use the current level 0 tracelet
- * analyzer.  Eventually we'd like analyze to occur underneath this as
- * well.
+ * analyzer.  Eventually we'd like this to completely replace analyze.
  */
-RegionDescPtr selectRegion(const RegionContext& context,
-                           const Transl::Tracelet* t);
+RegionDescPtr selectRegion(const RegionContext& context, TransKind kind);
 
 /*
  * Select a compilation region based on profiling information.  This
  * is used in JitPGO mode.  Argument transId specifies the profiling
  * translation that triggered the profiling-based region selection.
  */
-RegionDescPtr selectHotRegion(Transl::TransID transId,
-                              Transl::TranslatorX64* tx64);
+RegionDescPtr selectHotRegion(TransID transId,
+                              MCGenerator* mcg);
 
 /*
- * Create a compilation region corresponding to a tracelet, using
- * the old analyze() framework.
+ * Select a compilation region as long as possible using the given context.
+ * The region will be broken before the first instruction that attempts to
+ * consume an input with an insufficiently precise type, or after most control
+ * flow instructions.  This uses roughly the same heuristics as the old
+ * analyze() framework.
+ *
+ * May return a null region if the given RegionContext doesn't have enough
+ * information to translate at least one instruction.
+ *
+ * The `inlining' parameter should be set to true if the tracelet is for an
+ * inlined callee---this will result in a longer-than-usual tracelet because we
+ * enable some optimizations, e.g., tracing through jumps.
  */
-RegionDescPtr selectTraceletLegacy(const Transl::Tracelet& tlet);
+RegionDescPtr selectTracelet(const RegionContext& ctx, bool profiling,
+                             bool inlining = false);
+
+/*
+ * Select the hottest trace beginning with triggerId.
+ */
+RegionDescPtr selectHotTrace(TransID triggerId,
+                             const ProfData* profData,
+                             TransCFG& cfg,
+                             TransIDSet& selectedSet,
+                             TransIDVec* selectedVec = nullptr);
+
+/*
+ * Create a region, beginning with triggerId, that includes as much of
+ * the TransCFG as possible.  Excludes multiple translations of the
+ * same SrcKey.
+ */
+RegionDescPtr selectWholeCFG(TransID triggerId,
+                             const ProfData* profData,
+                             const TransCFG& cfg,
+                             TransIDSet& selectedSet,
+                             TransIDVec* selectedVec = nullptr);
+
+/*
+ * Checks whether the type predictions at the beginning of block
+ * satisfy the post-conditions in prevPostConds.
+ */
+bool preCondsAreSatisfied(const RegionDesc::BlockPtr& block,
+                          const PostConditions& prevPostConds);
+
+/*
+ * This function returns true for control-flow bytecode instructions that
+ * are not supported in the middle of a region yet.
+ */
+bool breaksRegion(Op opc);
+
+/*
+ * Creates regions covering all existing profile translations for
+ * func, and returns them in the regions vector.
+ */
+void regionizeFunc(const Func*  func,
+                   MCGenerator* mcg,
+                   RegionVec&   regions);
+
+/*
+ * Functions to map BlockIds to the TransIDs used when the block was
+ * profiled.
+ */
+bool    hasTransId(RegionDesc::BlockId blockId);
+TransID getTransId(RegionDesc::BlockId blockId);
+
+/*
+ * Checks if the given region is well-formed.
+ */
+bool check(const RegionDesc& region, std::string& error);
 
 /*
  * Debug stringification for various things.
  */
 std::string show(RegionDesc::Location);
 std::string show(RegionDesc::TypePred);
+std::string show(const PostConditions&);
 std::string show(const RegionDesc::ReffinessPred&);
 std::string show(RegionContext::LiveType);
 std::string show(RegionContext::PreLiveAR);

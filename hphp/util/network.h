@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,16 +17,17 @@
 #ifndef incl_HPHP_NETWORK_H_
 #define incl_HPHP_NETWORK_H_
 
-#include "hphp/util/base.h"
 #include <string>
 #include <netdb.h>
 #include <sys/socket.h>
 #include <stdlib.h>
 
+#include <folly/IPAddress.h>
+
 /**
  * Network utility functions.
  */
-namespace HPHP { namespace Util {
+namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 // thread-safe network functions
 
@@ -70,15 +71,16 @@ private:
 };
 
 bool safe_gethostbyname(const char *address, HostEnt &result);
-std::string safe_inet_ntoa(struct in_addr &in);
 
 ///////////////////////////////////////////////////////////////////////////////
 /**
  * Get local machine's primary IP address.
  */
 std::string GetPrimaryIP();
+std::string GetPrimaryIPv4();
+std::string GetPrimaryIPv6();
 
 ///////////////////////////////////////////////////////////////////////////////
-}}
+}
 
 #endif // incl_HPHP_NETWORK_H_

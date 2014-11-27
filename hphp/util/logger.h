@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,9 +20,10 @@
 #include <atomic>
 #include <string>
 #include <stdarg.h>
+
 #include "hphp/util/thread-local.h"
-#include "hphp/util/util.h"
 #include "hphp/util/cronolog.h"
+#include "hphp/util/log-file-flusher.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -40,8 +41,11 @@ public:
     LogVerbose
   };
 
+  Logger(): m_standardOut(stderr) {}
+
   static bool UseSyslog;
   static bool UseLogFile;
+  static bool UseRequestLog;
   static bool IsPipeOutput;
   static bool UseCronolog;
   static FILE *Output;
@@ -72,6 +76,7 @@ public:
   static bool SetThreadLog(const char *file);
   static void ClearThreadLog();
   static void SetNewOutput(FILE *output);
+  static void UnlimitThreadMessages();
 
   typedef void (*PFUNC_LOG)(const char *header, const char *msg,
                             const char *ending, void *data);
@@ -85,6 +90,9 @@ public:
   }
 
   static char *EscapeString(const std::string &msg);
+
+  static FILE *GetStandardOut(LogLevelType level);
+  static void SetStandardOut(FILE*);
 
   virtual ~Logger() { }
 
@@ -113,7 +121,6 @@ protected:
     return Logger::UseLogFile || Logger::UseSyslog;
   }
 
-  static FILE *GetStandardOut(LogLevelType level);
   static int GetSyslogLevel(LogLevelType level);
 
   /**
@@ -133,6 +140,7 @@ protected:
 private:
   static Logger *s_logger;
 
+  FILE* m_standardOut;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

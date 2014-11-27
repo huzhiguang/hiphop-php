@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,11 +18,24 @@
 #define incl_HPHP_UTIL_ALLOC_H_
 
 #include <stdint.h>
+#include <cassert>
+#include <atomic>
+
+#include <folly/Portability.h>
 
 #include "hphp/util/exception.h"
 
+#ifdef FOLLY_SANITIZE_ADDRESS
+// ASan is less precise than valgrind so we'll need a superset of those tweaks
+# define VALGRIND
+// TODO: (t2869817) ASan doesn't play well with jemalloc
+# ifdef USE_JEMALLOC
+#  undef USE_JEMALLOC
+# endif
+#endif
+
 #ifdef USE_TCMALLOC
-#include "google/malloc_extension.h"
+#include <google/malloc_extension.h>
 #endif
 
 #ifndef USE_JEMALLOC
@@ -33,12 +46,9 @@
 #  include "malloc.h"
 # endif
 #else
-# undef ALLOCM_ZERO
-# undef ALLOCM_NO_MOVE
+# undef MALLOCX_LG_ALIGN
+# undef MALLOCX_ZERO
 # include <jemalloc/jemalloc.h>
-# ifndef ALLOCM_ARENA
-#  define ALLOCM_ARENA(a) 0
-# endif
 #endif
 
 #include "hphp/util/maphuge.h"
@@ -46,24 +56,46 @@
 extern "C" {
 #ifdef USE_TCMALLOC
 #define MallocExtensionInstance _ZN15MallocExtension8instanceEv
-  MallocExtension* MallocExtensionInstance() __attribute__((weak));
+  MallocExtension* MallocExtensionInstance() __attribute__((__weak__));
 #endif
 
 #ifdef USE_JEMALLOC
+
   int mallctl(const char *name, void *oldp, size_t *oldlenp, void *newp,
-              size_t newlen) __attribute__((weak));
+              size_t newlen) __attribute__((__weak__));
   int mallctlnametomib(const char *name, size_t* mibp, size_t*miblenp)
-              __attribute__((weak));
+              __attribute__((__weak__));
   int mallctlbymib(const size_t* mibp, size_t miblen, void *oldp,
-              size_t *oldlenp, void *newp, size_t newlen) __attribute__((weak));
+              size_t *oldlenp, void *newp, size_t newlen) __attribute__((__weak__));
   void malloc_stats_print(void (*write_cb)(void *, const char *),
                           void *cbopaque, const char *opts)
-    __attribute__((weak));
+    __attribute__((__weak__));
 #endif
+}
+
+enum class NotNull {};
+
+/*
+ * The placement-new provided by the standard library is required by the
+ * C++ specification to perform a null check because it is marked with noexcept
+ * or throw() depending on the compiler version. This override of placement
+ * new doesn't use either of these, so it is allowed to omit the null check.
+ */
+inline void* operator new(size_t, NotNull, void* location) {
+  assert(location);
+  return location;
 }
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
+
+const bool use_jemalloc =
+#ifdef USE_JEMALLOC
+  true
+#else
+  false
+#endif
+  ;
 
 class OutOfMemoryException : public Exception {
 public:
@@ -73,7 +105,6 @@ public:
   EXCEPTION_COMMON_IMPL(OutOfMemoryException);
 };
 
-namespace Util {
 ///////////////////////////////////////////////////////////////////////////////
 
 #ifdef USE_JEMALLOC
@@ -94,7 +125,7 @@ inline void low_free(void* ptr) {
 #ifndef USE_JEMALLOC
   free(ptr);
 #else
-  dallocm(ptr, ALLOCM_ARENA(low_arena));
+  dallocx(ptr, MALLOCX_ARENA(low_arena));
 #endif
 }
 
@@ -169,7 +200,55 @@ void init_stack_limits(pthread_attr_t* attr);
 
 extern const size_t s_pageSize;
 
+/*
+ * The numa node this thread is bound to
+ */
+extern __thread int32_t s_numaNode;
+/*
+ * enable the numa support in hhvm,
+ * and determine whether threads should default to using
+ * local memory.
+ */
+void enable_numa(bool local);
+/*
+ * Determine the node that the next thread should run on.
+ */
+int next_numa_node();
+/*
+ * Set the thread affinity, and the jemalloc arena for the current
+ * thread.
+ * Also initializes s_numaNode
+ */
+void set_numa_binding(int node);
+/*
+ * The number of numa nodes in the system
+ */
+int num_numa_nodes();
+/*
+ * Enable numa interleaving for the specified address range
+ */
+void numa_interleave(void* start, size_t size);
+/*
+ * Allocate the specified address range on the local node
+ */
+void numa_local(void* start, size_t size);
+/*
+ * Allocate the specified address range on the given node
+ */
+void numa_bind_to(void* start, size_t size, int node);
+
+#ifdef USE_JEMALLOC
+
+/**
+ * jemalloc pprof utility functions.
+ */
+int jemalloc_pprof_enable();
+int jemalloc_pprof_disable();
+int jemalloc_pprof_dump(const std::string& prefix, bool force);
+
+#endif // USE_JEMALLOC
+
 ///////////////////////////////////////////////////////////////////////////////
-}}
+}
 
 #endif // incl_HPHP_UTIL_ALLOC_H_

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,18 +18,27 @@
 #define incl_HPHP_CODE_GENERATOR_H_
 
 #include "hphp/compiler/hphp.h"
+#include <deque>
+#include <map>
+#include <set>
+#include <utility>
+#include <vector>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 DECLARE_BOOST_TYPES(AnalysisResult);
 DECLARE_BOOST_TYPES(Statement);
+DECLARE_BOOST_TYPES(StatementList);
 DECLARE_BOOST_TYPES(Construct);
 DECLARE_BOOST_TYPES(BlockScope);
-DECLARE_BOOST_TYPES(ClassScope);
+DECLARE_EXTENDED_BOOST_TYPES(ClassScope);
 DECLARE_BOOST_TYPES(FunctionScope);
 DECLARE_BOOST_TYPES(FileScope);
 DECLARE_BOOST_TYPES(LoopStatement);
+DECLARE_BOOST_TYPES(Location);
+DECLARE_BOOST_TYPES(Expression);
+DECLARE_BOOST_TYPES(ExpressionList);
 
 class CodeGenerator {
 public:
@@ -45,6 +54,7 @@ public:
     SystemCPP,  // special mode for generating builtin classes
     TextHHBC,   // HHBC dump in human-readable format
     BinaryHHBC, // serialized HHBC
+    CodeModel,  // serialized Code Model classes
   };
 
   enum Stream {
@@ -176,7 +186,6 @@ public:
   void ifdefEnd(const char *fmt, ...) ATTRIBUTE_PRINTF(2,3);
   void printDocComment(const std::string comment);
   const char *getGlobals(AnalysisResultPtr ar);
-  static std::string FormatLabel(const std::string &name);
   static std::string EscapeLabel(const std::string &name, bool *binary = nullptr);
 
   /**
@@ -265,12 +274,40 @@ public:
   FileScopeRawPtr getLiteralScope() const {
     return m_literalScope;
   }
+
+  /**
+   * Support for printing AST nodes in PHP serialize() format.
+   */
+  void printObjectHeader(const std::string className, int numProperties);
+  void printPropertyHeader(const std::string propertyName);
+  void printObjectFooter();
+  void printNull();
+  void printBool(bool value);
+  void printValue(double value);
+  void printValue(int32_t value);
+  void printValue(int64_t value);
+  void printValue(std::string value);
+  void printModifierVector(std::string value);
+  void printTypeExpression(std::string value);
+  void printTypeExpression(ExpressionPtr expression);
+  void printExpression(ExpressionPtr expression, bool isRef);
+  void printExpressionVector(ExpressionListPtr el);
+  void printTypeExpressionVector(ExpressionListPtr el);
+  void printExpressionVector(ExpressionPtr e);
+  void printAsBlock(StatementPtr s, bool isEnclosed = false);
+  void printAsEnclosedBlock(StatementPtr s) { printAsBlock(s, true); }
+  void printStatementVector(StatementListPtr sl);
+  void printStatementVector(StatementPtr s);
+  void printLocation(LocationPtr location);
+  void setAstClassPrefix(const std::string &prefix) { m_astPrefix = prefix; }
 private:
   std::string m_filename;
   Stream m_curStream;
   std::ostream *m_streams[StreamCount];
   std::ostream *m_out;
   Output m_output;
+  std::string m_astPrefix;
+  std::vector<std::string> m_astClassNames;
   bool m_verbose;
 
   int m_indentation[StreamCount];

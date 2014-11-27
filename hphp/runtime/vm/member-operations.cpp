@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,6 +19,12 @@
 
 namespace HPHP {
 
+const StaticString
+  s_offsetGet("offsetGet"),
+  s_offsetSet("offsetSet"),
+  s_offsetUnset("offsetUnset"),
+  s_offsetExists("offsetExists");
+
 StringData* prepareAnyKey(TypedValue* tv) {
   if (IS_STRING_TYPE(tv->m_type)) {
     StringData* str = tv->m_data.pstr;
@@ -29,6 +35,13 @@ StringData* prepareAnyKey(TypedValue* tv) {
   }
 }
 
+void unknownBaseType(const TypedValue* tv) {
+  always_assert_flog(
+    false,
+    "Unknown KindOf: {} in member operation base",
+    static_cast<uint8_t>(tv->m_type));
+}
+
 void objArrayAccess(ObjectData* base) {
   assert(!base->isCollection());
   if (!base->getVMClass()->classof(SystemLib::s_ArrayAccessClass)) {
@@ -37,43 +50,69 @@ void objArrayAccess(ObjectData* base) {
 }
 
 TypedValue* objOffsetGet(TypedValue& tvRef, ObjectData* base,
-                         CVarRef offset, bool validate /* = true */) {
+                         const Variant& offset, bool validate /* = true */) {
   if (validate) {
     objArrayAccess(base);
   }
   TypedValue* result;
   assert(!base->isCollection());
-  static StringData* sd__offsetGet = StringData::GetStaticString("offsetGet");
-  const Func* method = base->methodNamed(sd__offsetGet);
+  const Func* method = base->methodNamed(s_offsetGet.get());
   assert(method != nullptr);
-  g_vmContext->invokeFuncFew(&tvRef, method, base, nullptr, 1, offset.asCell());
+  g_context->invokeFuncFew(&tvRef, method, base, nullptr, 1, offset.asCell());
   result = &tvRef;
   return result;
 }
 
-static bool objOffsetExists(ObjectData* base, CVarRef offset) {
+enum class OffsetExistsResult {
+  DoesNotExist = 0,
+  DefinitelyExists = 1,
+  IssetIfNonNull = 2
+};
+
+static OffsetExistsResult objOffsetExists(ObjectData* base,
+                                          const Variant& offset) {
   objArrayAccess(base);
   TypedValue tvResult;
   tvWriteUninit(&tvResult);
-  static StringData* sd__offsetExists
-    = StringData::GetStaticString("offsetExists");
   assert(!base->isCollection());
-  const Func* method = base->methodNamed(sd__offsetExists);
+  const Func* method = base->methodNamed(s_offsetExists.get());
   assert(method != nullptr);
-  g_vmContext->invokeFuncFew(&tvResult, method, base, nullptr, 1,
+  g_context->invokeFuncFew(&tvResult, method, base, nullptr, 1,
                              offset.asCell());
   tvCastToBooleanInPlace(&tvResult);
-  return bool(tvResult.m_data.num);
+  if (!tvResult.m_data.num) return OffsetExistsResult::DoesNotExist;
+  return method->cls() == SystemLib::s_ArrayObjectClass ?
+    OffsetExistsResult::IssetIfNonNull : OffsetExistsResult::DefinitelyExists;
 }
 
-bool objOffsetIsset(TypedValue& tvRef, ObjectData* base, CVarRef offset,
+bool objOffsetIsset(TypedValue& tvRef, ObjectData* base, const Variant& offset,
                     bool validate /* = true */) {
-  return objOffsetExists(base, offset);
+  auto exists = objOffsetExists(base, offset);
+
+  // Unless we called ArrayObject::offsetExists, there's nothing more to do
+  if (exists != OffsetExistsResult::IssetIfNonNull) {
+    return (int)exists;
+  }
+
+  // For ArrayObject::offsetExists, we need to check the value at `offset`.
+  // If it's null, then we return false.
+  TypedValue tvResult;
+  tvWriteUninit(&tvResult);
+
+  // We can't call the offsetGet method on `base` because users aren't
+  // expecting offsetGet to be called for `isset(...)` expressions, so call
+  // the method on the base ArrayObject class.
+  const Func* method =
+    SystemLib::s_ArrayObjectClass->lookupMethod(s_offsetGet.get());
+  assert(method != nullptr);
+  g_context->invokeFuncFew(&tvResult, method, base, nullptr, 1,
+                           offset.asCell());
+  return !(tvAsVariant(&tvResult).isNull());
 }
 
-bool objOffsetEmpty(TypedValue& tvRef, ObjectData* base, CVarRef offset,
+bool objOffsetEmpty(TypedValue& tvRef, ObjectData* base, const Variant& offset,
                     bool validate /* = true */) {
-  if (!objOffsetExists(base, offset)) {
+  if (objOffsetExists(base, offset) == OffsetExistsResult::DoesNotExist) {
     return true;
   }
   TypedValue* result = objOffsetGet(tvRef, base, offset, false);
@@ -90,33 +129,40 @@ void objOffsetAppend(ObjectData* base, TypedValue* val,
   objOffsetSet(base, init_null_variant, val, false);
 }
 
-void objOffsetSet(ObjectData* base, CVarRef offset, TypedValue* val,
+void objOffsetSet(ObjectData* base, const Variant& offset, TypedValue* val,
                   bool validate /* = true */) {
   if (validate) {
     objArrayAccess(base);
   }
-  static StringData* sd__offsetSet = StringData::GetStaticString("offsetSet");
   assert(!base->isCollection());
-  const Func* method = base->methodNamed(sd__offsetSet);
+  const Func* method = base->methodNamed(s_offsetSet.get());
   assert(method != nullptr);
   TypedValue tvResult;
   tvWriteUninit(&tvResult);
   TypedValue args[2] = { *offset.asCell(), *tvToCell(val) };
-  g_vmContext->invokeFuncFew(&tvResult, method, base, nullptr, 2, args);
+  g_context->invokeFuncFew(&tvResult, method, base, nullptr, 2, args);
   tvRefcountedDecRef(&tvResult);
 }
 
-void objOffsetUnset(ObjectData* base, CVarRef offset) {
+void objOffsetUnset(ObjectData* base, const Variant& offset) {
   objArrayAccess(base);
-  static StringData* sd__offsetUnset
-    = StringData::GetStaticString("offsetUnset");
   assert(!base->isCollection());
-  const Func* method = base->methodNamed(sd__offsetUnset);
+  const Func* method = base->methodNamed(s_offsetUnset.get());
   assert(method != nullptr);
   TypedValue tv;
   tvWriteUninit(&tv);
-  g_vmContext->invokeFuncFew(&tv, method, base, nullptr, 1, offset.asCell());
+  g_context->invokeFuncFew(&tv, method, base, nullptr, 1, offset.asCell());
   tvRefcountedDecRef(&tv);
+}
+
+// Mutable collections support appending new elements using [] without a key
+// like so: "$vector[] = 123;". However, collections do not support using []
+// without a key to implicitly create a new element without supplying assigning
+// an initial value (ex "$vector[]['a'] = 73;").
+void throw_cannot_use_newelem_for_lval_read() {
+  Object e(SystemLib::AllocInvalidOperationExceptionObject(
+    "Cannot use [] with collections for reading in an lvalue context"));
+  throw e;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

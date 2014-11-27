@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,7 +21,7 @@
 #include "hphp/util/logger.h"
 #include "hphp/util/lock.h"
 #include "hphp/util/cronolog.h"
-#include "hphp/util/util.h"
+#include "hphp/util/log-file-flusher.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -87,7 +87,7 @@ private:
                FILE *outFile, const char *format);
 
   std::vector<LogFileData> m_output;
-  std::vector<CronologPtr> m_cronOutput;
+  std::vector<std::shared_ptr<Cronolog>> m_cronOutput;
   bool m_initialized;
   GetThreadDataFunc m_fGetThreadData;
   std::string m_defaultFormat;

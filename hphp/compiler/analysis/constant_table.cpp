@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,6 +15,7 @@
 */
 
 #include "hphp/compiler/analysis/constant_table.h"
+#include <vector>
 #include "hphp/compiler/analysis/analysis_result.h"
 #include "hphp/compiler/analysis/code_error.h"
 #include "hphp/compiler/analysis/type.h"
@@ -22,7 +23,6 @@
 #include "hphp/compiler/expression/expression.h"
 #include "hphp/compiler/expression/scalar_expression.h"
 #include "hphp/compiler/option.h"
-#include "hphp/util/util.h"
 #include "hphp/util/hash.h"
 #include "hphp/compiler/analysis/class_scope.h"
 #include "hphp/runtime/base/complex-types.h"
@@ -147,7 +147,7 @@ const {
 void ConstantTable::cleanupForError(AnalysisResultConstPtr ar) {
   AnalysisResult::Locker lock(ar);
 
-  BOOST_FOREACH(Symbol *sym, m_symbolVec) {
+  for (Symbol *sym: m_symbolVec) {
     if (!sym->isDynamic()) {
       sym->setDynamic();
       sym->setDeclaration(ConstructPtr());
@@ -181,7 +181,9 @@ TypePtr ConstantTable::check(BlockScopeRawPtr context,
           }
         }
         if (!isClassScope || !((ClassScope*)&m_blockScope)->isTrait()) {
-          Compiler::Error(Compiler::UseUndeclaredConstant, construct);
+          if (strcasecmp("class", name.c_str())) {
+            Compiler::Error(Compiler::UseUndeclaredConstant, construct);
+          }
         }
         actualType = isClassScope || !Option::WholeProgram ?
           Type::Variant : Type::String;
@@ -240,14 +242,4 @@ ClassScopeRawPtr ConstantTable::findBase(
 ///////////////////////////////////////////////////////////////////////////////
 
 void ConstantTable::outputPHP(CodeGenerator &cg, AnalysisResultPtr ar) {
-  if (Option::GenerateInferredTypes) {
-    for (unsigned int i = 0; i < m_symbolVec.size(); i++) {
-      Symbol *sym = m_symbolVec[i];
-      if (sym->isSystem()) continue;
-
-      cg_printf("// @const  %s\t$%s\n",
-                sym->getFinalType()->toString().c_str(),
-                sym->getName().c_str());
-    }
-  }
 }

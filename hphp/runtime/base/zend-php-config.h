@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1998-2010 Zend Technologies Ltd. (http://www.zend.com) |
    +----------------------------------------------------------------------+
    | This source file is subject to version 2.00 of the Zend license,     |
@@ -767,12 +767,6 @@
 #define HAVE_GD_IMAGESETTILE 1
 
 /* */
-#define HAVE_GD_JPG 1
-
-/* */
-#define HAVE_GD_PNG 1
-
-/* */
 #define HAVE_GD_STRINGFT 1
 
 /* */
@@ -1035,9 +1029,6 @@
 
 /* */
 #define HAVE_LIBEXPAT 1
-
-/* */
-#define HAVE_LIBFREETYPE 1
 
 /* */
 #define HAVE_LIBGD 1
@@ -2175,6 +2166,8 @@
 
 /* The size of a `intmax_t', as computed by sizeof. */
 #define SIZEOF_INTMAX_T 8
+
+#define WORDSIZE_IS_64
 
 /* The size of a `long', as computed by sizeof. */
 #ifdef WORDSIZE_IS_64

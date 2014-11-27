@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,23 +20,28 @@
 #include "hphp/runtime/server/server.h"
 #include "hphp/runtime/server/satellite-server.h"
 #include "hphp/util/async-func.h"
-#include "hphp/runtime/server/service-thread.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-DECLARE_BOOST_TYPES(HttpServer);
-
-class HttpServer : public Synchronizable, public TakeoverListener {
+class HttpServer : public Synchronizable, public TakeoverListener,
+                   public Server::ServerEventListener {
 public:
-  static HttpServerPtr Server;
+  static std::shared_ptr<HttpServer> Server;
   static time_t StartTime;
 
 public:
-  explicit HttpServer(void *sslCTX = nullptr);
+  explicit HttpServer();
   ~HttpServer();
 
-  void run();
+  /*
+   * Try to run the various servers that this class controls.
+   *
+   * If any of them can't bind their appropriate port (or otherwise
+   * fail their initialization steps), shut down the entire process
+   * without running any atexit handlers.
+   */
+  void runOrExitProcess();
 
   // Stop may be called from a signal handler.
   void stop(const char* reason = nullptr);
@@ -46,26 +51,30 @@ public:
   void flushLog();
   void watchDog();
 
-  void takeoverShutdown(HPHP::Server* server);
+  void takeoverShutdown() override;
 
-  ServerPtr getPageServer() { return m_pageServer;}
-  void getSatelliteStats(vector<std::pair<std::string, int>> *stats);
+  void serverStopped(HPHP::Server* server) override;
+
+  HPHP::Server *getPageServer() { return m_pageServer.get(); }
+  void getSatelliteStats(std::vector<std::pair<std::string, int>> *stats);
+
+  void stopOnSignal(int sig);
 
 private:
   bool m_stopped;
+  bool m_killed;
   const char* m_stopReason;
-  void *m_sslCTX;
 
   ServerPtr m_pageServer;
   ServerPtr m_adminServer;
-  SatelliteServerPtrVec m_satellites;
-  SatelliteServerPtrVec m_danglings;
+  std::vector<std::unique_ptr<SatelliteServer>> m_satellites;
+  std::vector<std::unique_ptr<SatelliteServer>> m_danglings;
   AsyncFunc<HttpServer> m_watchDog;
-  ServiceThreadPtrVec m_serviceThreads;
 
   bool startServer(bool pageServer);
   void onServerShutdown();
   void abortServers();
+  void waitForServers();
 
   // pid file functions
   void createPid();

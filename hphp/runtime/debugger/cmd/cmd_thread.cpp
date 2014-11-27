@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,6 +17,7 @@
 #include "hphp/runtime/debugger/cmd/cmd_thread.h"
 #include "hphp/runtime/base/execution-context.h"
 #include "hphp/runtime/base/string-util.h"
+#include "hphp/system/constants.h"
 #include "hphp/util/process.h"
 
 namespace HPHP { namespace Eval {
@@ -84,7 +85,7 @@ void CmdThread::help(DebuggerClient &client) {
 
 void CmdThread::processList(DebuggerClient &client, bool output /* = true */) {
   m_body = "list";
-  CmdThreadPtr res = client.xend<CmdThread>(this);
+  auto res = client.xend<CmdThread>(this);
   client.updateThreads(res->m_threads);
   if (!output) return;
 
@@ -109,7 +110,7 @@ void CmdThread::onClient(DebuggerClient &client) {
 
   if (client.argCount() == 0) {
     m_body = "info";
-    CmdThreadPtr res = client.xend<CmdThread>(this);
+    auto res = client.xend<CmdThread>(this);
     client.print(res->m_out);
   } else if (client.arg(1, "list")) {
     processList(client);
@@ -130,7 +131,7 @@ void CmdThread::onClient(DebuggerClient &client) {
     client.info("Thread is running in exclusive mode now. All other threads "
                  "will not break, even when they hit breakpoints.");
   } else {
-    string snum = client.argValue(1);
+    std::string snum = client.argValue(1);
     if (!DebuggerClient::IsValidNumber(snum)) {
       client.error("'[t]hread {index}' needs a numeric argument.");
       client.tutorial(
@@ -170,7 +171,7 @@ void CmdThread::onClient(DebuggerClient &client) {
 void CmdThread::debuggerInfo(InfoVec &info) {
   Add(info, "Host",       Process::GetHostName());
   Add(info, "Binary",     Process::GetAppName());
-  Add(info, "Version",    Process::GetAppVersion());
+  Add(info, "Version",    k_HHVM_VERSION.toCppString());
   Add(info, "Process ID", FormatNumber("%lld", Process::GetProcessId()));
   Add(info, "Thread ID",  FormatNumber("0x%llx", (int64_t)Process::GetThreadId()));
 }

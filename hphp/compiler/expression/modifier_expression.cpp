@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -41,6 +41,12 @@ void ModifierExpression::add(int modifier) {
   m_modifiers.push_back(modifier);
 }
 
+void ModifierExpression::remove(int modifier) {
+  m_modifiers.erase(
+    std::remove(m_modifiers.begin(), m_modifiers.end(), modifier),
+    m_modifiers.end());
+}
+
 int ModifierExpression::operator[](int index) {
   assert(index >= 0 && index < getCount());
   return m_modifiers[index];
@@ -54,7 +60,8 @@ bool ModifierExpression::isPublic() const {
     switch (m_modifiers[i]) {
     case T_PUBLIC:      return true;
     case T_PROTECTED:
-    case T_PRIVATE:     return false;
+    case T_PRIVATE:
+      return false;
     default:
       break;
     }
@@ -69,6 +76,23 @@ bool ModifierExpression::hasModifier(int modifier) const {
     }
   }
   return false;
+}
+
+bool ModifierExpression::hasDuplicates() const {
+  std::set<int> seen;
+  for (unsigned int i = 0; i < m_modifiers.size(); i++) {
+    if (seen.find(m_modifiers[i]) != seen.end()) {
+      return true;
+    }
+
+    seen.insert(m_modifiers[i]);
+  }
+
+  return false;
+}
+
+bool ModifierExpression::isExplicitlyPublic() const {
+  return hasModifier(T_PUBLIC);
 }
 
 bool ModifierExpression::isProtected() const {
@@ -113,6 +137,20 @@ bool ModifierExpression::validForClosure() const {
   return true;
 }
 
+/**
+ * In the context of a trait alias rule, only method access and visibility
+ * modifiers are allowed
+ */
+bool ModifierExpression::validForTraitAliasRule() const {
+  for (auto const& mod: m_modifiers) {
+    if (mod != T_PUBLIC && mod != T_PRIVATE && mod != T_PROTECTED
+        && mod != T_FINAL) {
+      return false;
+    }
+  }
+  return true;
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // static analysis functions
 
@@ -120,10 +158,27 @@ void ModifierExpression::analyzeProgram(AnalysisResultPtr ar) {
   // do nothing
 }
 
-TypePtr ModifierExpression::inferTypes(AnalysisResultPtr ar, TypePtr type,
-                                       bool coerce) {
-  assert(false);
-  return TypePtr();
+///////////////////////////////////////////////////////////////////////////////
+
+void ModifierExpression::outputCodeModel(CodeGenerator &cg) {
+  cg.printf("V:9:\"HH\\Vector\":%d:{", (int)m_modifiers.size());
+  for (unsigned int i = 0; i < m_modifiers.size(); i++) {
+    cg.printObjectHeader("Modifier", 1);
+    cg.printPropertyHeader("name");
+    switch (m_modifiers[i]) {
+      case T_PUBLIC:    cg.printValue("public");    break;
+      case T_PROTECTED: cg.printValue("protected"); break;
+      case T_PRIVATE:   cg.printValue("private");   break;
+      case T_STATIC:    cg.printValue("static");    break;
+      case T_ABSTRACT:  cg.printValue("abstract");  break;
+      case T_FINAL:     cg.printValue("final");     break;
+      case T_ASYNC:     cg.printValue("async");     break;
+      default:
+        assert(false);
+    }
+    cg.printObjectFooter();
+  }
+  cg.printf("}");
 }
 
 ///////////////////////////////////////////////////////////////////////////////

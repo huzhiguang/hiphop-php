@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,27 +13,37 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/runtime/server/http-protocol.h"
+
+#include <sys/time.h>
+
+#include <map>
+#include <string>
+
+#include <folly/Conv.h>
+
+#include "hphp/util/logger.h"
+#include "hphp/util/text-util.h"
+
+#include "hphp/runtime/base/arch.h"
 #include "hphp/runtime/base/hphp-system.h"
-#include "hphp/runtime/base/zend-url.h"
-#include "hphp/runtime/base/zend-string.h"
+#include "hphp/runtime/base/http-client.h"
 #include "hphp/runtime/base/program-functions.h"
 #include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/server/source-root-info.h"
-#include "hphp/runtime/server/request-uri.h"
-#include "hphp/runtime/server/transport.h"
-#include "hphp/util/logger.h"
-#include "hphp/util/util.h"
-#include "hphp/runtime/server/upload.h"
+#include "hphp/runtime/base/zend-string.h"
+#include "hphp/runtime/base/zend-url.h"
+#include "hphp/runtime/ext/string/ext_string.h"
 #include "hphp/runtime/server/replay-transport.h"
+#include "hphp/runtime/server/request-uri.h"
+#include "hphp/runtime/server/source-root-info.h"
+#include "hphp/runtime/server/transport.h"
+#include "hphp/runtime/server/upload.h"
 #include "hphp/runtime/server/virtual-host.h"
-#include "hphp/runtime/base/http-client.h"
-#include "hphp/runtime/ext/ext_string.h"
 
 #define DEFAULT_POST_CONTENT_TYPE "application/x-www-form-urlencoded"
 
 using std::map;
+using std::string;
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -42,12 +52,12 @@ namespace HPHP {
 static bool read_all_post_data(Transport *transport,
                                const void *&data, int &size) {
   if (transport->hasMorePostData()) {
-    data = Util::buffer_duplicate(data, size);
+    data = buffer_duplicate(data, size);
     do {
       int delta = 0;
       const void *extra = transport->getMorePostData(delta);
       if (size + delta < VirtualHost::GetMaxPostSize()) {
-        data = Util::buffer_append(data, size, extra, delta);
+        data = buffer_append(data, size, extra, delta);
         size += delta;
       }
     } while (transport->hasMorePostData());
@@ -56,13 +66,19 @@ static bool read_all_post_data(Transport *transport,
   return false;
 }
 
+static void CopyParams(Array& dest, Array& src) {
+  for (ArrayIter iter(src); iter; ++iter) {
+    dest.set(iter.first(), iter.second());
+  }
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 
 const VirtualHost *HttpProtocol::GetVirtualHost(Transport *transport) {
   if (!RuntimeOption::VirtualHosts.empty()) {
-    string host = transport->getHeader("Host");
+    std::string host = transport->getHeader("Host");
     for (unsigned int i = 0; i < RuntimeOption::VirtualHosts.size(); i++) {
-      VirtualHostPtr vhost = RuntimeOption::VirtualHosts[i];
+      auto vhost = RuntimeOption::VirtualHosts[i];
       if (vhost->match(host)) {
         VirtualHost::SetCurrent(vhost.get());
         return vhost.get();
@@ -78,6 +94,7 @@ const StaticString
   s_HPHP("HPHP"),
   s_HHVM("HHVM"),
   s_HHVM_JIT("HHVM_JIT"),
+  s_HHVM_ARCH("HHVM_ARCH"),
   s_HPHP_SERVER("HPHP_SERVER"),
   s_HPHP_HOTPROFILER("HPHP_HOTPROFILER"),
   s_HTTP_HOST("HTTP_HOST"),
@@ -99,6 +116,7 @@ const StaticString
   s__GET("_GET"),
   s__POST("_POST"),
   s__REQUEST("_REQUEST"),
+  s__SESSION("_SESSION"),
   s__ENV("_ENV"),
   s__COOKIE("_COOKIE"),
   s_HTTP_RAW_POST_DATA("HTTP_RAW_POST_DATA"),
@@ -117,7 +135,7 @@ const StaticString
   s_HEAD("HEAD"),
   s_POST("POST"),
   s_HTTPS("HTTPS"),
-  s_1("1"),
+  s_on("on"),
   s_REQUEST_TIME("REQUEST_TIME"),
   s_REQUEST_TIME_FLOAT("REQUEST_TIME_FLOAT"),
   s_QUERY_STRING("QUERY_STRING"),
@@ -125,7 +143,75 @@ const StaticString
   s_REMOTE_HOST("REMOTE_HOST"),
   s_REMOTE_PORT("REMOTE_PORT"),
   s_DOCUMENT_ROOT("DOCUMENT_ROOT"),
-  s_THREAD_TYPE("THREAD_TYPE");
+  s_THREAD_TYPE("THREAD_TYPE"),
+  s_dash("-"),
+  s_underscore("_"),
+  s_HTTP_("HTTP_"),
+  s_forwardslash("/");
+
+static auto const s_arraysToClear = {
+  s__SERVER,
+  s__GET,
+  s__POST,
+  s__FILES,
+  s__REQUEST,
+  s__ENV,
+  s__COOKIE,
+};
+
+static auto const s_arraysToUnset = {
+  s__SESSION,
+};
+
+static void PrepareEnv(Array& env, Transport *transport) {
+  // $_ENV
+  process_env_variables(env);
+  env.set(s_HPHP, 1);
+  env.set(s_HHVM, 1);
+  if (RuntimeOption::EvalJit) {
+    env.set(s_HHVM_JIT, 1);
+  }
+  switch (arch()) {
+  case Arch::X64:
+    env.set(s_HHVM_ARCH, "x64");
+    break;
+  case Arch::ARM:
+    env.set(s_HHVM_ARCH, "arm");
+    break;
+  }
+
+  bool isServer = RuntimeOption::ServerExecutionMode();
+  if (isServer) {
+    env.set(s_HPHP_SERVER, 1);
+    env.set(s_HPHP_HOTPROFILER, 1);
+  }
+
+  // Do this last so it can overwrite all the previous settings
+  HeaderMap transportParams;
+  transport->getTransportParams(transportParams);
+  for (auto const& header : transportParams) {
+    String key(header.first);
+    String value(header.second.back());
+    g_context->setenv(key, value);
+    env.set(key, value);
+  }
+}
+
+static void StartRequest(Array& server) {
+  server.set(s_REQUEST_START_TIME, time(nullptr));
+  time_t now;
+  struct timeval tp = {0};
+  double now_double;
+  if (!gettimeofday(&tp, nullptr)) {
+    now_double = (double)(tp.tv_sec + tp.tv_usec / 1000000.00);
+    now = tp.tv_sec;
+  } else {
+    now = time(nullptr);
+    now_double = (double)now;
+  }
+  server.set(s_REQUEST_TIME, now);
+  server.set(s_REQUEST_TIME_FLOAT, now_double);
+}
 
 /**
  * PHP has "EGPCS" processing order of these global variables, and this
@@ -135,186 +221,320 @@ const StaticString
 void HttpProtocol::PrepareSystemVariables(Transport *transport,
                                           const RequestURI &r,
                                           const SourceRootInfo &sri) {
-  GlobalVariables *g = get_global_variables();
-  const VirtualHost *vhost = VirtualHost::GetCurrent();
 
-  Variant& server = g->getRef(s__SERVER);
-  server.set(s_REQUEST_START_TIME, time(nullptr));
-
-  // $_ENV
-  Variant& env = g->getRef(s__ENV);
-  process_env_variables(env);
-  env.set(s_HPHP, 1);
-  env.set(s_HHVM, 1);
-  if (RuntimeOption::EvalJit) {
-    env.set(s_HHVM_JIT, 1);
+  auto const vhost = VirtualHost::GetCurrent();
+  auto const g = get_global_variables()->asArrayData();
+  Variant emptyArr(staticEmptyArray());
+  for (auto& key : s_arraysToClear) {
+    g->remove(key.get(), false);
+    g->set(key.get(), emptyArr, false);
   }
-
-  bool isServer = RuntimeOption::ServerExecutionMode();
-  if (isServer) {
-    env.set(s_HPHP_SERVER, 1);
-#ifdef HOTPROFILER
-    env.set(s_HPHP_HOTPROFILER, 1);
-#endif
+  for (auto& key : s_arraysToUnset) {
+    g->remove(key.get(), false);
   }
+  g->set(s_HTTP_RAW_POST_DATA, empty_string_variant_ref, false);
 
-  Variant &request = g->getRef(s__REQUEST);
+#define X(name)                                       \
+  Array name##arr(Array::Create());                   \
+  SCOPE_EXIT { g->set(s__##name, name##arr, false); };
+
+  X(ENV)
+  X(GET)
+  X(POST)
+  X(COOKIE)
+  X(FILES)
+  X(SERVER)
+  X(REQUEST)
+
+#undef X
+
+  Variant HTTP_RAW_POST_DATA;
+  SCOPE_EXIT {
+    g->set(s_HTTP_RAW_POST_DATA.get(), HTTP_RAW_POST_DATA, false);
+  };
+
+  StartRequest(SERVERarr);
+  PrepareEnv(ENVarr, transport);
+  PrepareRequestVariables(REQUESTarr,
+                          GETarr,
+                          POSTarr,
+                          HTTP_RAW_POST_DATA,
+                          FILESarr,
+                          COOKIEarr,
+                          transport,
+                          r);
+  PrepareServerVariable(SERVERarr,
+                        transport,
+                        r,
+                        sri,
+                        vhost);
+}
+
+void HttpProtocol::PrepareRequestVariables(Array& request,
+                                           Array& get,
+                                           Array& post,
+                                           Variant& raw_post,
+                                           Array& files,
+                                           Array& cookie,
+                                           Transport *transport,
+                                           const RequestURI &r) {
 
   // $_GET and $_REQUEST
   if (!r.queryString().empty()) {
-    Variant &get = g->getRef(s__GET);
-    DecodeParameters(get, r.queryString().data(),
-                     r.queryString().size());
+    PrepareGetVariable(get, r);
     CopyParams(request, get);
   }
 
-  string contentType = transport->getHeader("Content-Type");
-  string contentLength = transport->getHeader("Content-Length");
   // $_POST and $_REQUEST
   if (transport->getMethod() == Transport::Method::POST) {
-    bool needDelete = false;
-    int size = 0;
-    const void *data = transport->getPostData(size);
-    if (data && size) {
-      assert(((char*)data)[size] == 0); // we need a NULL terminated string
-      string boundary;
-      int content_length = atoi(contentLength.c_str());
-      bool rfc1867Post = IsRfc1867(contentType, boundary);
-      string files;
-      if (rfc1867Post) {
-        if (content_length > VirtualHost::GetMaxPostSize()) {
-          // $_POST and $_FILES are empty
-          Logger::Warning("POST Content-Length of %d bytes exceeds "
-                          "the limit of %" PRId64 " bytes",
-                          content_length, VirtualHost::GetMaxPostSize());
-          while (transport->hasMorePostData()) {
-            int delta = 0;
-            transport->getMorePostData(delta);
-          }
-        } else {
-          if (transport->hasMorePostData()) {
-            needDelete = true;
-            data = Util::buffer_duplicate(data, size);
-          }
-          DecodeRfc1867(transport, g->getRef(s__POST), g->getRef(s__FILES),
-                        content_length, data, size, boundary);
-        }
-        assert(!transport->getFiles(files));
-      } else {
-        needDelete = read_all_post_data(transport, data, size);
-
-        bool decodeData = strncasecmp(contentType.c_str(),
-                                       DEFAULT_POST_CONTENT_TYPE,
-                                       sizeof(DEFAULT_POST_CONTENT_TYPE)-1) == 0;
-        // Always decode data for now. (macvicar)
-        decodeData = true;
-
-        if (decodeData) {
-          DecodeParameters(g->getRef(s__POST), (const char*)data, size, true);
-        }
-
-        bool ret = transport->getFiles(files);
-        if (ret) {
-          g->getRef(s__FILES) = unserialize_from_string(files);
-        }
-      }
-      CopyParams(request, g->getRef(s__POST));
-      if (needDelete) {
-        if (RuntimeOption::AlwaysPopulateRawPostData &&
-            uint32_t(size) <= StringData::MaxSize) {
-          g->getRef(s_HTTP_RAW_POST_DATA) =
-            String((char*)data, size, AttachString);
-        } else {
-          free((void *)data);
-        }
-      } else {
-        // For literal we disregard RuntimeOption::AlwaysPopulateRawPostData
-        if (uint32_t(size) <= StringData::MaxSize) {
-          g->getRef(s_HTTP_RAW_POST_DATA) =
-            String((char*)data, size, CopyString);
-        }
-      }
-    }
+    PreparePostVariables(post, raw_post, files, transport);
+    CopyParams(request, post);
   }
 
   // $_COOKIE
+  if (PrepareCookieVariable(cookie, transport)) {
+    CopyParams(request, cookie);
+  }
+}
+
+void HttpProtocol::PrepareGetVariable(Array& get,
+                                      const RequestURI &r) {
+  DecodeParameters(get,
+                   r.queryString().data(),
+                   r.queryString().size());
+}
+
+void HttpProtocol::PreparePostVariables(Array& post,
+                                        Variant& raw_post,
+                                        Array& files,
+                                        Transport *transport) {
+
+  std::string contentType = transport->getHeader("Content-Type");
+  std::string contentLength = transport->getHeader("Content-Length");
+
+  bool needDelete = false;
+  int size = 0;
+  const void *data = transport->getPostData(size);
+  if (data && size) {
+    std::string boundary;
+    int content_length = atoi(contentLength.c_str());
+    bool rfc1867Post = IsRfc1867(contentType, boundary);
+    std::string files_str;
+    if (rfc1867Post) {
+      if (content_length > VirtualHost::GetMaxPostSize()) {
+        // $_POST and $_FILES are empty
+        Logger::Warning("POST Content-Length of %d bytes exceeds "
+                        "the limit of %" PRId64 " bytes",
+                        content_length, VirtualHost::GetMaxPostSize());
+        while (transport->hasMorePostData()) {
+          int delta = 0;
+          transport->getMorePostData(delta);
+        }
+        data = nullptr;
+        size = 0;
+      } else {
+        bool invalidate = false;
+        if (transport->hasMorePostData()) {
+          // Calls to getMorePostData may invalidate data, so make a copy
+          // iff we're trying to coalesce the entire POST body.  Otherwise,
+          // data may be invalid when DecodeRfc1867 returns.  See
+          // upload.cpp:read_post.
+          if (RuntimeOption::AlwaysPopulateRawPostData) {
+            needDelete = true;
+            data = buffer_duplicate(data, size);
+          } else {
+            invalidate = true;
+          }
+        }
+        DecodeRfc1867(transport,
+                      post,
+                      files,
+                      content_length,
+                      data,
+                      size,
+                      boundary);
+        if (invalidate) {
+          data = nullptr;
+          size = 0;
+        }
+      }
+      assert(!transport->getFiles(files_str));
+    } else {
+      needDelete = read_all_post_data(transport, data, size);
+
+      bool decodeData = strncasecmp(contentType.c_str(),
+                                    DEFAULT_POST_CONTENT_TYPE,
+                                    sizeof(DEFAULT_POST_CONTENT_TYPE)-1) == 0;
+      // Always decode data for now. (macvicar)
+      decodeData = true;
+
+      if (decodeData) {
+        DecodeParameters(post, (const char*)data, size, true);
+      }
+
+      bool ret = transport->getFiles(files_str);
+      if (ret) {
+        files = unserialize_from_string(files_str);
+      }
+    }
+
+    if (!data) {
+      return;
+    }
+    if (uint32_t(size) > StringData::MaxSize) {
+      // Can't store it anywhere
+      if (needDelete) {
+        free((void*) data);
+      }
+    } else {
+      auto string_data = needDelete ?
+        String((char*)data, size, AttachString) :
+        String((char*)data, size, CopyString);
+      g_context->setRawPostData(string_data);
+      if (RuntimeOption::AlwaysPopulateRawPostData || ! needDelete) {
+        // For literal we disregard RuntimeOption::AlwaysPopulateRawPostData
+        raw_post = string_data;
+      }
+    }
+  }
+}
+
+bool HttpProtocol::PrepareCookieVariable(Array& cookie,
+                                         Transport *transport) {
+
   string cookie_data = transport->getHeader("Cookie");
   if (!cookie_data.empty()) {
     StringBuffer sb;
     sb.append(cookie_data);
-    DecodeCookies(g->getRef(s__COOKIE), (char*)sb.data());
-    CopyParams(request, g->getRef(s__COOKIE));
+    DecodeCookies(cookie, (char*)sb.data());
+    return true;
+  } else {
+    return false;
+  }
+}
+
+static void CopyHeaderVariables(Array& server,
+                                const HeaderMap& headers) {
+  static std::atomic<int> badRequests(-1);
+
+  std::vector<std::string> badHeaders;
+  for (auto const& header : headers) {
+    auto const& key = header.first;
+    auto const& values = header.second;
+    auto normalizedKey = s_HTTP_ +
+                         string_replace(HHVM_FN(strtoupper)(key), s_dash,
+                                        s_underscore);
+
+    // Detect suspicious headers.  We are about to modify header names for
+    // the SERVER variable.  This means that it is possible to deliberately
+    // cause a header collision, which an attacker could use to sneak a
+    // header past a proxy that would either overwrite or filter it
+    // otherwise.  Client code should use apache_request_headers() to
+    // retrieve the original headers if they are security-critical.
+    if (RuntimeOption::LogHeaderMangle != 0 && server.exists(normalizedKey)) {
+      badHeaders.push_back(key);
+    }
+
+    if (!values.empty()) {
+      // When a header has multiple values, we always take the last one.
+      server.set(normalizedKey, String(values.back()));
+    }
   }
 
-  // $_SERVER
+  if (!badHeaders.empty()) {
+    auto reqId = badRequests.fetch_add(1, std::memory_order_acq_rel) + 1;
+    if (!(reqId % RuntimeOption::LogHeaderMangle)) {
+      std::string badNames = folly::join(", ", badHeaders);
+      std::string allHeaders;
 
-  // HTTP_ headers -- we don't exclude headers we handle elsewhere (e.g.,
-  // Content-Type, Authorization), since the CGI "spec" merely says the server
-  // "may" exclude them; this is not what APE does, but it's harmless.
-  HeaderMap headers;
-  transport->getHeaders(headers);
-
-  static int bad_request_count = -1;
-  for (HeaderMap::const_iterator iter = headers.begin();
-       iter != headers.end(); ++iter) {
-    const vector<string> &values = iter->second;
-
-    // Detect suspicious headers.  We are about to modify header names
-    // for the SERVER variable.  This means that it is possible to
-    // deliberately cause a header collision, which an attacker could
-    // use to sneak a header past a proxy that would either overwrite
-    // or filter it otherwise.  Client code should use
-    // apache_request_headers() to retrieve the original headers if
-    // they are security-critical.
-    if (RuntimeOption::LogHeaderMangle != 0) {
-      String key = "HTTP_";
-      key += f_strtoupper(iter->first).replace("-","_");
-      if (server.asArrRef().exists(key)) {
-        if (!(++bad_request_count % RuntimeOption::LogHeaderMangle)) {
-          Logger::Warning(
-            "HeaderMangle warning: "
-            "The header %s overwrote another header which mapped to the same "
-            "key. This happens because PHP normalises - to _, ie AN_EXAMPLE "
-            "and AN-EXAMPLE are equivalent.  You should treat this as "
-            "malicious.",
-            iter->first.c_str());
+      const char* separator = "";
+      for (auto const& header : headers) {
+        for (auto const& value : header.second) {
+          folly::toAppend(separator, header.first, ": ", value,
+                          &allHeaders);
+          separator = "\n";
         }
       }
-    }
 
-    for (unsigned int i = 0; i < values.size(); i++) {
-      String key = "HTTP_";
-      key += f_strtoupper(iter->first).replace("-", "_");
-      server.set(key, String(values[i]));
+      Logger::Warning(
+        "HeaderMangle warning: "
+        "The header(s) [%s] overwrote other headers which mapped to the same "
+        "key. This happens because PHP normalises - to _, ie AN_EXAMPLE "
+        "and AN-EXAMPLE are equivalent. You should treat this as "
+        "malicious. All headers from this request:\n%s",
+        badNames.c_str(), allHeaders.c_str());
     }
   }
+}
 
-  string host = transport->getHeader("Host");
-  String hostName(VirtualHost::GetCurrent()->serverName(host));
-  string hostHeader(host);
+static void CopyTransportParams(Array& server, Transport* transport) {
+  HeaderMap transportParams;
+  // Get additional server params from the transport if it has any. In the case
+  // of fastcgi this is basically a full header list from apache/nginx.
+  transport->getTransportParams(transportParams);
+  for (auto const& header : transportParams) {
+    // These overwrite anything already set in the $_SERVER
+    // When a header has multiple values, we always take the last one.
+    server.set(String(header.first), String(header.second.back()));
+  }
+}
+
+static void CopyServerInfo(Array& server,
+                           Transport *transport,
+                           const VirtualHost *vhost) {
+
+  string hostHeader = transport->getHeader("Host");
+  String hostName(vhost->serverName(hostHeader));
+  String serverNameHeader(transport->getServerName());
   if (hostHeader.empty()) {
     server.set(s_HTTP_HOST, hostName);
     StackTraceNoHeap::AddExtraLogging("Server", hostName.data());
   } else {
+    // reset the HTTP_HOST header from apache.
+    server.set(s_HTTP_HOST, hostHeader);
     StackTraceNoHeap::AddExtraLogging("Server", hostHeader.c_str());
   }
-  if (hostName.empty() || RuntimeOption::ForceServerNameToHeader) {
+
+  // Use the header from the transport if it is available
+  if (!serverNameHeader.empty()) {
+    hostName = serverNameHeader;
+  } else if (hostName.empty() || RuntimeOption::ForceServerNameToHeader) {
     hostName = hostHeader;
-    // _SERVER['SERVER_NAME'] shouldn't contain the port number
-    int colonPos = hostName.find(':');
-    if (colonPos != String::npos) {
-      hostName = hostName.substr(0, colonPos);
-    }
   }
 
-  // APE sets CONTENT_TYPE and CONTENT_LENGTH without HTTP_
-  if (!contentType.empty()) {
-    server.set(s_CONTENT_TYPE, String(contentType));
-  }
-  if (!contentLength.empty()) {
-    server.set(s_CONTENT_LENGTH, String(contentLength));
+  // _SERVER['SERVER_NAME'] shouldn't contain the port number
+  int colonPos = hostName.find(':');
+  if (colonPos != String::npos) {
+    hostName = hostName.substr(0, colonPos);
   }
 
+  StackTraceNoHeap::AddExtraLogging("Server_SERVER_NAME", hostName.data());
+
+  server.set(s_GATEWAY_INTERFACE, s_CGI_1_1);
+  server.set(s_SERVER_ADDR, transport->getServerAddr());
+  server.set(s_SERVER_NAME, hostName);
+  server.set(s_SERVER_PORT, transport->getServerPort());
+  server.set(s_SERVER_SOFTWARE, transport->getServerSoftware());
+  server.set(s_SERVER_PROTOCOL, "HTTP/" + transport->getHTTPVersion());
+  server.set(s_SERVER_ADMIN, empty_string_variant_ref);
+  server.set(s_SERVER_SIGNATURE, empty_string_variant_ref);
+}
+
+static void CopyRemoteInfo(Array& server, Transport *transport) {
+  String remoteAddr(transport->getRemoteAddr(), CopyString);
+  String remoteHost(transport->getRemoteHost(), CopyString);
+  if (remoteAddr.empty()) {
+    remoteAddr = remoteHost;
+  }
+  // Always set remoteAddr, even if it is empty
+  server.set(s_REMOTE_ADDR, remoteAddr);
+  if (!remoteHost.empty()) {
+    server.set(s_REMOTE_HOST, remoteHost);
+  }
+  server.set(s_REMOTE_PORT, transport->getRemotePort());
+}
+
+static void CopyAuthInfo(Array& server, Transport *transport) {
   // APE processes Authorization: Basic into PHP_AUTH_USER and PHP_AUTH_PW
   string authorization = transport->getHeader("Authorization");
   if (!authorization.empty()) {
@@ -330,15 +550,42 @@ void HttpProtocol::PrepareSystemVariables(Transport *transport,
       }
     }
   }
+}
 
+static void CopyPathInfo(Array& server,
+                         Transport *transport,
+                         const RequestURI& r,
+                         const VirtualHost *vhost) {
   server.set(s_REQUEST_URI, String(transport->getUrl(), CopyString));
   server.set(s_SCRIPT_URL, r.originalURL());
   String prefix(transport->isSSL() ? "https://" : "http://");
-  String port_suffix("");
 
   // Need to append port
-  if (!transport->isSSL() && RuntimeOption::ServerPort != 80) {
-    port_suffix = folly::format(":{}", RuntimeOption::ServerPort).str();
+  assert(server.exists(s_SERVER_PORT));
+  std::string serverPort = "80";
+  if (server.exists(s_SERVER_PORT)) {
+    Variant port = server[s_SERVER_PORT];
+    always_assert(port.isInteger() || port.isString());
+    if (port.isInteger()) {
+      serverPort = folly::to<std::string>(port.toInt32());
+    } else {
+      serverPort = port.toString().data();
+    }
+  }
+
+  String port_suffix("");
+  if (!transport->isSSL() && serverPort != "80") {
+    port_suffix = folly::format(":{}", serverPort).str();
+  }
+
+  string hostHeader;
+  if (server.exists(s_HTTP_HOST)) {
+    hostHeader = server[s_HTTP_HOST].toCStrRef().data();
+  }
+  String hostName;
+  if (server.exists(s_SERVER_NAME)) {
+    assert(server[s_SERVER_NAME].isString());
+    hostName = server[s_SERVER_NAME].toCStrRef();
   }
   server.set(s_SCRIPT_URI,
              String(prefix + (hostHeader.empty() ? hostName + port_suffix :
@@ -363,31 +610,51 @@ void HttpProtocol::PrepareSystemVariables(Transport *transport,
   } else {
     server.set(s_SCRIPT_NAME, r.resolvedURL());
   }
+
   if (r.rewritten()) {
     server.set(s_PHP_SELF, r.originalURL());
   } else {
     server.set(s_PHP_SELF, r.resolvedURL() + r.origPathInfo());
   }
 
+  String documentRoot = transport->getDocumentRoot();
+  if (documentRoot.empty()) {
+    // Right now this is just RuntimeOption::SourceRoot but mwilliams wants to
+    // fix it so it is settable, so I'll leave this for now
+    documentRoot = vhost->getDocumentRoot();
+  }
+  if (documentRoot != s_forwardslash &&
+      documentRoot[documentRoot.length() - 1] == '/') {
+    documentRoot = documentRoot.substr(0, documentRoot.length() - 1);
+  }
+  server.set(s_DOCUMENT_ROOT, documentRoot);
   server.set(s_SCRIPT_FILENAME, r.absolutePath());
+
   if (r.pathInfo().empty()) {
     server.set(s_PATH_TRANSLATED, r.absolutePath());
   } else {
-    server.set(s_PATH_TRANSLATED,
-               String(vhost->getDocumentRoot() + r.pathInfo().data()));
+    assert(server.exists(s_DOCUMENT_ROOT));
+    assert(server[s_DOCUMENT_ROOT].isString());
+    // reset path_translated back to the transport if it has it.
+    auto const& pathTranslated = transport->getPathTranslated();
+    if (!pathTranslated.empty()) {
+      if (documentRoot == s_forwardslash) {
+        // path outside document root or / is document root
+        server.set(s_PATH_TRANSLATED, String(pathTranslated));
+      } else {
+        server.set(s_PATH_TRANSLATED,
+                   String(server[s_DOCUMENT_ROOT].toCStrRef() +
+                          s_forwardslash + pathTranslated));
+      }
+    } else {
+      server.set(s_PATH_TRANSLATED,
+                 String(server[s_DOCUMENT_ROOT].toCStrRef() +
+                        server[s_SCRIPT_NAME].toCStrRef() +
+                        r.pathInfo().data()));
+    }
     server.set(s_PATH_INFO, r.pathInfo());
   }
 
-  server.set(s_argv, CREATE_VECTOR1(r.queryString()));
-  server.set(s_argc, 1);
-  server.set(s_GATEWAY_INTERFACE, s_CGI_1_1);
-  server.set(s_SERVER_ADDR, String(RuntimeOption::ServerPrimaryIP));
-  server.set(s_SERVER_NAME, hostName);
-  server.set(s_SERVER_PORT, RuntimeOption::ServerPort);
-  server.set(s_SERVER_SOFTWARE, s_HPHP);
-  server.set(s_SERVER_PROTOCOL, "HTTP/" + transport->getHTTPVersion());
-  server.set(s_SERVER_ADMIN, empty_string);
-  server.set(s_SERVER_SIGNATURE, empty_string);
   switch (transport->getMethod()) {
   case Transport::Method::GET:  server.set(s_REQUEST_METHOD, s_GET);  break;
   case Transport::Method::HEAD: server.set(s_REQUEST_METHOD, s_HEAD); break;
@@ -398,41 +665,56 @@ void HttpProtocol::PrepareSystemVariables(Transport *transport,
       server.set(s_REQUEST_METHOD, transport->getExtendedMethod());
     }
     break;
-  default:              server.set(s_REQUEST_METHOD, empty_string);     break;
+  default:
+    server.set(s_REQUEST_METHOD, empty_string_variant_ref); break;
   }
-  time_t now;
-  struct timeval tp = {0};
-  double now_double;
-  if (!gettimeofday(&tp, nullptr)) {
-    now_double = (double)(tp.tv_sec + tp.tv_usec / 1000000.00);
-    now = tp.tv_sec;
-  } else {
-    now = time(nullptr);
-    now_double = (double)now;
-  }
-  server.set(s_HTTPS, transport->isSSL() ? s_1 : empty_string);
-  server.set(s_REQUEST_TIME, now);
-  server.set(s_REQUEST_TIME_FLOAT, now_double);
+  server.set(s_HTTPS, transport->isSSL() ? Variant(s_on) :
+                                           empty_string_variant_ref);
   server.set(s_QUERY_STRING, r.queryString());
 
-  server.set(s_REMOTE_ADDR, String(transport->getRemoteHost(), CopyString));
-  server.set(s_REMOTE_HOST, empty_string); // I don't think we need to nslookup
-  server.set(s_REMOTE_PORT, transport->getRemotePort());
+  server.set(s_argv, make_packed_array(r.queryString()));
+  server.set(s_argc, 1);
+}
 
-  server.set(s_DOCUMENT_ROOT, String(vhost->getDocumentRoot()));
+void HttpProtocol::PrepareServerVariable(Array& server,
+                                         Transport *transport,
+                                         const RequestURI &r,
+                                         const SourceRootInfo &sri,
+                                         const VirtualHost *vhost) {
+  // $_SERVER
 
-  for (map<string, string>::const_iterator iter =
-         RuntimeOption::ServerVariables.begin();
-       iter != RuntimeOption::ServerVariables.end(); ++iter) {
-      server.set(String(iter->first), String(iter->second));
+  string contentType = transport->getHeader("Content-Type");
+  string contentLength = transport->getHeader("Content-Length");
+
+  // HTTP_ headers -- we don't exclude headers we handle elsewhere (e.g.,
+  // Content-Type, Authorization), since the CGI "spec" merely says the server
+  // "may" exclude them; this is not what APE does, but it's harmless.
+  HeaderMap headers;
+  transport->getHeaders(headers);
+  // Do this first so other methods can overwrite them
+  CopyHeaderVariables(server, headers);
+  CopyServerInfo(server, transport, vhost);
+  // Do this last so it can overwrite all the previous settings
+  CopyTransportParams(server, transport);
+  CopyRemoteInfo(server, transport);
+  CopyAuthInfo(server, transport);
+  CopyPathInfo(server, transport, r, vhost);
+
+  // APE sets CONTENT_TYPE and CONTENT_LENGTH without HTTP_
+  if (!contentType.empty()) {
+    server.set(s_CONTENT_TYPE, String(contentType));
   }
-  const map<string, string> &vServerVars = vhost->getServerVars();
-  for (map<string, string>::const_iterator iter =
-         vServerVars.begin();
-       iter != vServerVars.end(); ++iter) {
-    server.set(String(iter->first), String(iter->second));
+  if (!contentLength.empty()) {
+    server.set(s_CONTENT_LENGTH, String(contentLength));
   }
-  sri.setServerVariables(server);
+
+  for (auto& kv : RuntimeOption::ServerVariables) {
+    server.set(String(kv.first), String(kv.second));
+  }
+  for (auto& kv : vhost->getServerVars()) {
+    server.set(String(kv.first), String(kv.second));
+  }
+  server = sri.setServerVariables(std::move(server));
 
   const char *threadType = transport->getThreadTypeName();
   server.set(s_THREAD_TYPE, threadType);
@@ -462,16 +744,7 @@ void HttpProtocol::ClearRecord(bool success, const std::string &tmpfile) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-void HttpProtocol::CopyParams(Variant &dest, Variant &src) {
-  if (src.isArray()) {
-    Array srcArray = src.toArray();
-    for (ArrayIter iter(srcArray); iter; ++iter) {
-      dest.set(iter.first(), iter.second());
-    }
-  }
-}
-
-void HttpProtocol::DecodeParameters(Variant &variables, const char *data,
+void HttpProtocol::DecodeParameters(Array& variables, const char *data,
                                     int size, bool post /* = false */) {
   if (data == nullptr || size == 0) {
     return;
@@ -485,25 +758,18 @@ void HttpProtocol::DecodeParameters(Variant &variables, const char *data,
   last_value:
     if ((val = (const char *)memchr(s, '=', (p - s)))) {
       int len = val - s;
-      char *name = url_decode(s, len);
-      String sname(name, len, AttachString);
+      String sname = url_decode(s, len);
 
       val++;
       len = p - val;
-      char *value = url_decode(val, len);
-      if (RuntimeOption::EnableMagicQuotesGpc) {
-        char *slashedvalue = string_addslashes(value, len);
-        free(value);
-        value = slashedvalue;
-      }
-      String svalue(value, len, AttachString);
+      String value = url_decode(val, len);
 
-      register_variable(variables, (char*)sname.data(), svalue);
+      register_variable(variables, (char*)sname.data(), value);
     } else if (!post) {
       int len = p - s;
-      char *name = url_decode(s, len);
-      String sname(name, len, AttachString);
-      register_variable(variables, (char*)sname.data(), "");
+      String sname = url_decode(s, len);
+      register_variable(variables, (char*)sname.data(),
+                        empty_string_variant_ref);
     }
     s = p + 1;
   }
@@ -513,7 +779,7 @@ void HttpProtocol::DecodeParameters(Variant &variables, const char *data,
   }
 }
 
-void HttpProtocol::DecodeCookies(Variant &variables, char *data) {
+void HttpProtocol::DecodeCookies(Array& variables, char *data) {
   assert(data && *data);
 
   char *strtok_buf = nullptr;
@@ -530,26 +796,19 @@ void HttpProtocol::DecodeCookies(Variant &variables, char *data) {
     if (var != val && *var != '\0') {
       if (val) { /* have a value */
         int len = val - var;
-        char *name = url_decode(var, len);
-        String sname(name, len, AttachString);
+        String sname = url_decode(var, len);
 
         ++val;
         len = strlen(val);
-        char *value = url_decode(val, len);
-        if (RuntimeOption::EnableMagicQuotesGpc) {
-          char *slashedvalue = string_addslashes(value, len);
-          free(value);
-          value = slashedvalue;
-        }
-        String svalue(value, len, AttachString);
+        String value = url_decode(val, len);
 
-        register_variable(variables, (char*)sname.data(), svalue, false);
+        register_variable(variables, (char*)sname.data(), value, false);
       } else {
         int len = strlen(var);
-        char *name = url_decode(var, len);
-        String sname(name, len, AttachString);
+        String sname = url_decode(var, len);
 
-        register_variable(variables, (char*)sname.data(), "", false);
+        register_variable(variables, (char*)sname.data(),
+                          empty_string_variant_ref, false);
       }
     }
 
@@ -581,7 +840,7 @@ bool HttpProtocol::IsRfc1867(const string contentType, string &boundary) {
     }
   } else {
     /* search for the end of the boundary */
-    e = strchr(s, ',');
+    e = strpbrk(s, ",;");
   }
   if (e) {
     e[0] = '\0';
@@ -591,14 +850,23 @@ bool HttpProtocol::IsRfc1867(const string contentType, string &boundary) {
 }
 
 void HttpProtocol::DecodeRfc1867(Transport *transport,
-                                 Variant &post, Variant &files,
-                                 int contentLength, const void *&data,
-                                 int &size, string boundary) {
-  rfc1867PostHandler(transport, post, files, contentLength,
-                     data, size, boundary);
+                                 Array& post,
+                                 Array& files,
+                                 int contentLength,
+                                 const void *&data,
+                                 int &size,
+                                 string boundary) {
+  rfc1867PostHandler(transport,
+                     post,
+                     files,
+                     contentLength,
+                     data,
+                     size,
+                     boundary);
 }
 
 const char *HttpProtocol::GetReasonString(int code) {
+  // https://tools.ietf.org/html/rfc7231#section-6.1
   switch (code) {
   case 100: return "Continue";
   case 101: return "Switching Protocols";
@@ -609,7 +877,6 @@ const char *HttpProtocol::GetReasonString(int code) {
   case 204: return "No Content";
   case 205: return "Reset Content";
   case 206: return "Partial Content";
-  case 207: return "Multi-Status";
   case 300: return "Multiple Choices";
   case 301: return "Moved Permanently";
   case 302: return "Found";
@@ -625,24 +892,24 @@ const char *HttpProtocol::GetReasonString(int code) {
   case 405: return "Method Not Allowed";
   case 406: return "Not Acceptable";
   case 407: return "Proxy Authentication Required";
-  case 408: return "Request Time-out";
+  case 408: return "Request Timeout";
   case 409: return "Conflict";
   case 410: return "Gone";
   case 411: return "Length Required";
   case 412: return "Precondition Failed";
-  case 413: return "Request Entity Too Large";
-  case 414: return "Request-URI Too Large";
+  case 413: return "Payload Too Large";
+  case 414: return "URI Too Long";
   case 415: return "Unsupported Media Type";
-  case 416: return "Requested range not satisfiable";
+  case 416: return "Range Not Satisfiable";
   case 417: return "Expectation Failed";
   case 500: return "Internal Server Error";
   case 501: return "Not Implemented";
   case 502: return "Bad Gateway";
   case 503: return "Service Unavailable";
-  case 504: return "Gateway Time-out";
-  case 505: return "HTTP Version not supported";
+  case 504: return "Gateway Timeout";
+  case 505: return "HTTP Version Not Supported";
   }
-  return "Bad Response";
+  return "";
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -663,7 +930,7 @@ bool HttpProtocol::ProxyRequest(Transport *transport, bool force,
   if (extraHeaders) {
     for (HeaderMap::const_iterator iter = extraHeaders->begin();
          iter != extraHeaders->end(); ++iter) {
-      vector<string> &values = requestHeaders[iter->first];
+      std::vector<std::string> &values = requestHeaders[iter->first];
       values.insert(values.end(), iter->second.begin(), iter->second.end());
     }
   }
@@ -675,7 +942,7 @@ bool HttpProtocol::ProxyRequest(Transport *transport, bool force,
   }
 
   code = 0; // HTTP status of curl or 0 for "no server response code"
-  vector<String> responseHeaders;
+  std::vector<String> responseHeaders;
   HttpClient http;
   if (data && size) {
     code = http.post(url.c_str(), data, size, response, &requestHeaders,

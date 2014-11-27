@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,9 +18,11 @@
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/server/server-stats.h"
 #include "hphp/runtime/base/curl-tls-workarounds.h"
+#include "hphp/runtime/base/execution-context.h"
 #include "hphp/util/timer.h"
-#include "curl/curl.h"
-#include "curl/easy.h"
+#include <curl/curl.h>
+#include <curl/easy.h>
+#include <vector>
 #include "hphp/util/logger.h"
 #include "hphp/util/ssl-init.h"
 
@@ -43,7 +45,8 @@ HttpClient::HttpClient(int timeout /* = 5 */, int maxRedirect /* = 1 */,
     m_decompress(decompress), m_response(nullptr), m_responseHeaders(nullptr),
     m_proxyPort(0) {
   if (m_timeout <= 0) {
-    m_timeout = RuntimeOption::SocketDefaultTimeout;
+    m_timeout = ThreadInfo::s_threadInfo.getNoCheck()->
+      m_reqInjectionData.getSocketDefaultTimeout();
   }
 }
 
@@ -91,14 +94,16 @@ void HttpClient::proxy(const std::string &host, int port,
 int HttpClient::get(const char *url, StringBuffer &response,
                     const HeaderMap *requestHeaders /* = NULL */,
                     std::vector<String> *responseHeaders /* = NULL */) {
-  return impl(url, nullptr, 0, response, requestHeaders, responseHeaders);
+  return request(nullptr,
+                 url, nullptr, 0, response, requestHeaders, responseHeaders);
 }
 
 int HttpClient::post(const char *url, const char *data, int size,
                      StringBuffer &response,
                      const HeaderMap *requestHeaders /* = NULL */,
                      std::vector<String> *responseHeaders /* = NULL */) {
-  return impl(url, data, size, response, requestHeaders, responseHeaders);
+  return request(nullptr,
+                 url, data, size, response, requestHeaders, responseHeaders);
 }
 
 const StaticString
@@ -109,7 +114,8 @@ const StaticString
   s_local_cert("local_cert"),
   s_passphrase("passphrase");
 
-int HttpClient::impl(const char *url, const char *data, int size,
+int HttpClient::request(const char* verb,
+                     const char *url, const char *data, int size,
                      StringBuffer &response, const HeaderMap *requestHeaders,
                      std::vector<String> *responseHeaders) {
   SlowTimer timer(RuntimeOption::HttpSlowQueryThreshold, "curl", url);
@@ -132,6 +138,14 @@ int HttpClient::impl(const char *url, const char *data, int size,
   curl_easy_setopt(cp, CURLOPT_NOSIGNAL, 1); // for multithreading mode
   curl_easy_setopt(cp, CURLOPT_SSL_VERIFYPEER,    0);
   curl_easy_setopt(cp, CURLOPT_SSL_CTX_FUNCTION, curl_tls_workarounds_cb);
+
+  /*
+   * cipher list varies according to SSL library, and "ALL" is for OpenSSL
+   */
+  curl_version_info_data *cver = curl_version_info(CURLVERSION_NOW);
+  if (cver && cver->ssl_version && strstr(cver->ssl_version, "OpenSSL")) {
+    curl_easy_setopt(cp, CURLOPT_SSL_CIPHER_LIST, "ALL");
+  }
 
   curl_easy_setopt(cp, CURLOPT_TIMEOUT,           m_timeout);
   if (m_maxRedirect > 1) {
@@ -164,14 +178,12 @@ int HttpClient::impl(const char *url, const char *data, int size,
     }
   }
 
-  std::vector<String> headers; // holding those temporary strings
   curl_slist *slist = nullptr;
   if (requestHeaders) {
     for (HeaderMap::const_iterator iter = requestHeaders->begin();
          iter != requestHeaders->end(); ++iter) {
       for (unsigned int i = 0; i < iter->second.size(); i++) {
         String header = iter->first + ": " + iter->second[i];
-        headers.push_back(header);
         slist = curl_slist_append(slist, header.data());
       }
     }
@@ -184,6 +196,14 @@ int HttpClient::impl(const char *url, const char *data, int size,
     curl_easy_setopt(cp, CURLOPT_POST,          1);
     curl_easy_setopt(cp, CURLOPT_POSTFIELDS,    data);
     curl_easy_setopt(cp, CURLOPT_POSTFIELDSIZE, size);
+  }
+
+  if (verb != nullptr) {
+    curl_easy_setopt(cp, CURLOPT_CUSTOMREQUEST, verb);
+
+    if (strcasecmp(verb, "HEAD") == 0) {
+      curl_easy_setopt(cp, CURLOPT_NOBODY, 1);
+    }
   }
 
   if (responseHeaders) {

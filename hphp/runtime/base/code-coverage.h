@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,22 +17,28 @@
 #ifndef incl_HPHP_EVAL_CODE_COVERAGE_H_
 #define incl_HPHP_EVAL_CODE_COVERAGE_H_
 
-#include "hphp/runtime/base/complex-types.h"
-#include "hphp/util/lock.h"
+#include "hphp/util/hash-map-typedefs.h"
+
+#include <string>
+#include <vector>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
+class Array;
+
 class CodeCoverage {
 public:
-  void Record(const char *filename, int line0, int line1);
+  void Record(const char* filename, int line0, int line1);
 
   /**
    * Returns an array in this format,
    *
    *  array('filename' => array( line => count, ...))
+   *
+   * If sys is passed as false, systemlib files are not included.
    */
-  Array Report();
+  Array Report(bool sys = true);
 
   /**
    * Write JSON format into the file.
@@ -41,7 +47,7 @@ public:
    *
    * Note it's 0-indexed, so first count should always be 0.
    */
-  void Report(const std::string &filename);
+  void Report(const std::string& filename);
 
   /**
    * Clear all coverage data.
@@ -49,7 +55,7 @@ public:
   void Reset();
 
 private:
-  typedef hphp_const_char_map<std::vector<int> > CodeCoverageMap;
+  typedef hphp_const_char_map<std::vector<int>> CodeCoverageMap;
   CodeCoverageMap m_hits;
 };
 

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1998-2010 Zend Technologies Ltd. (http://www.zend.com) |
    +----------------------------------------------------------------------+
    | This source file is subject to version 2.00 of the Zend license,     |
@@ -17,41 +17,31 @@
 
 #include "hphp/runtime/base/zend-url.h"
 #include "hphp/runtime/base/zend-string.h"
+#include "hphp/runtime/base/string-util.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-static char *replace_controlchars(char *str, int len) {
+const StaticString s_file("file");
+
+static void replace_controlchars(String& output, const char *str, int len) {
+  if (!str) return;
+
   unsigned char *s = (unsigned char *)str;
   unsigned char *e = (unsigned char *)str + len;
-
-  if (!str) {
-    return (nullptr);
-  }
-
+  output = String(str, len, CopyString);
+  char *outbuf = output.bufferSlice().ptr;
   while (s < e) {
     if (iscntrl(*s)) {
-      *s='_';
+      *outbuf='_';
     }
     s++;
+    outbuf++;
   }
-
-  return (str);
-}
-
-Url::~Url() {
-  if (scheme)   free(scheme);
-  if (user)     free(user);
-  if (pass)     free(pass);
-  if (host)     free(host);
-  if (path)     free(path);
-  if (query)    free(query);
-  if (fragment) free(fragment);
+  output.setSize(len);
 }
 
 bool url_parse(Url &output, const char *str, int length) {
-  memset(&output, 0, sizeof(Url));
-
   char port_buf[6];
   const char *s, *e, *p, *pp, *ue;
 
@@ -76,8 +66,7 @@ bool url_parse(Url &output, const char *str, int length) {
     }
 
     if (*(e + 1) == '\0') { /* only scheme is available */
-      output.scheme = string_duplicate(s, (e - s));
-      replace_controlchars(output.scheme, (e - s));
+      replace_controlchars(output.scheme, s, (e - s));
       goto end;
     }
 
@@ -98,31 +87,29 @@ bool url_parse(Url &output, const char *str, int length) {
         goto parse_port;
       }
 
-      output.scheme = string_duplicate(s, (e-s));
-      replace_controlchars(output.scheme, (e - s));
+      replace_controlchars(output.scheme, s, (e - s));
 
       length -= ++e - s;
       s = e;
       goto just_path;
     } else {
-      output.scheme = string_duplicate(s, (e-s));
-      replace_controlchars(output.scheme, (e - s));
+      replace_controlchars(output.scheme, s, (e - s));
 
       if (*(e+2) == '/') {
         s = e + 3;
-        if (!strncasecmp("file", output.scheme, sizeof("file"))) {
+        if (output.scheme.get()->isame(s_file.get())) {
           if (*(e + 3) == '/') {
             /* support windows drive letters as in:
                file:///c:/somedir/file.txt
             */
-            if (*(e + 5) == ':') {
+            if (e[4] != '\0' && e[5] == ':') {
               s = e + 4;
             }
             goto nohost;
           }
         }
       } else {
-        if (!strncasecmp("file", output.scheme, sizeof("file"))) {
+        if (output.scheme.get()->isame(s_file.get())) {
           s = e + 1;
           goto nohost;
         } else {
@@ -141,7 +128,7 @@ bool url_parse(Url &output, const char *str, int length) {
       pp++;
     }
 
-    if (pp-p < 6 && (*pp == '/' || *pp == '\0')) {
+    if (pp - p > 0 && pp-p < 6 && (*pp == '/' || *pp == '\0')) {
       memcpy(port_buf, p, (pp-p));
       port_buf[pp-p] = '\0';
       auto port = atoi(port_buf);
@@ -150,9 +137,15 @@ bool url_parse(Url &output, const char *str, int length) {
       } else {
         return false;
       }
+    } else if (p == pp && *pp == '\0') {
+      return false;
+    } else if (*s == '/' && *(s+1) == '/') { /* relative-scheme URL */
+      s += 2;
     } else {
       goto just_path;
     }
+  } else if (*s == '/' && *(s+1) == '/') { /* relative-scheme URL */
+    s += 2;
   } else {
     just_path:
     ue = s + length;
@@ -180,18 +173,15 @@ bool url_parse(Url &output, const char *str, int length) {
   if ((p = (const char *)memrchr(s, '@', (e-s)))) {
     if ((pp = (const char *)memchr(s, ':', (p-s)))) {
       if ((pp-s) > 0) {
-        output.user = string_duplicate(s, (pp-s));
-        replace_controlchars(output.user, (pp - s));
+        replace_controlchars(output.user, s, (pp - s));
       }
 
       pp++;
       if (p-pp > 0) {
-        output.pass = string_duplicate(pp, (p-pp));
-        replace_controlchars(output.pass, (p-pp));
+        replace_controlchars(output.pass, pp, (p-pp));
       }
     } else {
-      output.user = string_duplicate(s, (p-s));
-      replace_controlchars(output.user, (p-s));
+      replace_controlchars(output.user, s, (p-s));
     }
 
     s = p + 1;
@@ -205,7 +195,7 @@ bool url_parse(Url &output, const char *str, int length) {
     p = s;
   } else {
     /* memrchr is a GNU specific extension
-       Emulate for wide compatability */
+       Emulate for wide compatibility */
     for(p = e; *p != ':' && p >= s; p--);
   }
 
@@ -235,8 +225,7 @@ bool url_parse(Url &output, const char *str, int length) {
     return false;
   }
 
-  output.host = string_duplicate(s, (p-s));
-  replace_controlchars(output.host, (p - s));
+  replace_controlchars(output.host, s, (p - s));
 
   if (e == ue) {
     return true;
@@ -251,45 +240,38 @@ bool url_parse(Url &output, const char *str, int length) {
 
     if (pp && pp < p) {
       if (pp - s) {
-        output.path = string_duplicate(s, (pp-s));
-        replace_controlchars(output.path, (pp - s));
+        replace_controlchars(output.path, s, (pp - s));
         p = pp;
       }
       goto label_parse;
     }
 
     if (p - s) {
-      output.path = string_duplicate(s, (p-s));
-      replace_controlchars(output.path, (p - s));
+      replace_controlchars(output.path, s, (p - s));
     }
 
     if (pp) {
       if (pp - ++p) {
-        output.query = string_duplicate(p, (pp-p));
-        replace_controlchars(output.query, (pp - p));
+        replace_controlchars(output.query, p, (pp - p));
       }
       p = pp;
       goto label_parse;
     } else if (++p - ue) {
-      output.query = string_duplicate(p, (ue-p));
-      replace_controlchars(output.query, (ue - p));
+      replace_controlchars(output.query, p, (ue - p));
     }
   } else if ((p = (const char *)memchr(s, '#', (ue - s)))) {
     if (p - s) {
-      output.path = string_duplicate(s, (p-s));
-      replace_controlchars(output.path, (p - s));
+      replace_controlchars(output.path, s, (p - s));
     }
 
     label_parse:
     p++;
 
     if (ue - p) {
-      output.fragment = string_duplicate(p, (ue-p));
-      replace_controlchars(output.fragment, (ue - p));
+      replace_controlchars(output.fragment, p, (ue - p));
     }
   } else {
-    output.path = string_duplicate(s, (ue-s));
-    replace_controlchars(output.path, (ue - s));
+    replace_controlchars(output.path, s, (ue - s));
   }
 end:
   return true;
@@ -329,14 +311,15 @@ static int php_htoi(char *s) {
 
 static unsigned char hexchars[] = "0123456789ABCDEF";
 
-char *url_encode(const char *s, int &len) {
+String url_encode(const char *s, int len) {
+  String retString(safe_address(len, 3, 1), ReserveString);
   register unsigned char c;
   unsigned char *to, *start;
   unsigned char const *from, *end;
 
   from = (unsigned char const *)s;
   end = (unsigned char const *)s + len;
-  start = to = (unsigned char *)malloc(3 * len + 1);
+  start = to = (unsigned char *)retString.bufferSlice().ptr;
 
   while (from < end) {
     c = *from++;
@@ -355,13 +338,13 @@ char *url_encode(const char *s, int &len) {
       *to++ = c;
     }
   }
-  *to = 0;
-  len = to - start;
-  return (char *) start;
+  retString.setSize(to - start);
+  return retString;
 }
 
-char *url_decode(const char *s, int &len) {
-  char *str = string_duplicate(s, len);
+String url_decode(const char *s, int len) {
+  String retString(s, len, CopyString);
+  char *str = retString.bufferSlice().ptr;
   char *dest = str;
   char *data = str;
 
@@ -380,9 +363,8 @@ char *url_decode(const char *s, int &len) {
     data++;
     dest++;
   }
-  *dest = '\0';
-  len = dest - str;
-  return str;
+  retString.setSize(dest - str);
+  return retString;
 }
 
 // copied and re-factored from clearsilver-0.10.5/cgi/cgi.c
@@ -438,11 +420,11 @@ int url_decode_ex(char *value, int len) {
   return o;
 }
 
-char *url_raw_encode(const char *s, int &len) {
+String url_raw_encode(const char *s, int len) {
+  String retString(safe_address(len, 3, 1), ReserveString);
   register int x, y;
-  unsigned char *str;
+  unsigned char *str = (unsigned char *)retString.bufferSlice().ptr;
 
-  str = (unsigned char *)malloc(3 * len + 1);
   for (x = 0, y = 0; len--; x++, y++) {
     str[y] = (unsigned char) s[x];
     if ((str[y] < '0' && str[y] != '-' && str[y] != '.') ||
@@ -454,13 +436,13 @@ char *url_raw_encode(const char *s, int &len) {
       str[y] = hexchars[(unsigned char) s[x] & 15];
     }
   }
-  str[y] = '\0';
-  len = y;
-  return ((char *)str);
+  retString.setSize(y);
+  return retString;
 }
 
-char *url_raw_decode(const char *s, int &len) {
-  char *str = string_duplicate(s, len);
+String url_raw_decode(const char *s, int len) {
+  String retString(s, len, CopyString);
+  char *str = retString.bufferSlice().ptr;
   char *dest = str;
   char *data = str;
 
@@ -476,9 +458,8 @@ char *url_raw_decode(const char *s, int &len) {
     data++;
     dest++;
   }
-  *dest = '\0';
-  len = dest - str;
-  return str;
+  retString.setSize(dest - str);
+  return retString;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

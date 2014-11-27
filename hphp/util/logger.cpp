@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,15 +13,15 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/util/logger.h"
-#include "hphp/util/base.h"
+
+#include <syslog.h>
+
 #include "hphp/util/stack-trace.h"
 #include "hphp/util/process.h"
 #include "hphp/util/exception.h"
-#include "util.h"
 #include "hphp/util/text-color.h"
-#include <syslog.h>
+#include "hphp/util/string-vsnprintf.h"
 
 #define IMPLEMENT_LOGLEVEL(LOGLEVEL)                                    \
   void Logger::LOGLEVEL(const char *fmt, ...) {                         \
@@ -48,7 +48,8 @@ IMPLEMENT_LOGLEVEL(Verbose);
 
 bool Logger::UseSyslog = false;
 bool Logger::UseLogFile = true;
-bool Logger::UseCronolog = true;
+bool Logger::UseRequestLog = false;
+bool Logger::UseCronolog = false;
 bool Logger::IsPipeOutput = false;
 FILE *Logger::Output = nullptr;
 Cronolog Logger::cronOutput;
@@ -66,16 +67,16 @@ Logger *Logger::s_logger = new Logger();
 void Logger::Log(LogLevelType level, const char *fmt, va_list ap) {
   if (!IsEnabled()) return;
 
-  string msg;
-  Util::string_vsnprintf(msg, fmt, ap);
+  std::string msg;
+  string_vsnprintf(msg, fmt, ap);
   Log(level, msg, nullptr);
 }
 
 void Logger::LogEscapeMore(LogLevelType level, const char *fmt, va_list ap) {
   if (!IsEnabled()) return;
 
-  string msg;
-  Util::string_vsnprintf(msg, fmt, ap);
+  std::string msg;
+  string_vsnprintf(msg, fmt, ap);
   Log(level, msg, nullptr, true, true);
 }
 
@@ -117,7 +118,11 @@ void Logger::Log(LogLevelType level, const std::string &msg,
 }
 
 FILE *Logger::GetStandardOut(LogLevelType level) {
-  return level <= LogWarning ? stderr : stdout;
+  return s_logger->m_standardOut;
+}
+
+void Logger::SetStandardOut(FILE* file) {
+  s_logger->m_standardOut = file;
 }
 
 int Logger::GetSyslogLevel(LogLevelType level) {
@@ -140,22 +145,23 @@ void Logger::log(LogLevelType level, const std::string &msg,
   assert(!escapeMore || escape);
 
   ThreadData *threadData = s_threadData.get();
-  if (++threadData->message > MaxMessagesPerRequest &&
+  if (threadData->message != -1 &&
+      ++threadData->message > MaxMessagesPerRequest &&
       MaxMessagesPerRequest >= 0) {
     return;
   }
 
-  boost::shared_ptr<StackTrace> deleter;
+  std::unique_ptr<StackTrace> deleter;
   if (LogNativeStackTrace && stackTrace == nullptr) {
-    deleter = boost::shared_ptr<StackTrace>(new StackTrace());
+    deleter.reset(new StackTrace());
     stackTrace = deleter.get();
   }
 
   if (UseSyslog) {
     syslog(GetSyslogLevel(level), "%s", msg.c_str());
   }
-  FILE *stdf = GetStandardOut(level);
   if (UseLogFile) {
+    FILE *stdf = GetStandardOut(level);
     FILE *f;
     if (UseCronolog) {
       f = cronOutput.getOutputFile();
@@ -163,7 +169,7 @@ void Logger::log(LogLevelType level, const std::string &msg,
     } else {
       f = Output ? Output : stdf;
     }
-    string header, sheader;
+    std::string header, sheader;
     if (LogHeader) {
       header = GetHeader();
       if (LogNativeStackTrace) {
@@ -213,7 +219,7 @@ std::string Logger::GetHeader() {
   time_t now = time(nullptr);
   char snow[64];
   ctime_r(&now, snow);
-  // Eliminate trailing newilne from ctime_r.
+  // Eliminate trailing newline from ctime_r.
   snow[24] = '\0';
 
   char header[128];
@@ -222,7 +228,8 @@ std::string Logger::GetHeader() {
            snow,
            (unsigned long long)pid,
            (unsigned long long)Process::GetThreadId(),
-           threadData->request, threadData->message,
+           threadData->request,
+           (threadData->message == -1 ? 0 : threadData->message),
            ExtraHeader.c_str());
   return header;
 }
@@ -283,6 +290,11 @@ void Logger::SetNewOutput(FILE *output) {
     if (Output) fclose(Output);
     Output = output;
   }
+}
+
+void Logger::UnlimitThreadMessages() {
+  ThreadData *threadData = s_threadData.get();
+  threadData->message = -1;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

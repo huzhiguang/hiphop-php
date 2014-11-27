@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,7 +14,12 @@
    +----------------------------------------------------------------------+
 */
 #include "hphp/runtime/base/intercept.h"
+
+#include <vector>
+#include <utility>
+
 #include "hphp/runtime/base/request-local.h"
+#include "hphp/runtime/base/request-event-handler.h"
 #include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/base/array-iterator.h"
 #include "hphp/runtime/base/type-conversions.h"
@@ -26,7 +31,7 @@
 #include "hphp/parser/parser.h"
 #include "hphp/util/lock.h"
 
-#include "hphp/runtime/base/file-repository.h"
+#include "hphp/runtime/base/unit-cache.h"
 #include "hphp/util/trace.h"
 
 using namespace HPHP::Trace;
@@ -37,28 +42,21 @@ namespace HPHP {
 
 TRACE_SET_MOD(intercept);
 
-class InterceptRequestData : public RequestEventHandler {
-public:
+struct InterceptRequestData final : RequestEventHandler {
   InterceptRequestData()
       : m_use_allowed_functions(false) {
   }
 
   void clear() {
-    *s_hasRenamedFunction = false;
     m_use_allowed_functions = false;
     m_allowed_functions.clear();
     m_renamed_functions.clear();
-    m_global_handler.reset();
+    m_global_handler.releaseForSweep();
     m_intercept_handlers.clear();
   }
 
-  virtual void requestInit() {
-    clear();
-  }
-
-  virtual void requestShutdown() {
-    clear();
-  }
+  void requestInit() override { clear(); }
+  void requestShutdown() override { clear(); }
 
 public:
   bool m_use_allowed_functions;
@@ -69,26 +67,32 @@ public:
   StringIMap<Variant> m_intercept_handlers;
 };
 IMPLEMENT_STATIC_REQUEST_LOCAL(InterceptRequestData, s_intercept_data);
-IMPLEMENT_THREAD_LOCAL_NO_CHECK(bool, s_hasRenamedFunction);
 
 static Mutex s_mutex;
-typedef StringIMap<vector<char*> > RegisteredFlagsMap;
+
+/*
+ * The bool indicates whether fb_intercept has ever been called
+ * on a function with this name.
+ * The vector contains a list of maybeIntercepted flags for functions
+ * with this name.
+ */
+typedef StringIMap<std::pair<bool,std::vector<char*>>> RegisteredFlagsMap;
 
 static RegisteredFlagsMap s_registered_flags;
 
 ///////////////////////////////////////////////////////////////////////////////
 
-static void flag_maybe_interrupted(vector<char*> &flags) {
-  for (int i = flags.size() - 1; i >= 0; i--) {
-    *flags[i] = 1;
+static void flag_maybe_intercepted(std::vector<char*> &flags) {
+  for (auto flag : flags) {
+    *flag = 1;
   }
 }
 
-bool register_intercept(CStrRef name, CVarRef callback, CVarRef data) {
+bool register_intercept(const String& name, const Variant& callback, const Variant& data) {
   StringIMap<Variant> &handlers = s_intercept_data->m_intercept_handlers;
   if (!callback.toBoolean()) {
     if (name.empty()) {
-      s_intercept_data->m_global_handler.reset();
+      s_intercept_data->m_global_handler.unset();
       handlers.clear();
     } else {
       handlers.erase(name);
@@ -98,7 +102,7 @@ bool register_intercept(CStrRef name, CVarRef callback, CVarRef data) {
 
   EventHook::EnableIntercept();
 
-  Array handler = CREATE_VECTOR2(callback, data);
+  Array handler = make_packed_array(callback, data);
 
   if (name.empty()) {
     s_intercept_data->m_global_handler = handler;
@@ -109,23 +113,23 @@ bool register_intercept(CStrRef name, CVarRef callback, CVarRef data) {
 
   Lock lock(s_mutex);
   if (name.empty()) {
-    for (RegisteredFlagsMap::iterator iter =
-           s_registered_flags.begin();
-         iter != s_registered_flags.end(); ++iter) {
-      flag_maybe_interrupted(iter->second);
+    for (auto& entry : s_registered_flags) {
+      flag_maybe_intercepted(entry.second.second);
     }
   } else {
-    RegisteredFlagsMap::iterator iter =
-      s_registered_flags.find(name);
-    if (iter != s_registered_flags.end()) {
-      flag_maybe_interrupted(iter->second);
+    StringData* sd = name.get();
+    if (!sd->isStatic()) {
+      sd = makeStaticString(sd);
     }
+    auto &entry = s_registered_flags[StrNR(sd)];
+    entry.first = true;
+    flag_maybe_intercepted(entry.second);
   }
 
   return true;
 }
 
-Variant *get_enabled_intercept_handler(CStrRef name) {
+static Variant *get_enabled_intercept_handler(const String& name) {
   Variant *handler = nullptr;
   StringIMap<Variant> &handlers = s_intercept_data->m_intercept_handlers;
   StringIMap<Variant>::iterator iter = handlers.find(name);
@@ -140,7 +144,7 @@ Variant *get_enabled_intercept_handler(CStrRef name) {
   return handler;
 }
 
-Variant *get_intercept_handler(CStrRef name, char* flag) {
+Variant *get_intercept_handler(const String& name, char* flag) {
   TRACE(1, "get_intercept_handler %s flag is %d\n",
         name.get()->data(), (int)*flag);
   if (*flag == -1) {
@@ -148,27 +152,29 @@ Variant *get_intercept_handler(CStrRef name, char* flag) {
     if (*flag == -1) {
       StringData *sd = name.get();
       if (!sd->isStatic()) {
-        sd = StringData::GetStaticString(sd);
+        sd = makeStaticString(sd);
       }
-      s_registered_flags[StrNR(sd)].push_back(flag);
-      *flag = 0;
+      auto &entry = s_registered_flags[StrNR(sd)];
+      entry.second.push_back(flag);
+      *flag = entry.first;
     }
+    if (!*flag) return nullptr;
   }
 
   Variant *handler = get_enabled_intercept_handler(name);
   if (handler == nullptr) {
     return nullptr;
   }
-  *flag = 1;
+  assert(*flag);
   return handler;
 }
 
-void unregister_intercept_flag(CStrRef name, char *flag) {
+void unregister_intercept_flag(const String& name, char *flag) {
   Lock lock(s_mutex);
   RegisteredFlagsMap::iterator iter =
     s_registered_flags.find(name);
   if (iter != s_registered_flags.end()) {
-    vector<char*> &flags = iter->second;
+    std::vector<char*> &flags = iter->second.second;
     for (int i = flags.size(); i--; ) {
       if (flag == flags[i]) {
         flags.erase(flags.begin() + i);
@@ -181,24 +187,49 @@ void unregister_intercept_flag(CStrRef name, char *flag) {
 ///////////////////////////////////////////////////////////////////////////////
 // fb_rename_function()
 
-void check_renamed_functions(CArrRef names) {
-  g_vmContext->addRenameableFunctions(names.get());
-}
+void rename_function(const String& old_name, const String& new_name) {
+  auto const old = old_name.get();
+  auto const n3w = new_name.get();
+  auto const oldNe = const_cast<NamedEntity*>(NamedEntity::get(old));
+  auto const newNe = const_cast<NamedEntity*>(NamedEntity::get(n3w));
 
-bool check_renamed_function(CStrRef name) {
-  return g_vmContext->isFunctionRenameable(name.get());
-}
-
-void rename_function(CStrRef old_name, CStrRef new_name) {
-  g_vmContext->renameFunction(old_name.get(), new_name.get());
-}
-
-String get_renamed_function(CStrRef name) {
-  HPHP::Func* f = HPHP::Unit::lookupFunc(name.get());
-  if (f) {
-    return f->nameRef();
+  Func* func = Unit::lookupFunc(oldNe);
+  if (!func) {
+    // It's the caller's responsibility to ensure that the old function
+    // exists.
+    not_reached();
   }
-  return name;
+
+  // Interceptable functions can be renamed even when
+  // JitEnableRenameFunction is false.
+  if (!(func->attrs() & AttrInterceptable)) {
+    if (!RuntimeOption::EvalJitEnableRenameFunction) {
+      // When EvalJitEnableRenameFunction is false, the translator may
+      // wire non-AttrInterceptable Func*'s into the TC. Don't rename
+      // functions.
+      raise_error("fb_rename_function must be explicitly enabled"
+                  "(-v Eval.JitEnableRenameFunction=true)");
+    }
+  }
+
+  auto const fnew = Unit::lookupFunc(newNe);
+  if (fnew && fnew != func) {
+    // To match hphpc, we silently ignore functions defined in user code that
+    // have the same name as a function defined in a separable extension
+    if (!fnew->isAllowOverride()) {
+      raise_error("Function already defined: %s", n3w->data());
+    }
+    return;
+  }
+
+  always_assert(!RDS::isPersistentHandle(oldNe->getFuncHandle()));
+  oldNe->setCachedFunc(nullptr);
+  newNe->m_cachedFunc.bind();
+  newNe->setCachedFunc(func);
+
+  if (RuntimeOption::EvalJit) {
+    jit::invalidateForRenameFunction(old);
+  }
 }
 
 ///////////////////////////////////////////////////////////////////////////////

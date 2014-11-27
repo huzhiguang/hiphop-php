@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,11 +17,10 @@
 #ifndef incl_HPHP_THRIFT_BUFFER_H_
 #define incl_HPHP_THRIFT_BUFFER_H_
 
-#include "hphp/runtime/base/types.h"
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/type-string.h"
 #include "hphp/runtime/base/variable-serializer.h"
 
-#include "arpa/inet.h"
+#include <arpa/inet.h>
 #if defined(__FreeBSD__)
 # include <sys/endian.h>
 # elif defined(__APPLE__)
@@ -29,6 +28,10 @@
 # include <libkern/OSByteOrder.h>
 #else
 # include <byteswap.h>
+#include <map>
+#include <memory>
+#include <utility>
+#include <vector>
 #endif
 
 #if !defined(htonll) && !defined(ntohll)
@@ -53,6 +56,10 @@
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
+
+class Array;
+class Object;
+struct Variant;
 
 /**
  * Efficient thrift input/output preparation. Used by automatically generated
@@ -137,7 +144,7 @@ public:
     a.d = data;
     write(a.c);
   }
-  void write(CStrRef data);
+  void write(const String& data);
 
   // reads
   void read(bool &data) {
@@ -193,7 +200,7 @@ public:
     read(size);
     if (size > 0 && size + 1 > 0) {
       data = String(size, ReserveString);
-      char *buf = data.mutableSlice().ptr;
+      char *buf = data.bufferSlice().ptr;
       read(buf, size);
       data.setSize(size);
     } else if (size) {
@@ -254,16 +261,16 @@ public:
     }
   }
   template<typename T>
-  void read(boost::shared_ptr<T> &data) {
+  void read(std::shared_ptr<T> &data) {
     bool has;
     read(has);
     if (has) {
-      data = boost::shared_ptr<T>(new T());
+      data = std::shared_ptr<T>(new T());
       data->recvImpl(*this);
     }
   }
   template<typename T>
-  void write(const boost::shared_ptr<T> &data) {
+  void write(const std::shared_ptr<T> &data) {
     write((bool)data);
     if (data) {
       data->sendImpl(*this);
@@ -273,15 +280,15 @@ public:
   void read(Array   &data);
   void read(Object  &data);
   void read(Variant &data);
-  void write(CArrRef data);
-  void write(CObjRef data);
-  void write(CVarRef data);
+  void write(const Array& data);
+  void write(const Object& data);
+  void write(const Variant& data);
 
   void skip(int8_t type);
 
 protected:
   virtual String readImpl() = 0;
-  virtual void flushImpl(CStrRef data) = 0;
+  virtual void flushImpl(const String& data) = 0;
   virtual void throwError(const char *msg, int code) = 0;
 
   int   m_size;
@@ -303,7 +310,7 @@ private:
 
   VariableSerializer::Type m_serializerType;
 
-  void flush(CStrRef data);
+  void flush(const String& data);
   void read(char *data, int len);
 
   void throwOutOfMemory();

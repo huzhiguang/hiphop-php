@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,9 +18,20 @@
 #define incl_HPHP_PARSER_SCANNER_H_
 
 #include <sstream>
+#include <cstdint>
+#include <string>
+#include <limits>
+#include <cstdlib>
+#include <limits.h>
+
 #include "hphp/util/exception.h"
 #include "hphp/parser/location.h"
 #include "hphp/parser/hphp.tab.hpp"
+
+#ifndef YY_TYPEDEF_YY_SIZE_T
+#define YY_TYPEDEF_YY_SIZE_T
+typedef size_t yy_size_t;
+#endif
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -194,7 +205,7 @@ public:
   };
 
 public:
-  Scanner(const char *filename, int type, bool md5 = false);
+  Scanner(const std::string& filename, int type, bool md5 = false);
   Scanner(std::istream &stream, int type, const char *fileName = "",
           bool md5 = false);
   Scanner(const char *source, int len, int type, const char *fileName = "",
@@ -212,6 +223,8 @@ public:
   bool tryParseNSType(TokenStore::iterator& pos);
   bool tryParseTypeList(TokenStore::iterator& pos);
   bool tryParseFuncTypeList(TokenStore::iterator& pos);
+  bool tryParseNonEmptyLambdaParams(TokenStore::iterator& pos);
+  void parseApproxParamDefVal(TokenStore::iterator& pos);
 
   /**
    * Called by parser or tokenizer.
@@ -230,35 +243,36 @@ public:
   /**
    * Called by lex.yy.cpp for YY_INPUT (see hphp.x)
    */
-  int read(char *text, int &result, int max);
+  int read(char *text, yy_size_t &result, yy_size_t max);
+  // Overload for older versions of flex.
+  int read(char *text, int &result, yy_size_t max);
 
   /**
    * Called by scanner rules.
    */
-  bool shortTags() const { return m_type & AllowShortTags;}
-  bool aspTags() const { return m_type & AllowAspTags;}
-  bool full() const { return m_type & ReturnAllTokens;}
+  bool shortTags() const { return (m_type & AllowShortTags) == AllowShortTags;}
+  bool aspTags() const { return (m_type & AllowAspTags) == AllowAspTags;}
+  bool full() const { return (m_type & ReturnAllTokens) == ReturnAllTokens;}
   int lastToken() const { return m_lastToken;}
   void setToken(const char *rawText, int rawLeng, int type = -1) {
     m_token->setText(rawText, rawLeng);
     incLoc(rawText, rawLeng, type);
   }
   void stepPos(const char *rawText, int rawLeng, int type = -1) {
-    if (m_type & ReturnAllTokens) {
+    if (shortTags()) {
       m_token->setText(rawText, rawLeng);
     }
     incLoc(rawText, rawLeng, type);
   }
   void setToken(const char *rawText, int rawLeng,
                 const char *ytext, int yleng, int type = -1) {
-    if (m_type & ReturnAllTokens) {
+    if (full()) {
       m_token->setText(rawText, rawLeng);
     } else {
       m_token->setText(ytext, yleng);
     }
     incLoc(rawText, rawLeng, type);
   }
-  void setHashBang(const char *rawText, int rawLeng, int type = -1);
   // also used for YY_FATAL_ERROR in hphp.x
   void error(const char* fmt, ...) ATTRIBUTE_PRINTF(2,3);
   void warn(const char* fmt, ...) ATTRIBUTE_PRINTF(2,3);
@@ -307,11 +321,11 @@ public:
   }
 
   bool isXHPSyntaxEnabled() const {
-    return (m_type & AllowXHPSyntax) || m_isHHFile;
+    return ((m_type & AllowXHPSyntax) == AllowXHPSyntax) || m_isHHFile;
   }
 
   bool isHHSyntaxEnabled() const {
-    return (m_type & AllowHipHopSyntax) || m_isHHFile;
+    return ((m_type & AllowHipHopSyntax) == AllowHipHopSyntax) || m_isHHFile;
   }
 
   int getLookaheadLtDepth() {

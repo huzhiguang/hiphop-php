@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,6 +18,10 @@
 #define incl_HPHP_PACKAGE_H_
 
 #include "hphp/compiler/hphp.h"
+#include <map>
+#include <memory>
+#include <set>
+#include <vector>
 #include "hphp/util/string-bag.h"
 #include "hphp/util/file-cache.h"
 #include "hphp/util/mutex.h"
@@ -56,18 +60,16 @@ public:
   bool parseImpl(const char *fileName);
 
   AnalysisResultPtr getAnalysisResult() { return m_ar;}
+  void resetAr() { m_ar.reset(); }
   int getFileCount() const { return m_files.size();}
   int getLineCount() const { return m_lineCount;}
   int getCharCount() const { return m_charCount;}
   void getFiles(std::vector<std::string> &files) const;
 
   void saveStatsToFile(const char *filename, int totalSeconds) const;
-  int saveStatsToDB(ServerDataPtr server, int totalSeconds,
-                    const std::string &branch, int revision) const;
-  void commitStats(ServerDataPtr server, int runId) const;
 
   const std::string& getRoot() const { return m_root;}
-  FileCachePtr getFileCache();
+  std::shared_ptr<FileCache> getFileCache();
 
 private:
   std::string m_root;
@@ -80,7 +82,7 @@ private:
   int m_lineCount;
   int m_charCount;
 
-  FileCachePtr m_fileCache;
+  std::shared_ptr<FileCache> m_fileCache;
   std::set<std::string> m_directories;
   std::set<std::string> m_staticDirectories;
   std::set<std::string> m_extraStaticFiles;

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,11 +13,18 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/runtime/vm/repo.h"
+
+#include <folly/Format.h>
+#include <folly/experimental/Singleton.h>
+
 #include "hphp/util/logger.h"
 #include "hphp/util/trace.h"
 #include "hphp/util/repo-schema.h"
+#include "hphp/util/assertions.h"
+#include "hphp/util/process.h"
+#include "hphp/runtime/vm/blob-helper.h"
+#include "hphp/runtime/vm/repo-global-data.h"
 
 namespace HPHP {
 
@@ -28,6 +35,7 @@ const char* Repo::kMagicProduct =
 const char* Repo::kSchemaPlaceholder = "%{schema}";
 const char* Repo::kDbs[RepoIdCount] = { "main",   // Central.
                                         "local"}; // Local.
+Repo::GlobalData Repo::s_globalData;
 
 void initialize_repo() {
   if (!sqlite3_threadsafe()) {
@@ -36,6 +44,9 @@ void initialize_repo() {
   }
   if (sqlite3_config(SQLITE_CONFIG_MULTITHREAD) != SQLITE_OK) {
     TRACE(1, "Failed to set default SQLite multi-threading mode\n");
+  }
+  if (sqlite3_config(SQLITE_CONFIG_MEMSTATUS, 0) != SQLITE_OK) {
+    TRACE(1, "Failed to disable SQLite memory statistics\n");
   }
   if (const char* schemaOverride = getenv("HHVM_RUNTIME_REPO_SCHEMA")) {
     TRACE(1, "Schema override: HHVM_RUNTIME_REPO_SCHEMA=%s\n", schemaOverride);
@@ -47,6 +58,10 @@ IMPLEMENT_THREAD_LOCAL(Repo, t_dh);
 
 Repo& Repo::get() {
   return *t_dh.get();
+}
+
+void Repo::shutdown() {
+  t_dh.destroy();
 }
 
 SimpleMutex Repo::s_lock;
@@ -61,10 +76,12 @@ bool Repo::prefork() {
     s_lock.unlock();
     return true;
   }
+  folly::SingletonVault::singleton()->destroyInstances();
   return false;
 }
 
 void Repo::postfork(pid_t pid) {
+  folly::SingletonVault::singleton()->reenableInstances();
   if (pid == 0) {
     new (&s_lock) SimpleMutex();
   } else {
@@ -74,19 +91,13 @@ void Repo::postfork(pid_t pid) {
 
 Repo::Repo()
   : RepoProxy(*this),
-#define RP_OP(c, o) \
-    m_##o##Local(*this, RepoIdLocal), m_##o##Central(*this, RepoIdCentral),
-    RP_OPS
-#undef RP_OP
+    m_insertFileHash{InsertFileHashStmt(*this, 0),
+                     InsertFileHashStmt(*this, 1)},
+    m_getFileHash{GetFileHashStmt(*this, 0), GetFileHashStmt(*this, 1)},
     m_dbc(nullptr), m_localReadable(false), m_localWritable(false),
     m_evalRepoId(-1), m_txDepth(0), m_rollback(false), m_beginStmt(*this),
     m_rollbackStmt(*this), m_commitStmt(*this), m_urp(*this), m_pcrp(*this),
-    m_frp(*this) {
-#define RP_OP(c, o) \
-  m_##o[RepoIdLocal] = &m_##o##Local; \
-  m_##o[RepoIdCentral] = &m_##o##Central;
-  RP_OPS
-#undef RP_OP
+    m_frp(*this), m_lsrp(*this) {
   {
     SimpleLock lock(s_lock);
     s_nRepos++;
@@ -109,11 +120,149 @@ void Repo::setCliFile(const std::string& cliFile) {
   s_cliFile = cliFile;
 }
 
-Unit* Repo::loadUnit(const std::string& name, const MD5& md5) {
+size_t Repo::stringLengthLimit() const {
+  static const size_t limit = sqlite3_limit(m_dbc, SQLITE_LIMIT_LENGTH, -1);
+  return limit;
+}
+
+void Repo::loadGlobalData(bool allowFailure /* = false */) {
+  m_lsrp.load();
+
+  if (!RuntimeOption::RepoAuthoritative) return;
+
+  std::vector<std::string> failures;
+
+  /*
+   * This should probably just go to the Local repo always, except
+   * that our unit test suite is currently running RepoAuthoritative
+   * tests with the compiled repo as the Central repo.
+   */
+  for (int repoId = RepoIdCount - 1; repoId >= 0; --repoId) {
+    if (repoName(repoId).empty()) {
+      // The repo wasn't loadable
+      continue;
+    }
+    try {
+      RepoStmt stmt(*this);
+      const auto& tbl = table(repoId, "GlobalData");
+      stmt.prepare(
+        folly::format(
+          "SELECT count(*), data from {};", tbl
+        ).str()
+      );
+      RepoTxn txn(*this);
+      RepoTxnQuery query(txn, stmt);
+      query.step();
+      if (!query.row()) {
+        throw RepoExc("Can't find table %s", tbl.c_str());
+      };
+      int val;
+      query.getInt(0, val);
+      if (val == 0) {
+        throw RepoExc("No rows in %s. Did you forget to compile that file with "
+                      "this HHVM version?", tbl.c_str());
+      };
+      BlobDecoder decoder = query.getBlob(1);
+      decoder(s_globalData);
+
+      txn.commit();
+    } catch (RepoExc& e) {
+      failures.push_back(repoName(repoId) + ": "  + e.msg());
+      continue;
+    }
+
+    return;
+  }
+
+  if (allowFailure) return;
+
+  if (failures.empty()) {
+    std::fprintf(stderr, "No repo was loadable. Check all the possible repo "
+                 "locations (Repo.Central.Path, HHVM_REPO_CENTRAL_PATH, and "
+                 "$HOME/.hhvm.hhbc) to make sure one of them is a valid "
+                 "sqlite3 HHVM repo built with this exact HHVM version.\n");
+  } else {
+    // We should always have a global data section in RepoAuthoritative
+    // mode, or the repo is messed up.
+    std::fprintf(stderr, "Failed to load Repo::GlobalData:\n");
+    for (auto& f : failures) {
+      std::fprintf(stderr, "  %s\n", f.c_str());
+    }
+  }
+
+  assert(Process::IsInMainThread());
+  exit(1);
+}
+
+void Repo::saveGlobalData(GlobalData newData) {
+  s_globalData = newData;
+
+  auto const repoId = repoIdForNewUnit(UnitOrigin::File);
+  RepoStmt stmt(*this);
+  stmt.prepare(
+    folly::format(
+      "INSERT INTO {} VALUES(@data);", table(repoId, "GlobalData")
+    ).str()
+  );
+  RepoTxn txn(*this);
+  RepoTxnQuery query(txn, stmt);
+  BlobEncoder encoder;
+  encoder(s_globalData);
+  query.bindBlob("@data", encoder, /* static */ true);
+  query.exec();
+
+  // TODO(#3521039): we could just put the litstr table in the same
+  // blob as the above and delete LitstrRepoProxy.
+  LitstrTable::get().insert(txn);
+
+  txn.commit();
+}
+
+std::unique_ptr<Unit> Repo::loadUnit(const std::string& name, const MD5& md5) {
   if (m_dbc == nullptr) {
     return nullptr;
   }
   return m_urp.load(name, md5);
+}
+
+std::vector<std::pair<std::string,MD5>>
+Repo::enumerateUnits(int repoId, bool preloadOnly, bool warn) {
+  std::vector<std::pair<std::string,MD5>> ret;
+
+  try {
+    RepoStmt stmt(*this);
+    stmt.prepare(preloadOnly ?
+                 folly::sformat(
+                   "SELECT path, {0}.md5 FROM {0} "
+                   "LEFT JOIN {1} ON ({0}.md5={1}.md5) WHERE preload != 0 "
+                   "ORDER BY preload DESC;",
+                   table(repoId, "FileMd5"),
+                   table(repoId, "Unit")) :
+                 folly::sformat(
+                   "SELECT path, md5 FROM {};",
+                   table(repoId, "FileMd5"))
+    );
+    RepoTxn txn(*this);
+    RepoTxnQuery query(txn, stmt);
+
+    for (query.step(); query.row(); query.step()) {
+      std::string path;
+      MD5 md5;
+
+      query.getStdString(0, path);
+      query.getMd5(1, md5);
+
+      ret.emplace_back(path, md5);
+    }
+
+    txn.commit();
+  } catch (RepoExc& e) {
+    if (warn) {
+      fprintf(stderr, "failed to enumerate units: %s\n", e.what());
+    }
+  }
+
+  return ret;
 }
 
 void Repo::InsertFileHashStmt::insert(RepoTxn& txn, const StringData* path,
@@ -157,7 +306,7 @@ bool Repo::GetFileHashStmt::get(const char *path, MD5& md5) {
   return false;
 }
 
-bool Repo::findFile(const char *path, const string &root, MD5& md5) {
+bool Repo::findFile(const char *path, const std::string &root, MD5& md5) {
   if (m_dbc == nullptr) {
     return false;
   }
@@ -165,12 +314,12 @@ bool Repo::findFile(const char *path, const string &root, MD5& md5) {
   for (repoId = RepoIdCount - 1; repoId >= 0; --repoId) {
     if (*path == '/' && !root.empty() &&
         !strncmp(root.c_str(), path, root.size()) &&
-        getFileHash(repoId).get(path + root.size(), md5)) {
+        m_getFileHash[repoId].get(path + root.size(), md5)) {
       TRACE(3, "Repo loaded file hash for '%s' from '%s'\n",
                path + root.size(), repoName(repoId).c_str());
       return true;
     }
-    if (getFileHash(repoId).get(path, md5)) {
+    if (m_getFileHash[repoId].get(path, md5)) {
       TRACE(3, "Repo loaded file hash for '%s' from '%s'\n",
                 path, repoName(repoId).c_str());
       return true;
@@ -181,14 +330,14 @@ bool Repo::findFile(const char *path, const string &root, MD5& md5) {
 }
 
 bool Repo::insertMd5(UnitOrigin unitOrigin, UnitEmitter* ue, RepoTxn& txn) {
-  const StringData* path = ue->getFilepath();
+  const StringData* path = ue->m_filepath;
   const MD5& md5 = ue->md5();
   int repoId = repoIdForNewUnit(unitOrigin);
   if (repoId == RepoIdInvalid) {
     return true;
   }
   try {
-    insertFileHash(repoId).insert(txn, path, md5);
+    m_insertFileHash[repoId].insert(txn, path, md5);
     return false;
   } catch(RepoExc& re) {
     TRACE(3, "Failed to commit md5 for '%s' to '%s': %s\n",
@@ -208,7 +357,7 @@ void Repo::commitMd5(UnitOrigin unitOrigin, UnitEmitter* ue) {
     int repoId = repoIdForNewUnit(unitOrigin);
     if (repoId != RepoIdInvalid) {
       TRACE(3, "Failed to commit md5 for '%s' to '%s': %s\n",
-               ue->getFilepath()->data(), repoName(repoId).c_str(),
+               ue->m_filepath->data(), repoName(repoId).c_str(),
                re.msg().c_str());
     }
   }
@@ -360,24 +509,31 @@ void Repo::disconnect() {
 }
 
 void Repo::initCentral() {
-  std::vector<std::string> failPaths;
+  std::string error;
 
   assert(m_dbc == nullptr);
+  auto tryPath = [this, &error](const char* path) {
+    std::string subErr;
+    if (!openCentral(path, subErr)) {
+      folly::format(&error, "  {}\n", subErr.empty() ? path : subErr);
+      return false;
+    }
+    return true;
+  };
 
-  // Try Repo.Central.Path (or HHVM_REPO_CENTRAL_PATH).
+  // Try Repo.Central.Path
   if (!RuntimeOption::RepoCentralPath.empty()) {
-    if (!openCentral(RuntimeOption::RepoCentralPath.c_str())) {
+    if (tryPath(RuntimeOption::RepoCentralPath.c_str())) {
       return;
     }
-    failPaths.push_back(RuntimeOption::RepoCentralPath);
   }
 
+  // Try HHVM_REPO_CENTRAL_PATH
   const char* HHVM_REPO_CENTRAL_PATH = getenv("HHVM_REPO_CENTRAL_PATH");
   if (HHVM_REPO_CENTRAL_PATH != nullptr) {
-    if (!openCentral(HHVM_REPO_CENTRAL_PATH)) {
+    if (tryPath(HHVM_REPO_CENTRAL_PATH)) {
       return;
     }
-    failPaths.push_back(HHVM_REPO_CENTRAL_PATH);
   }
 
   // Try "$HOME/.hhvm.hhbc".
@@ -385,10 +541,9 @@ void Repo::initCentral() {
   if (HOME != nullptr) {
     std::string centralPath = HOME;
     centralPath += "/.hhvm.hhbc";
-    if (!openCentral(centralPath.c_str())) {
+    if (tryPath(centralPath.c_str())) {
       return;
     }
-    failPaths.push_back(centralPath);
   }
 
   // Try the equivalent of "$HOME/.hhvm.hhbc", but look up the home directory
@@ -403,21 +558,21 @@ void Repo::initCentral() {
           && (HOME == nullptr || strcmp(HOME, pwbufp->pw_dir))) {
         std::string centralPath = pwbufp->pw_dir;
         centralPath += "/.hhvm.hhbc";
-        if (!openCentral(centralPath.c_str())) {
+        if (tryPath(centralPath.c_str())) {
           return;
         }
-        failPaths.push_back(centralPath);
       }
     }
   }
 
+  error = "Failed to initialize central HHBC repository:\n" + error;
   // Database initialization failed; this is an unrecoverable state.
-  for (std::vector<std::string>::const_iterator it = failPaths.begin();
-       it != failPaths.end(); ++it) {
-    Logger::Error("Failed to initialize central HHBC repository at '%s'",
-                  (*it).c_str());
+  Logger::Error("%s", error.c_str());
+
+  if (Process::IsInMainThread()) {
+    exit(1);
   }
-  exit(1);
+  always_assert_log(false, [&error] { return error; });
 }
 
 static int busyHandler(void* opaque, int nCalls) {
@@ -440,18 +595,21 @@ std::string Repo::insertSchema(const char* path) {
   return result;
 }
 
-bool Repo::openCentral(const char* path) {
-  std::string repoPath = insertSchema(path);
+bool Repo::openCentral(const char* rawPath, std::string& errorMsg) {
+  std::string repoPath = insertSchema(rawPath);
   // SQLITE_OPEN_NOMUTEX specifies that the connection be opened such
   // that no mutexes are used to protect the database connection from other
   // threads.  However, multiple connections can still be used concurrently,
   // because SQLite as a whole is thread-safe.
-  if (sqlite3_open_v2(repoPath.c_str(), &m_dbc,
-                      SQLITE_OPEN_NOMUTEX |
-                      SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr)) {
+  if (int err = sqlite3_open_v2(repoPath.c_str(), &m_dbc,
+                                SQLITE_OPEN_NOMUTEX |
+                                SQLITE_OPEN_READWRITE |
+                                SQLITE_OPEN_CREATE, nullptr)) {
     TRACE(1, "Repo::%s() failed to open candidate central repo '%s'\n",
              __func__, repoPath.c_str());
-    return true;
+    errorMsg = folly::format("Failed to open {}: {} - {}",
+                             repoPath, err, sqlite3_errmsg(m_dbc)).str();
+    return false;
   }
   // Register a busy handler to avoid spurious SQLITE_BUSY errors.
   sqlite3_busy_handler(m_dbc, busyHandler, (void*)this);
@@ -463,21 +621,26 @@ bool Repo::openCentral(const char* path) {
   } catch (RepoExc& re) {
     TRACE(1, "Repo::%s() failed to initialize connection to canditate repo"
              " '%s': %s\n", __func__, repoPath.c_str(), re.what());
-    return true;
+    errorMsg = folly::format("Failed to initialize connection to {}: {}",
+                             repoPath, re.what()).str();
+    return false;
   }
   // sqlite3_open_v2() will silently open in read-only mode if file permissions
   // prevent writing, and there is no apparent way to detect this other than to
   // attempt writing to the database.  Therefore, tell initSchema() to verify
   // that the database is writable.
   bool centralWritable = true;
-  if (initSchema(RepoIdCentral, centralWritable) || !centralWritable) {
+  if (initSchema(RepoIdCentral, centralWritable, errorMsg) ||
+      !centralWritable) {
     TRACE(1, "Repo::initSchema() failed for candidate central repo '%s'\n",
              repoPath.c_str());
-    return true;
+    errorMsg = folly::format("Failed to initialize schema in {}: {}",
+                             repoPath, errorMsg).str();
+    return false;
   }
   m_centralRepo = repoPath;
   TRACE(1, "Central repo: '%s'\n", m_centralRepo.c_str());
-  return false;
+  return true;
 }
 
 void Repo::initLocal() {
@@ -526,7 +689,10 @@ void Repo::attachLocal(const char* path, bool isWritable) {
   } catch (RepoExc& re) {
     return;
   }
-  if (initSchema(RepoIdLocal, isWritable)) {
+
+  std::string error;
+  if (initSchema(RepoIdLocal, isWritable, error)) {
+    FTRACE(1, "Local repo {} failed to init schema: {}\n", repoPath, error);
     return;
   }
   m_localRepo = repoPath;
@@ -540,6 +706,7 @@ void Repo::pragmas(int repoId) {
   // Valid synchronous values: 0 (OFF), 1 (NORMAL), 2 (FULL).
   static const int synchronous = 0;
   setIntPragma(repoId, "synchronous", synchronous);
+  setIntPragma(repoId, "cache_size", 20);
   // Valid journal_mode values: delete, truncate, persist, memory, wal, off.
   setTextPragma(repoId, "journal_mode", RuntimeOption::RepoJournal.c_str());
 }
@@ -604,9 +771,9 @@ void Repo::setTextPragma(int repoId, const char* name, const char* val) {
   }
 }
 
-bool Repo::initSchema(int repoId, bool& isWritable) {
+bool Repo::initSchema(int repoId, bool& isWritable, std::string& errorMsg) {
   if (!schemaExists(repoId)) {
-    if (createSchema(repoId)) {
+    if (createSchema(repoId, errorMsg)) {
       // Check whether this failure is due to losing the schema
       // initialization race with another process.
       if (!schemaExists(repoId)) {
@@ -644,7 +811,7 @@ bool Repo::schemaExists(int repoId) {
   return true;
 }
 
-bool Repo::createSchema(int repoId) {
+bool Repo::createSchema(int repoId, std::string& errorMsg) {
   try {
     RepoTxn txn(*this);
     {
@@ -670,12 +837,16 @@ bool Repo::createSchema(int repoId) {
                << "(path TEXT, md5 BLOB, UNIQUE(path, md5));";
       txn.exec(ssCreate.str());
     }
+    txn.exec(folly::format("CREATE TABLE {} (data BLOB);",
+                           table(repoId, "GlobalData")).str());
     m_urp.createSchema(repoId, txn);
     m_pcrp.createSchema(repoId, txn);
     m_frp.createSchema(repoId, txn);
+    m_lsrp.createSchema(repoId, txn);
 
     txn.commit();
   } catch (RepoExc& re) {
+    errorMsg = re.what();
     return true;
   }
   return false;
@@ -700,4 +871,36 @@ bool Repo::writable(int repoId) {
   return true;
 }
 
- } // HPHP::VM
+//////////////////////////////////////////////////////////////////////
+
+void batchCommit(std::vector<std::unique_ptr<UnitEmitter>> ues) {
+  auto& repo = Repo::get();
+
+  // Attempt batch commit.  This can legitimately fail due to multiple input
+  // files having identical contents.
+  bool err = false;
+  {
+    RepoTxn txn(repo);
+
+    for (auto& ue : ues) {
+      if (repo.insertUnit(ue.get(), UnitOrigin::File, txn)) {
+        err = true;
+        break;
+      }
+    }
+    if (!err) {
+      txn.commit();
+    }
+  }
+
+  // Commit units individually if an error occurred during batch commit.
+  if (err) {
+    for (auto& ue : ues) {
+      repo.commitUnit(ue.get(), UnitOrigin::File);
+    }
+  }
+}
+
+//////////////////////////////////////////////////////////////////////
+
+}

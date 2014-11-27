@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,7 +17,7 @@
 
 #include <stdio.h>
 #include "debug.h"
-#if !defined(__APPLE__) && !defined(__FreeBSD__)
+#if !defined(__APPLE__) && !defined(__FreeBSD__) && !defined(__CYGWIN__)
 #include "hphp/runtime/vm/debug/elfwriter.h"
 #endif
 #include "hphp/runtime/vm/debug/gdb-jit.h"
@@ -27,16 +27,16 @@
 #include "hphp/runtime/vm/jit/translator.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 
-using namespace HPHP::Transl;
+using namespace HPHP::jit;
 
 namespace HPHP {
 namespace Debug {
 
-
-int g_dwarfCallback(char *name, int size, Dwarf_Unsigned type,
-            Dwarf_Unsigned flags, Dwarf_Unsigned link, Dwarf_Unsigned info,
-            Dwarf_Unsigned *sect_name_index, Dwarf_Ptr handle, int *error) {
-#if !defined(__APPLE__) && !defined(__FreeBSD__)
+int g_dwarfCallback(
+  LIBDWARF_CALLBACK_NAME_TYPE name, int size, Dwarf_Unsigned type,
+  Dwarf_Unsigned flags, Dwarf_Unsigned link, Dwarf_Unsigned info,
+  Dwarf_Unsigned *sect_name_index, Dwarf_Ptr handle, int *error) {
+#if !defined(__APPLE__) && !defined(__FreeBSD__) && !defined(__CYGWIN__)
   ElfWriter *e = reinterpret_cast<ElfWriter *>(handle);
   return e->dwarfCallback(name, size, type, flags, link, info);
 #else
@@ -178,14 +178,14 @@ const char *DwarfInfo::lookupFile(const Unit *unit) {
 
 void DwarfInfo::addLineEntries(TCRange range,
                                const Unit *unit,
-                               const Opcode *instr,
+                               const Op* instr,
                                FunctionInfo* f) {
   if (unit == nullptr || instr == nullptr) {
     // For stubs, just add line 0
     f->m_lineTable.push_back(LineEntry(range, 0));
     return;
   }
-  Offset offset = unit->offsetOf(instr);
+  Offset offset = unit->offsetOf(reinterpret_cast<PC>(instr));
 
   int lineNum = unit->getLineNumber(offset);
   if (lineNum >= 0) {
@@ -221,7 +221,7 @@ void DwarfInfo::compactChunks() {
     m_dwarfChunks[j] = nullptr;
   }
   m_dwarfChunks[i] = chunk;
-#if !defined(__APPLE__) && !defined(__FreeBSD__)
+#if !defined(__APPLE__) && !defined(__FreeBSD__) && !defined(__CYGWIN__)
   // register compacted chunk with gdb
   ElfWriter e = ElfWriter(chunk);
 #endif
@@ -230,7 +230,7 @@ void DwarfInfo::compactChunks() {
 static Mutex s_lock(RankLeaf);
 
 DwarfChunk* DwarfInfo::addTracelet(TCRange range, const char* name,
-  const Func *func, const Opcode *instr, bool exit, bool inPrologue) {
+  const Func *func, const Op* instr, bool exit, bool inPrologue) {
   DwarfChunk* chunk = nullptr;
   FunctionInfo* f = new FunctionInfo(range, exit);
   const Unit* unit = func ? func->unit(): nullptr;
@@ -239,9 +239,9 @@ DwarfChunk* DwarfInfo::addTracelet(TCRange range, const char* name,
   } else {
     assert(func != nullptr);
     f->name = lookupFunction(func, exit, inPrologue, true);
-    const StringData* const *names = func->localNames();
+    auto names = func->localNames();
     for (int i = 0; i < func->numNamedLocals(); i++) {
-      f->m_namedLocals.push_back(names[i]->toCPPString());
+      f->m_namedLocals.push_back(names[i]->toCppString());
     }
   }
   f->file = lookupFile(unit);
@@ -270,7 +270,7 @@ DwarfChunk* DwarfInfo::addTracelet(TCRange range, const char* name,
     m_functions[end] = f;
   }
 
-  addLineEntries(TCRange(start, end, range.isAstubs()), unit, instr, f);
+  addLineEntries(TCRange(start, end, range.isAcold()), unit, instr, f);
 
   if (f->m_chunk == nullptr) {
     if (m_dwarfChunks.size() == 0 || m_dwarfChunks[0] == nullptr) {
@@ -291,7 +291,7 @@ DwarfChunk* DwarfInfo::addTracelet(TCRange range, const char* name,
     f->m_chunk = chunk;
   }
 
-#if !defined(__APPLE__) && !defined(__FreeBSD__)
+#if !defined(__APPLE__) && !defined(__FreeBSD__) && !defined(__CYGWIN__)
   if (f->m_chunk->m_functions.size() >= RuntimeOption::EvalGdbSyncChunks) {
     ElfWriter e = ElfWriter(f->m_chunk);
   }
@@ -306,7 +306,7 @@ void DwarfInfo::syncChunks() {
   for (i = 0; i < m_dwarfChunks.size(); i++) {
     if (m_dwarfChunks[i] && !m_dwarfChunks[i]->isSynced()) {
       unregister_gdb_chunk(m_dwarfChunks[i]);
-#if !defined(__APPLE__) && !defined(__FreeBSD__)
+#if !defined(__APPLE__) && !defined(__FreeBSD__) && !defined(__CYGWIN__)
       ElfWriter e = ElfWriter(m_dwarfChunks[i]);
 #endif
     }

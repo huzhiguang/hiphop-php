@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 $mapFn = function ($v) {
  return $v+1;
@@ -19,13 +19,6 @@ $mp = Map {
 0 => 'a', 3 => 'b', 6 => 'c'}
 ;
 foreach ($mp->keys()->map($mapFn)->filter($filtFn) as $x) {
-  var_dump($x);
-}
-echo "------------------------\n";
-$smp = StableMap {
-0 => 'a', 3 => 'b', 6 => 'c', 9 => 'd'}
-;
-foreach ($smp->keys()->map($mapFn)->filter($filtFn) as $x) {
   var_dump($x);
 }
 echo "------------------------\n";

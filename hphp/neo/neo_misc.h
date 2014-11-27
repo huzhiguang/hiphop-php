@@ -93,22 +93,18 @@ int vsnprintf (char *str, size_t count, const char *fmt, va_list arg);
 #include <sys/types.h>
 
 typedef unsigned int UINT32;
-typedef int INT32;
 typedef unsigned short int UINT16;
 typedef short int INT16;
 typedef unsigned char UINT8;
+/* This was conflicting with a cygwin header definition */
+#ifdef __CYGWIN__
+typedef signed char INT8;
+#else
 typedef char INT8;
-typedef char BOOL;
+#endif
 
 #ifndef MIN
 #define MIN(x,y)        (((x) < (y)) ? (x) : (y))
-#endif
-
-#ifndef TRUE
-#define TRUE 1
-#endif
-#ifndef FALSE
-#define FALSE 0
 #endif
 
 void ne_vwarn (const char *fmt, va_list ap)

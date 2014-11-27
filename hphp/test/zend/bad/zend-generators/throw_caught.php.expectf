@@ -1,5 +1,0 @@
-exception 'RuntimeException' with message 'Test' in %s:%d
-Stack trace:
-#0 {main}
-
-string(6) "result"

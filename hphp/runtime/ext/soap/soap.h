@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -19,11 +19,15 @@
 #define PHP_SOAP_H
 
 #include "hphp/runtime/base/base-includes.h"
+#include <map>
+#include <memory>
+#include <vector>
 #include "hphp/runtime/ext/soap/sdl.h"
 #include "hphp/runtime/base/request-local.h"
 #include "hphp/runtime/base/exceptions.h"
 #include "hphp/runtime/base/http-client.h"
 #include "hphp/util/lock.h"
+#include "hphp/runtime/base/request-event-handler.h"
 
 ///////////////////////////////////////////////////////////////////////////////
 // defines
@@ -74,15 +78,14 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class SoapData : public RequestEventHandler {
-private:
+class SoapData final : public RequestEventHandler {
   // SDL cache
-  DECLARE_BOOST_TYPES(sdlCacheBucket);
   struct sdlCacheBucket {
     sdlPtr sdl;
     time_t time;
   };
-  typedef StringTosdlCacheBucketPtrMap sdlCache;
+  typedef hphp_string_hash_map<std::shared_ptr<sdlCacheBucket>,sdlCacheBucket>
+          sdlCache;
 
 public:
   int64_t m_cache;
@@ -128,9 +131,9 @@ public:
   virtual void requestShutdown() { reset();}
 
 private:
-  sdlPtrVec m_sdls;
-  std::vector<encodeMapPtr> m_typemaps;
-  std::vector<xmlCharEncodingHandlerPtr> m_encodings;
+  hphp_hash_set<sdlPtr> m_sdls;
+  hphp_hash_set<encodeMapPtr> m_typemaps;
+  hphp_hash_set<xmlCharEncodingHandlerPtr> m_encodings;
 
   sdlPtr get_sdl_impl(const char *uri, long cache_wsdl, HttpClient *http);
   void reset();
@@ -157,11 +160,11 @@ struct soapClass {
 
 class soapHeader : public ResourceData {
 public:
-  DECLARE_RESOURCE_ALLOCATION(soapHeader);
+  DECLARE_RESOURCE_ALLOCATION_NO_SWEEP(soapHeader);
 
-  static StaticString s_class_name;
+  CLASSNAME_IS("soapHeader")
   // overriding ResourceData
-  virtual CStrRef o_getClassNameHook() const { return s_class_name; }
+  virtual const String& o_getClassNameHook() const { return classnameof(); }
 
   sdlFunction                      *function;
   String                            function_name;

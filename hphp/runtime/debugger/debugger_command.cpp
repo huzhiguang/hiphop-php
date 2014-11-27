@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,8 +13,10 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/runtime/debugger/debugger_command.h"
+
+#include <poll.h>
+
 #include "hphp/runtime/debugger/debugger.h"
 #include "hphp/runtime/debugger/cmd/all.h"
 #include "hphp/util/logger.h"
@@ -96,7 +98,7 @@ bool DebuggerCommand::Receive(DebuggerThriftBuffer &thrift,
   }
 
   int32_t type;
-  string clsname;
+  std::string clsname;
   try {
     thrift.reset(true);
     thrift.read(type);
@@ -132,6 +134,8 @@ bool DebuggerCommand::Receive(DebuggerThriftBuffer &thrift,
     case KindOfThread   :  cmd = DebuggerCommandPtr(new CmdThread   ()); break;
     case KindOfUp       :  cmd = DebuggerCommandPtr(new CmdUp       ()); break;
     case KindOfVariable :  cmd = DebuggerCommandPtr(new CmdVariable ()); break;
+    case KindOfVariableAsync :
+      cmd = DebuggerCommandPtr(new CmdVariable (KindOfVariableAsync)); break;
     case KindOfWhere    :  cmd = DebuggerCommandPtr(new CmdWhere    ()); break;
     case KindOfWhereAsync:
       cmd = DebuggerCommandPtr(new CmdWhere(KindOfWhereAsync)); break;

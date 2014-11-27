@@ -47,8 +47,8 @@ namespace vixl {
 
 class MacroAssembler : public Assembler {
  public:
-  MacroAssembler(byte * buffer, unsigned buffer_size)
-      : Assembler(buffer, buffer_size),
+  explicit MacroAssembler(HPHP::CodeBlock& cb)
+      : Assembler(cb),
 #ifdef DEBUG
         allow_macro_instructions_(true),
 #endif
@@ -122,6 +122,11 @@ class MacroAssembler : public Assembler {
   // Move macros.
   void Mov(const Register& rd, uint64_t imm);
   void Mov(const Register& rd, const Operand& operand);
+  template<typename T>
+  void Mov(const Register& rd, T* imm) {
+    static_assert(sizeof(T*) == sizeof(uint64_t), "");
+    Mov(rd, reinterpret_cast<uint64_t>(imm));
+  }
   void Mvn(const Register& rd, uint64_t imm) {
     Mov(rd, ~imm);
   };
@@ -544,7 +549,6 @@ class MacroAssembler : public Assembler {
   }
   void Fmov(FPRegister fd, Register rn) {
     assert(allow_macro_instructions_);
-    assert(!rn.IsZero());
     fmov(fd, rn);
   }
   void Fmov(FPRegister fd, double imm) {
@@ -619,6 +623,9 @@ class MacroAssembler : public Assembler {
     assert(allow_macro_instructions_);
     assert(!rt.IsZero());
     ldr(rt, imm);
+  }
+  void Ldr(const Register& rt, Label* label) {
+    ldr(rt, label);
   }
   void Lsl(const Register& rd, const Register& rn, unsigned shift) {
     assert(allow_macro_instructions_);
@@ -1139,7 +1146,7 @@ class MacroAssembler : public Assembler {
 class InstructionAccurateScope {
  public:
   explicit InstructionAccurateScope(MacroAssembler* masm)
-      : masm_(masm), size_(0) {
+      : masm_(masm) {
     masm_->BlockLiteralPool();
 #ifdef DEBUG
     old_allow_macro_instructions_ = masm_->AllowMacroInstructions();
@@ -1148,9 +1155,10 @@ class InstructionAccurateScope {
   }
 
   InstructionAccurateScope(MacroAssembler* masm, int count)
-      : masm_(masm), size_(count * kInstructionSize) {
+      : masm_(masm) {
     masm_->BlockLiteralPool();
 #ifdef DEBUG
+    size_ = count * kInstructionSize;
     masm_->bind(&start_);
     old_allow_macro_instructions_ = masm_->AllowMacroInstructions();
     masm_->SetAllowMacroInstructions(false);
@@ -1169,8 +1177,8 @@ class InstructionAccurateScope {
 
  private:
   MacroAssembler* masm_;
-  uint64_t size_;
 #ifdef DEBUG
+  uint64_t size_{0};
   Label start_;
   bool old_allow_macro_instructions_;
 #endif

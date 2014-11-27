@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,14 +15,21 @@
 */
 
 #include "hphp/runtime/debugger/cmd/cmd_info.h"
+#include <vector>
+
+#include <folly/dynamic.h>
+#include <folly/json.h>
+
 #include "hphp/runtime/debugger/cmd/cmd_variable.h"
-#include "hphp/runtime/ext/ext_reflection.h"
-#include "hphp/runtime/ext/ext_string.h"
+#include "hphp/runtime/ext/reflection/ext_reflection.h"
+#include "hphp/runtime/ext/string/ext_string.h"
 #include "hphp/runtime/base/preg.h"
 #include "hphp/util/logger.h"
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
+
+using std::string;
 
 TRACE_SET_MOD(debugger);
 
@@ -50,7 +57,8 @@ const StaticString
   s_defaultText("defaultText"),
   s_parent("parent"),
   s_interfaces("interfaces"),
-  s_interface("interface");
+  s_interface("interface"),
+  s_type_profiling("type_profiling");
 
 void CmdInfo::sendImpl(DebuggerThriftBuffer &thrift) {
   DebuggerCommand::sendImpl(thrift);
@@ -83,7 +91,7 @@ void CmdInfo::recvImpl(DebuggerThriftBuffer &thrift) {
       if (i < DebuggerClient::AutoCompleteCount) {
         thrift.read(m_acLiveLists[i]);
       } else {
-        vector<std::string> future;
+        std::vector<std::string> future;
         thrift.read(future);
       }
     }
@@ -128,7 +136,7 @@ bool CmdInfo::parseZeroArg(DebuggerClient &client) {
   return !m_symbol.empty();
 }
 
-void CmdInfo::parseOneArg(DebuggerClient &client, string &subsymbol) {
+void CmdInfo::parseOneArg(DebuggerClient &client, std::string &subsymbol) {
   assert(client.argCount() == 1);
   string symbol = client.argValue(1);
   size_t pos = symbol.find("::");
@@ -148,7 +156,7 @@ void CmdInfo::parseOneArg(DebuggerClient &client, string &subsymbol) {
 void CmdInfo::onClient(DebuggerClient &client) {
   if (DebuggerCommand::displayedHelp(client)) return;
 
-  string subsymbol;
+  std::string subsymbol;
 
   if (client.argCount() == 0) {
     if (!parseZeroArg(client)) {
@@ -167,7 +175,7 @@ void CmdInfo::onClient(DebuggerClient &client) {
     return;
   }
 
-  CmdInfoPtr cmd = client.xend<CmdInfo>(this);
+  auto cmd = client.xend<CmdInfo>(this);
   Array info = cmd->m_info;
   if (info.empty()) {
     client.info("(specified symbol cannot be found)");
@@ -183,7 +191,7 @@ void CmdInfo::onClient(DebuggerClient &client) {
 void CmdInfo::UpdateLiveLists(DebuggerClient &client) {
   CmdInfo cmd;
   cmd.m_type = KindOfLiveLists;
-  CmdInfoPtr res = client.xend<CmdInfo>(&cmd);
+  auto res = client.xend<CmdInfo>(&cmd);
   client.setLiveLists(res->m_acLiveLists);
 }
 
@@ -196,7 +204,7 @@ String CmdInfo::GetProtoType(DebuggerClient &client, const std::string &cls,
   } else {
     cmd.m_symbol = String(cls) + "::" + String(func);
   }
-  CmdInfoPtr res = client.xend<CmdInfo>(&cmd);
+  auto res = client.xend<CmdInfo>(&cmd);
   Array info = res->m_info;
   if (!info.empty()) {
     info = info[0];
@@ -213,13 +221,106 @@ String CmdInfo::GetProtoType(DebuggerClient &client, const std::string &cls,
   return String();
 }
 
+namespace {
+StaticString s_propSep{"::$"}, s_constSep{"::"};
+
+void getClassSymbolNames(bool interface,
+                         std::vector<String> &classes,
+                         std::vector<String> *clsMethods,
+                         std::vector<String> *clsProperties,
+                         std::vector<String> *clsConstants) {
+  bool details = clsMethods || clsProperties || clsConstants;
+  for (AllCachedClasses ac; !ac.empty(); ) {
+    Class* c = ac.popFront();
+    if (interface ? !(c->attrs() & AttrInterface) :
+        c->attrs() & (AttrInterface | AttrTrait)) {
+      continue;
+    }
+    classes.push_back(c->nameStr());
+    if (!details) continue;
+    if (clsMethods) {
+      for (Slot i = 0; i < c->numMethods(); i++) {
+        auto* f = c->getMethod(i);
+        if (f->isGenerated() || f->cls() != c) continue;
+        clsMethods->push_back(c->getMethod(i)->fullNameStr());
+      }
+    }
+    if (clsProperties) {
+      for (Slot i = 0; i < c->numDeclProperties(); i++) {
+        auto& prop = c->declProperties()[i];
+        if (prop.m_class != c) continue;
+        clsProperties->push_back(c->nameStr() + s_propSep + StrNR(prop.m_name));
+      }
+    }
+    if (clsConstants) {
+      for (Slot i = 0; i < c->numConstants(); i++) {
+        auto& cns = c->constants()[i];
+        if (cns.m_class != c) continue;
+        clsConstants->push_back(c->nameStr() + s_constSep + StrNR(cns.m_name));
+      }
+    }
+  }
+}
+
+void getSymbolNames(std::vector<String> &classes,
+                    std::vector<String> &functions,
+                    std::vector<String> &constants,
+                    std::vector<String> *clsMethods,
+                    std::vector<String> *clsProperties,
+                    std::vector<String> *clsConstants) {
+  static unsigned int methodSize = 128;
+  static unsigned int propSize   = 128;
+  static unsigned int constSize  = 128;
+
+  if (clsMethods) {
+    clsMethods->reserve(methodSize);
+  }
+  if (clsProperties) {
+    clsProperties->reserve(propSize);
+  }
+  if (clsConstants) {
+    clsConstants->reserve(constSize);
+  }
+
+  getClassSymbolNames(false, classes,
+                      clsMethods, clsProperties, clsConstants);
+  getClassSymbolNames(true, classes,
+                      clsMethods, clsProperties, clsConstants);
+
+  if (clsMethods && methodSize < clsMethods->size()) {
+    methodSize = clsMethods->size();
+  }
+  if (clsProperties && propSize < clsProperties->size()) {
+    propSize = clsProperties->size();
+  }
+  if (constSize && constSize < clsConstants->size()) {
+    constSize = clsConstants->size();
+  }
+
+  Array funcs1 = Unit::getSystemFunctions();
+  Array funcs2 = Unit::getUserFunctions();
+  functions.reserve(funcs1.size() + funcs2.size());
+  for (ArrayIter iter(funcs1); iter; ++iter) {
+    functions.push_back(iter.second().toString());
+  }
+  for (ArrayIter iter(funcs2); iter; ++iter) {
+    functions.push_back(iter.second().toString());
+  }
+  Array consts = lookupDefinedConstants();
+  constants.reserve(consts.size());
+  for (ArrayIter iter(consts); iter; ++iter) {
+    constants.push_back(iter.first().toString());
+  }
+}
+}
+
 bool CmdInfo::onServer(DebuggerProxy &proxy) {
   if (m_type == KindOfLiveLists) {
     std::vector<String> tmpAcLiveLists[DebuggerClient::AutoCompleteCount];
     m_acLiveLists = DebuggerClient::CreateNewLiveLists();
 
     try {
-      ClassInfo::GetSymbolNames(
+      getSymbolNames(
         tmpAcLiveLists[DebuggerClient::AutoCompleteClasses],
         tmpAcLiveLists[DebuggerClient::AutoCompleteFunctions],
         tmpAcLiveLists[DebuggerClient::AutoCompleteConstants],
@@ -243,17 +344,17 @@ bool CmdInfo::onServer(DebuggerProxy &proxy) {
     for (unsigned int i = 0 ; i < sizeof(tempList)/sizeof(int); ++i) {
       for (unsigned int j = 0 ; j < tmpAcLiveLists[tempList[i]].size(); ++j) {
         m_acLiveLists[tempList[i]].push_back(
-          tmpAcLiveLists[tempList[i]][j]->toCPPString());
+          tmpAcLiveLists[tempList[i]][j].toCppString());
       }
     }
 
-    Array variables = g_vmContext->getLocalDefinedVariables(0);
+    Array variables = g_context->getLocalDefinedVariables(0);
     variables += CmdVariable::GetGlobalVariables();
-    vector<std::string> &vars =
+    std::vector<std::string> &vars =
       m_acLiveLists[DebuggerClient::AutoCompleteVariables];
     vars.reserve(variables.size());
     for (ArrayIter iter(variables); iter; ++iter) {
-      vars.push_back("$" + iter.first().toString()->toCPPString());
+      vars.push_back("$" + iter.first().toString().toCppString());
     }
 
     return proxy.sendToClient(this);
@@ -261,7 +362,7 @@ bool CmdInfo::onServer(DebuggerProxy &proxy) {
 
   if (m_type == KindOfUnknown || m_type == KindOfClass) {
     try {
-      Array ret = f_hphp_get_class_info(m_symbol);
+      Array ret = DebuggerReflection::get_class_info(m_symbol);
       if (!ret.empty()) {
         m_info.append(ret);
       }
@@ -269,7 +370,7 @@ bool CmdInfo::onServer(DebuggerProxy &proxy) {
   }
   if (m_type == KindOfUnknown || m_type == KindOfFunction) {
     try {
-      Array ret = f_hphp_get_function_info(m_symbol);
+      Array ret = DebuggerReflection::get_function_info(m_symbol);
       if (!ret.empty()) {
         m_info.append(ret);
       }
@@ -280,7 +381,7 @@ bool CmdInfo::onServer(DebuggerProxy &proxy) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-void CmdInfo::PrintDocComments(StringBuffer &sb, CArrRef info) {
+void CmdInfo::PrintDocComments(StringBuffer &sb, const Array& info) {
   if (info[s_doc].isString()) {
     String doc = info[s_doc].toString();
     int space1 = 0; // best guess
@@ -288,18 +389,19 @@ void CmdInfo::PrintDocComments(StringBuffer &sb, CArrRef info) {
     Variant matches1, matches2;
     Variant ret1 = preg_match("#^( *)/\\*#s", doc, matches1);
     Variant ret2 = preg_match("#\n( *)\\*#s", doc, matches2);
-    if (!same(ret1, false) && !same(ret2, false)) {
+    if (!same(ret1, false) && !same(ret2, false) &&
+        matches1.isArray() && matches2.isArray()) {
       // we have perfect doc comment blocks, so we can re-adjust spaces
-      space1 = matches1[1].toString().size();
-      space2 = matches2[1].toString().size();
+      space1 = matches1.toCArrRef()[1].toString().size();
+      space2 = matches2.toCArrRef()[1].toString().size();
     }
-    String spaces = f_str_repeat(" ", space2 - space1 - 1);
+    String spaces = HHVM_FN(str_repeat)(" ", space2 - space1 - 1);
     sb.printf("%s%s\n", spaces.data(), doc.data());
   }
 }
 
 void CmdInfo::PrintHeader(DebuggerClient &client, StringBuffer &sb,
-                          CArrRef info) {
+                          const Array& info) {
   if (!info[s_internal].toBoolean()) {
     String file = info[s_file].toString();
     int line1 = info[s_line1].toInt32();
@@ -322,7 +424,7 @@ void CmdInfo::PrintHeader(DebuggerClient &client, StringBuffer &sb,
   PrintDocComments(sb, info);
 }
 
-String CmdInfo::GetParams(CArrRef params, bool varg,
+String CmdInfo::GetParams(const Array& params, bool varg,
                           bool detailed /* = false */) {
   StringBuffer args;
   for (ArrayIter iter(params); iter; ++iter) {
@@ -367,14 +469,14 @@ String CmdInfo::GetParams(CArrRef params, bool varg,
   return args.detach();
 }
 
-String CmdInfo::GetModifier(CArrRef info, CStrRef name) {
+String CmdInfo::GetModifier(const Array& info, const String& name) {
   if (info[name].toBoolean()) {
     return name + " ";
   }
-  return empty_string;
+  return empty_string();
 }
 
-String CmdInfo::FindSubSymbol(CArrRef symbols, const std::string &symbol) {
+String CmdInfo::FindSubSymbol(const Array& symbols, const std::string &symbol) {
   for (ArrayIter iter(symbols); iter; ++iter) {
     String key = iter.first().toString();
     if (strcasecmp(key.data(), symbol.c_str()) == 0) {
@@ -384,25 +486,25 @@ String CmdInfo::FindSubSymbol(CArrRef symbols, const std::string &symbol) {
   return String();
 }
 
-bool CmdInfo::TryConstant(StringBuffer &sb, CArrRef info,
+bool CmdInfo::TryConstant(StringBuffer &sb, const Array& info,
                           const std::string &subsymbol) {
   String key = FindSubSymbol(info[s_constants].toArray(), subsymbol);
   if (!key.isNull()) {
     sb.printf("  const %s = %s;\n", key.data(),
               DebuggerClient::FormatVariable
-              (info[s_constants][key], -1).data());
+              (info[s_constants].toArray()[key], -1).data());
     return true;
   }
   return false;
 }
 
-bool CmdInfo::TryProperty(StringBuffer &sb, CArrRef info,
+bool CmdInfo::TryProperty(StringBuffer &sb, const Array& info,
                           const std::string &subsymbol) {
   String key = FindSubSymbol(info[s_properties].toArray(),
                              subsymbol[0] == '$' ?
                              subsymbol.substr(1) : subsymbol);
   if (!key.isNull()) {
-    Array prop = info[s_properties][key].toArray();
+    Array prop = info[s_properties].toArray()[key].toArray();
     PrintDocComments(sb, prop);
     sb.printf("  %s %s$%s;\n",
               prop[s_access].toString().data(),
@@ -414,7 +516,7 @@ bool CmdInfo::TryProperty(StringBuffer &sb, CArrRef info,
                       subsymbol[0] == '$' ?
                       subsymbol.substr(1) : subsymbol);
   if (!key.isNull()) {
-    Array prop = info[s_private_properties][key].toArray();
+    Array prop = info[s_private_properties].toArray()[key].toArray();
     PrintDocComments(sb, prop);
     sb.printf("  private %s$%s;\n",
               GetModifier(prop, s_static).data(),
@@ -424,7 +526,7 @@ bool CmdInfo::TryProperty(StringBuffer &sb, CArrRef info,
   return false;
 }
 
-bool CmdInfo::TryMethod(DebuggerClient &client, StringBuffer &sb, CArrRef info,
+bool CmdInfo::TryMethod(DebuggerClient &client, StringBuffer &sb, const Array& info,
                         std::string subsymbol) {
   if (subsymbol.size() > 2 && subsymbol.substr(subsymbol.size() - 2) == "()") {
     subsymbol = subsymbol.substr(0, subsymbol.size() - 2);
@@ -432,7 +534,7 @@ bool CmdInfo::TryMethod(DebuggerClient &client, StringBuffer &sb, CArrRef info,
 
   String key = FindSubSymbol(info[s_methods].toArray(), subsymbol);
   if (!key.isNull()) {
-    Array func = info[s_methods][key].toArray();
+    Array func = info[s_methods].toArray()[key].toArray();
     PrintHeader(client, sb, func);
     sb.printf("%s %s%s%sfunction %s::%s%s(%s);\n",
               func[s_access].toString().data(),
@@ -444,12 +546,59 @@ bool CmdInfo::TryMethod(DebuggerClient &client, StringBuffer &sb, CArrRef info,
               func[s_name].toString().data(),
               GetParams(func[s_params].toArray(),
                         func[s_varg].toBoolean(), true).data());
+    if (func[s_type_profiling].toArray().size() != 0) {
+      sb.printf("Type profile:\n%s",
+                GetTypeProfilingInfo(func[s_type_profiling].toArray(),
+                                     func[s_params].toArray()).data());
+    }
     return true;
   }
   return false;
 }
 
-void CmdInfo::PrintInfo(DebuggerClient &client, StringBuffer &sb, CArrRef info,
+String CmdInfo::GetParam(const Array& params, int index) {
+  StringBuffer param;
+  Array arg = params[index].toArray();
+  if (arg[s_ref].toBoolean()) {
+    param.append('&');
+  }
+  param.append('$');
+  param.append(arg[s_name].toString());
+  return param.detach();
+}
+
+String CmdInfo::GetTypeProfilingInfo(const Array& profilingArray, const Array& params) {
+  StringBuffer profile;
+  int index = 0;
+  StringBuffer args;
+  for (ArrayIter iter(profilingArray); iter; ++iter) {
+    profile.append("  ");
+    if (index == 0) {
+      profile.append("ReturnValue");
+    } else {
+      profile.append(GetParam(params, index - 1));
+    }
+    profile.append(":\n");
+    Array param = iter.second().toArray();
+    int type_number = 0;
+    for (ArrayIter type_count(param); type_count; ++type_count) {
+      profile.append("    ");
+      String type = type_count.first().toString();
+      profile.printf("%s: %f", type.data(),
+                     type_count.second().toDouble()* 100);
+      profile.append("%\n");
+      type_number++;
+      if (type_number > 10) {
+        profile.append("...\n");
+        break;
+      }
+    }
+    index++;
+  }
+  return profile.detach();
+}
+
+void CmdInfo::PrintInfo(DebuggerClient &client, StringBuffer &sb, const Array& info,
                         const std::string &subsymbol) {
   if (info.exists(s_params)) {
     PrintHeader(client, sb, info);
@@ -458,6 +607,11 @@ void CmdInfo::PrintInfo(DebuggerClient &client, StringBuffer &sb, CArrRef info,
               info[s_name].toString().data(),
               GetParams(info[s_params].toArray(),
                         info[s_varg].toBoolean()).data());
+    if (info[s_type_profiling].toArray().size() != 0) {
+      sb.printf("Type profile:\n%s",
+                GetTypeProfilingInfo(info[s_type_profiling].toArray(),
+                                     info[s_params].toArray()).data());
+    }
     return;
   }
 

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,9 +15,12 @@
 */
 
 #include "hphp/runtime/debugger/cmd/cmd_next.h"
+
+#include "hphp/runtime/vm/vm-regs.h"
 #include "hphp/runtime/vm/debugger-hook.h"
 #include "hphp/runtime/vm/runtime.h"
-#include "hphp/runtime/ext/ext_continuation.h"
+#include "hphp/runtime/ext/ext_generator.h"
+#include "hphp/runtime/ext/asio/async_function_wait_handle.h"
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
@@ -40,15 +43,15 @@ void CmdNext::onSetup(DebuggerProxy& proxy, CmdInterrupt& interrupt) {
   TRACE(2, "CmdNext::onSetup\n");
   assert(!m_complete); // Complete cmds should not be asked to do work.
   m_stackDepth = proxy.getStackDepth();
-  m_vmDepth = g_vmContext->m_nesting;
+  m_vmDepth = g_context->m_nesting;
   m_loc = interrupt.getFileLine();
-  ActRec *fp = g_vmContext->getFP();
+  ActRec *fp = vmfp();
   if (!fp) {
     // If we have no frame just wait for the next instruction to be interpreted.
     m_needsVMInterrupt = true;
     return;
   }
-  PC pc = g_vmContext->getPC();
+  PC pc = vmpc();
   stepCurrentLine(interrupt, fp, pc);
 }
 
@@ -56,19 +59,22 @@ void CmdNext::onBeginInterrupt(DebuggerProxy& proxy, CmdInterrupt& interrupt) {
   TRACE(2, "CmdNext::onBeginInterrupt\n");
   assert(!m_complete); // Complete cmds should not be asked to do work.
 
-  ActRec *fp = g_vmContext->getFP();
+  ActRec *fp = vmfp();
   if (!fp) {
     // If we have no frame just wait for the next instruction to be interpreted.
     m_needsVMInterrupt = true;
     return;
   }
-  PC pc = g_vmContext->getPC();
+  PC pc = vmpc();
   Unit* unit = fp->m_func->unit();
   Offset offset = unit->offsetOf(pc);
   TRACE(2, "CmdNext: pc %p, opcode %s at '%s' offset %d\n",
-        pc, opcodeToName(toOp(*pc)), fp->m_func->fullName()->data(), offset);
+        pc,
+        opcodeToName(*reinterpret_cast<const Op*>(pc)),
+        fp->m_func->fullName()->data(),
+        offset);
 
-  int currentVMDepth = g_vmContext->m_nesting;
+  int currentVMDepth = g_context->m_nesting;
   int currentStackDepth = proxy.getStackDepth();
 
   TRACE(2, "CmdNext: original depth %d:%d, current depth %d:%d\n",
@@ -92,17 +98,24 @@ void CmdNext::onBeginInterrupt(DebuggerProxy& proxy, CmdInterrupt& interrupt) {
   // we can make an accurate prediction of where execution should flow,
   // eventually, and when we want to let the program run normally until we get
   // there.
-  if (hasStepOuts() || hasStepCont()) {
+  if (hasStepOuts() || hasStepResumable()) {
     TRACE(2, "CmdNext: checking internal breakpoint(s)\n");
     if (atStepOutOffset(unit, offset)) {
       if (deeper) return; // Recursion
       TRACE(2, "CmdNext: hit step-out\n");
-    } else if (atStepContOffset(unit, offset)) {
-      // For step-conts we want to hit the exact same frame, for the same
-      // continuation, not a call to the same function higher or lower on the
-      // stack.
-      if (!originalDepth || (m_stepContTag != getContinuationTag(fp))) return;
+    } else if (atStepResumableOffset(unit, offset)) {
+      if (m_stepResumableId != getResumableId(fp)) return;
       TRACE(2, "CmdNext: hit step-cont\n");
+      // We're in the resumable we expect. This may be at a
+      // different stack depth, though, especially if we've moved from
+      // the original function to the resumable. Update the depth
+      // accordingly.
+      if (!originalDepth) {
+        m_vmDepth = currentVMDepth;
+        m_stackDepth = currentStackDepth;
+        deeper = false;
+        originalDepth = true;
+      }
     } else if (interrupt.getInterruptType() == ExceptionHandler) {
       // Entering an exception handler may take us someplace we weren't
       // expecting. Adjust internal breakpoints accordingly. First case is easy.
@@ -111,10 +124,10 @@ void CmdNext::onBeginInterrupt(DebuggerProxy& proxy, CmdInterrupt& interrupt) {
         return;
       }
       // For step-conts, we ignore handlers at the original level if we're not
-      // in the original continuation. We don't care about exception handlers
-      // in continuations being driven at the same level.
-      if (hasStepCont() && originalDepth &&
-          (m_stepContTag != getContinuationTag(fp))) {
+      // in the original resumable. We don't care about exception handlers
+      // in resumables being driven at the same level.
+      if (hasStepResumable() && originalDepth &&
+          (m_stepResumableId != getResumableId(fp))) {
         TRACE(2, "CmdNext: exception handler, original depth, wrong cont\n");
         return;
       }
@@ -134,7 +147,7 @@ void CmdNext::onBeginInterrupt(DebuggerProxy& proxy, CmdInterrupt& interrupt) {
     // We've hit one internal breakpoint at a useful place, or decided we don't,
     // need them, so we can remove them all now.
     cleanupStepOuts();
-    cleanupStepCont();
+    cleanupStepResumable();
   }
 
   if (interrupt.getInterruptType() == ExceptionHandler) {
@@ -144,6 +157,12 @@ void CmdNext::onBeginInterrupt(DebuggerProxy& proxy, CmdInterrupt& interrupt) {
     TRACE(2, "CmdNext: exception handler\n");
     removeLocationFilter();
     m_needsVMInterrupt = true;
+    return;
+  }
+
+  if (m_skippingAwait) {
+    m_skippingAwait = false;
+    stepAfterAwait();
     return;
   }
 
@@ -174,26 +193,49 @@ void CmdNext::onBeginInterrupt(DebuggerProxy& proxy, CmdInterrupt& interrupt) {
 }
 
 void CmdNext::stepCurrentLine(CmdInterrupt& interrupt, ActRec* fp, PC pc) {
-  // Special handling for yields from generators. The destination of these
-  // instructions is somewhat counter intuitive so we take care to ensure that
-  // we step to the most appropriate place. For yeilds, we want to land on the
-  // next statement when driven from a C++ iterator like ASIO. If the generator
-  // is driven directly from PHP (i.e., a loop calling send($foo)) then we'll
-  // land back at the callsite of send(). For returns from generators, we follow
-  // the execution stack for now, and end up at the caller of ASIO or send().
-  auto op = toOp(*pc);
-  if (fp->m_func->isGenerator() &&
-      (op == OpContSuspend || op == OpContSuspendK || op == OpContRetC)) {
-    TRACE(2, "CmdNext: encountered yield or return from generator\n");
-    // Patch the projected return point(s) in both cases, to catch if we exit
-    // the the asio iterator or if we are being iterated directly by PHP.
-    setupStepOuts();
-    op = toOp(*pc);
-    if (op == OpContSuspend || op == OpContSuspendK) {
-      // Patch the next normal execution point so we can pickup the stepping
-      // from there if the caller is C++.
-      setupStepCont(fp, pc);
+  // Special handling for yields from generators and awaits from
+  // async. The destination of these instructions is somewhat counter
+  // intuitive so we take care to ensure that we step to the most
+  // appropriate place. For yields, we want to land on the next
+  // statement when driven from a C++ iterator like ASIO. If the
+  // generator is driven directly from PHP (i.e., a loop calling
+  // send($foo)) then we'll land back at the callsite of send(). For
+  // returns from generators, we follow the execution stack for now,
+  // and end up at the caller of ASIO or send(). For async functions
+  // stepping over an await, we land on the next statement.
+  auto op = *reinterpret_cast<const Op*>(pc);
+  if (op == OpAwait) {
+    assert(fp->func()->isAsync());
+    auto wh = c_WaitHandle::fromCell(vmsp());
+    if (wh && !wh->isFinished()) {
+      TRACE(2, "CmdNext: encountered blocking await\n");
+      if (fp->resumed()) {
+        setupStepSuspend(fp, pc);
+        removeLocationFilter();
+      } else {
+        // Eager execution in non-resumed mode is supported only by async
+        // functions. We need to step over this opcode, then grab the created
+        // AsyncFunctionWaitHandle and setup stepping like we do for
+        // OpAwait.
+        assert(fp->func()->isAsyncFunction());
+        m_skippingAwait = true;
+        m_needsVMInterrupt = true;
+        removeLocationFilter();
+      }
+      return;
     }
+  } else if (op == OpYield || op == OpYieldK) {
+    assert(fp->resumed());
+    assert(fp->func()->isGenerator());
+    TRACE(2, "CmdNext: encountered yield from generator\n");
+    setupStepOuts();
+    setupStepSuspend(fp, pc);
+    removeLocationFilter();
+    return;
+  } else if (op == OpRetC && fp->resumed()) {
+    assert(fp->func()->isResumable());
+    TRACE(2, "CmdNext: encountered return from resumed resumable\n");
+    setupStepOuts();
     removeLocationFilter();
     return;
   }
@@ -202,51 +244,71 @@ void CmdNext::stepCurrentLine(CmdInterrupt& interrupt, ActRec* fp, PC pc) {
   m_needsVMInterrupt = true;
 }
 
-bool CmdNext::hasStepCont() {
-  return m_stepCont.valid();
+bool CmdNext::hasStepResumable() {
+  return m_stepResumable.valid();
 }
 
-bool CmdNext::atStepContOffset(Unit* unit, Offset o) {
-  return m_stepCont.at(unit, o);
+bool CmdNext::atStepResumableOffset(Unit* unit, Offset o) {
+  return m_stepResumable.at(unit, o);
 }
 
-// A ContSuspend is followed by code to support ContRaise, then code for
-// ContSend/ContNext. We want to continue stepping on the latter. The normal
-// exception handling logic will take care of the former.
-// This logic is sensitive to the code gen here... we don't have access to the
-// offsets for the labels used to generate this code, so we rely on the
-// simplicity of the exceptional path.
-void CmdNext::setupStepCont(ActRec* fp, PC pc) {
-  // One byte + one byte argument
-  DEBUG_ONLY auto ops = reinterpret_cast<const Op*>(pc);
-  assert(ops[0] == OpContSuspend || ops[0] == OpContSuspendK);
-  assert(ops[2] == OpNull); // One byte
-  assert(ops[3] == OpThrow); // One byte
-  assert(ops[4] == OpNull); // One byte
-  Offset nextInst = fp->m_func->unit()->offsetOf(pc + 5);
-  m_stepContTag = getContinuationTag(fp);
-  TRACE(2, "CmdNext: patch for cont step at '%s' offset %d\n",
+// Await / Yield opcodes mark a suspend points of async functions and
+// generators. Execution will resume at this function later after the
+// opcode.
+void CmdNext::setupStepSuspend(ActRec* fp, PC pc) {
+  // Yield is followed by the label where execution will continue.
+  auto op = *reinterpret_cast<const Op*>(pc);
+  assert(op == OpAwait || op == OpYield || op == OpYieldK);
+  ++pc;
+  if (op == OpAwait) {
+    decodeVariableSizeImm(&pc);
+  }
+  Offset nextInst = fp->func()->unit()->offsetOf(pc);
+  assert(nextInst != InvalidAbsoluteOffset);
+  m_stepResumableId = fp;
+  TRACE(2, "CmdNext: patch for resumable step at '%s' offset %d\n",
         fp->m_func->fullName()->data(), nextInst);
-  m_stepCont = StepDestination(fp->m_func->unit(), nextInst);
+  m_stepResumable = StepDestination(fp->m_func->unit(), nextInst);
 }
 
-void CmdNext::cleanupStepCont() {
-  if (m_stepCont.valid()) {
-    m_stepCont = StepDestination();
-    m_stepContTag = nullptr;
+// An Await opcode is used in the codegen for an async function to suspend
+// execution until the given wait handle is finished. In eager execution,
+// the state is suspended into a new AsyncFunctionWaitHandle object so that
+// the execution can continue later. We have just completed an Await, so
+// the new AsyncFunctionWaitHandle is now available, and it can predict
+// where execution will resume.
+void CmdNext::stepAfterAwait() {
+  auto topObj = vmsp()->m_data.pobj;
+  assert(topObj->instanceof(c_AsyncFunctionWaitHandle::classof()));
+  auto wh = static_cast<c_AsyncFunctionWaitHandle*>(topObj);
+  auto func = wh->actRec()->func();
+  Offset nextInst = wh->getNextExecutionOffset();
+  assert(nextInst != InvalidAbsoluteOffset);
+  m_stepResumableId = wh->actRec();
+  TRACE(2,
+        "CmdNext: patch for cont step after Await at '%s' offset %d\n",
+        func->fullName()->data(), nextInst);
+  m_stepResumable = StepDestination(func->unit(), nextInst);
+}
+
+void CmdNext::cleanupStepResumable() {
+  if (m_stepResumable.valid()) {
+    m_stepResumable = StepDestination();
+    m_stepResumableId = nullptr;
   }
 }
 
-// Use the address of the c_Continuation object as a tag for this stepping
-// operation, to ensure we only stop once we're back to the same continuation.
+// Use the address of the c_Generator object as a tag for this stepping
+// operation, to ensure we only stop once we're back to the same resumable.
 // Since we'll either stop when we get out of whatever is driving this
-// continuation, or we'll stop when we get back into it, we know the object
+// resumable, or we'll stop when we get back into it, we know the object
 // will remain alive.
-void* CmdNext::getContinuationTag(ActRec* fp) {
-  c_Continuation* cont = frame_continuation(fp);
-  TRACE(2, "CmdNext: continuation tag %p for %s\n", cont,
-        cont->t_getorigfuncname()->data());
-  return cont;
+void* CmdNext::getResumableId(ActRec* fp) {
+  assert(fp->resumed());
+  assert(fp->func()->isResumable());
+  TRACE(2, "CmdNext: resumable tag %p for %s\n", fp,
+        fp->func()->name()->data());
+  return fp;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

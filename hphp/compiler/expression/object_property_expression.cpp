@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -23,6 +23,7 @@
 #include "hphp/compiler/analysis/file_scope.h"
 #include "hphp/compiler/analysis/variable_table.h"
 #include "hphp/compiler/option.h"
+#include "hphp/compiler/expression/scalar_expression.h"
 #include "hphp/compiler/expression/simple_variable.h"
 #include "hphp/util/hash.h"
 #include "hphp/parser/hphp.tab.hpp"
@@ -184,152 +185,21 @@ void ObjectPropertyExpression::setNthKid(int n, ConstructPtr cp) {
   }
 }
 
-TypePtr ObjectPropertyExpression::inferTypes(AnalysisResultPtr ar,
-                                             TypePtr type, bool coerce) {
-  m_valid = false;
+///////////////////////////////////////////////////////////////////////////////
 
-  ConstructPtr self = shared_from_this();
-  TypePtr objectType = m_object->inferAndCheck(ar, Type::Some, false);
-
-  if (!m_property->is(Expression::KindOfScalarExpression)) {
-    m_property->inferAndCheck(ar, Type::String, false);
-    // we also lost track of which class variable an expression is about, hence
-    // any type inference could be wrong. Instead, we just force variants on
-    // all class variables.
-    if (m_context & (LValue | RefValue)) {
-      ar->forceClassVariants(getOriginalClass(), false, true);
-    }
-    return Type::Variant; // we have to use a variant to hold dynamic value
-  }
-
-  ScalarExpressionPtr exp = dynamic_pointer_cast<ScalarExpression>(m_property);
-  const string &name = exp->getLiteralString();
-  if (name.empty()) {
-    m_property->inferAndCheck(ar, Type::String, false);
-    if (m_context & (LValue | RefValue)) {
-      ar->forceClassVariants(getOriginalClass(), false, true);
-    }
-    return Type::Variant; // we have to use a variant to hold dynamic value
-  }
-
-  m_property->inferAndCheck(ar, Type::String, false);
-
-  ClassScopePtr cls;
-  if (objectType && !objectType->getName().empty()) {
-    // what object-> has told us
-    cls = ar->findExactClass(shared_from_this(), objectType->getName());
+void ObjectPropertyExpression::outputCodeModel(CodeGenerator &cg) {
+  cg.printObjectHeader("ObjectPropertyExpression", 3);
+  cg.printPropertyHeader("object");
+  m_object->outputCodeModel(cg);
+  if (m_property->is(Expression::KindOfScalarExpression)) {
+    cg.printPropertyHeader("propertyName");
   } else {
-    if ((m_context & LValue) && objectType &&
-        !objectType->is(Type::KindOfObject) &&
-        !objectType->is(Type::KindOfVariant) &&
-        !objectType->is(Type::KindOfSome) &&
-        !objectType->is(Type::KindOfAny)) {
-      m_object->inferAndCheck(ar, Type::Object, true);
-    }
+    cg.printPropertyHeader("propertyExpression");
   }
-
-  if (!cls) {
-    if (m_context & (LValue | RefValue | DeepReference | UnsetContext)) {
-      ar->forceClassVariants(name, getOriginalClass(), false, true);
-    }
-    return Type::Variant;
-  }
-
-  // resolved to this class
-  if (m_context & RefValue) {
-    type = Type::Variant;
-    coerce = true;
-  }
-
-  // use $this inside a static function
-  if (m_object->isThis()) {
-    FunctionScopePtr func = m_object->getOriginalFunction();
-    if (!func || func->isStatic()) {
-      if (getScope()->isFirstPass()) {
-        Compiler::Error(Compiler::MissingObjectContext, self);
-      }
-      m_actualType = Type::Variant;
-      return m_actualType;
-    }
-  }
-
-  assert(cls);
-  if (!m_propSym || cls != m_objectClass.lock()) {
-    m_objectClass = cls;
-    ClassScopePtr parent;
-    m_propSym = cls->findProperty(parent, name, ar);
-    if (m_propSym) {
-      if (!parent) {
-        parent = cls;
-      }
-      m_symOwner = parent;
-      always_assert(m_propSym->isPresent());
-      m_propSymValid =
-        (!m_propSym->isPrivate() || getOriginalClass() == parent) &&
-        !m_propSym->isStatic();
-
-      if (m_propSymValid) {
-        m_symOwner->addUse(getScope(),
-                           BlockScope::GetNonStaticRefUseKind(
-                             m_propSym->getHash()));
-      }
-    }
-  }
-
-  TypePtr ret;
-  if (m_propSymValid && (!cls->derivesFromRedeclaring() ||
-                         m_propSym->isPrivate())) {
-    always_assert(m_symOwner);
-    TypePtr t(m_propSym->getType());
-    if (t && t->is(Type::KindOfVariant)) {
-      // only check property if we could possibly do some work
-      ret = t;
-    } else {
-      if (coerce && type->is(Type::KindOfAutoSequence) &&
-          (!t || t->is(Type::KindOfVoid) ||
-           t->is(Type::KindOfSome) || t->is(Type::KindOfArray))) {
-        type = Type::Array;
-      }
-      assert(getScope()->is(BlockScope::FunctionScope));
-      GET_LOCK(m_symOwner);
-      ret = m_symOwner->checkProperty(getScope(), m_propSym, type, coerce, ar);
-    }
-    always_assert(m_object->getActualType() &&
-           m_object->getActualType()->isSpecificObject());
-    m_valid = true;
-    return ret;
-  } else {
-    m_actualType = Type::Variant;
-    return m_actualType;
-  }
-}
-
-ExpressionPtr
-ObjectPropertyExpression::postOptimize(AnalysisResultConstPtr ar) {
-  bool changed = false;
-  if (m_objectClass && hasLocalEffect(AccessorEffect)) {
-    int prop = hasContext(AssignmentLHS) ?
-      ClassScope::MayHaveUnknownPropSetter :
-      hasContext(ExistContext) ?
-        ClassScope::MayHaveUnknownPropTester :
-        hasContext(UnsetContext) && hasContext(LValue) ?
-          ClassScope::MayHavePropUnsetter :
-          ClassScope::MayHaveUnknownPropGetter;
-    if ((m_context & (AssignmentLHS|OprLValue)) ||
-        !m_objectClass->implementsAccessor(prop)) {
-      clearLocalEffect(AccessorEffect);
-      changed = true;
-    }
-  }
-  if (m_valid &&
-      (hasLocalEffect(AccessorEffect) || hasLocalEffect(CreateEffect))) {
-    clearLocalEffect(AccessorEffect);
-    clearLocalEffect(CreateEffect);
-    changed = true;
-  }
-  return changed ?
-    dynamic_pointer_cast<Expression>(shared_from_this()) :
-    ExpressionPtr();
+  m_property->outputCodeModel(cg);
+  cg.printPropertyHeader("sourceLocation");
+  cg.printLocation(this->getLocation());
+  cg.printObjectFooter();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -12,7 +12,7 @@ $x = get_loaded_extensions();
 var_dump(empty($x));
 
 var_dump(get_included_files()[0] === __FILE__);
-var_dump(inclued_get_data());
+var_dump(array());
 
 var_dump(get_magic_quotes_gpc());
 var_dump(get_magic_quotes_runtime());
@@ -23,6 +23,7 @@ var_dump($sec);
 var_dump($nsec);
 
 var_dump(ini_get(""));
+var_dump(ini_get("setting_that_does_not_exist"));
 ini_set("memory_limit", 50000000);
 var_dump(ini_get("memory_limit"));
 set_time_limit(30);
@@ -31,6 +32,11 @@ ini_set("max_execution_time", 40);
 var_dump(ini_get("max_execution_time"));
 
 var_dump(phpversion());
+var_dump(phpversion('mysql'));
+var_dump(phpversion('memcached'));
+var_dump(phpversion('exif'));
+var_dump(phpversion('reflection'));
+var_dump(phpversion('nonexistent_extension'));
 
 var_dump(putenv("FOO=bar"));
 var_dump(!putenv("FOO"));

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,18 +17,17 @@
 #include "hphp/runtime/server/server-name-indication.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/extended-logger.h"
-#include "hphp/util/util.h"
-#include "openssl/ssl.h"
-
+#include "hphp/runtime/base/file-util.h"
+#include <openssl/ssl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 
 namespace HPHP {
 
-hphp_string_map<SSL_CTX *> ServerNameIndication::sn_ctxd_map;
-std::string ServerNameIndication::path;
-struct ssl_config ServerNameIndication::config;
+hphp_string_map<SSL_CTX *> ServerNameIndication::s_sn_ctxd_map;
+std::string ServerNameIndication::s_path;
+ServerNameIndication::CertHanlderFn ServerNameIndication::s_certHandlerFn;
 
 const std::string ServerNameIndication::crt_ext = ".crt";
 const std::string ServerNameIndication::key_ext = ".key";
@@ -36,57 +35,41 @@ const std::string ServerNameIndication::key_ext = ".key";
 /**
  * Given a default SSL config, SSL_CTX, and certificate path, load certs.
  */
-void ServerNameIndication::load(void *ctx, const struct ssl_config &cfg,
-                                const std::string &cert_dir) {
-
-  if (!ctx) {
-    return;
-  }
-
+void ServerNameIndication::load(const std::string &cert_dir,
+                                CertHanlderFn certHandlerFn) {
   // We use these later to dynamically load certs, so make copies.
-  path = cert_dir;
-  config = cfg;
+  s_path = cert_dir;
+  s_certHandlerFn = certHandlerFn;
 
   // Ensure path ends with '/'. This helps our pruning later.
-  if (path.size() > 0 && path[path.size() - 1] != '/') {
-    path.append("/");
+  if (s_path.size() > 0 && s_path[s_path.size() - 1] != '/') {
+    s_path.append("/");
   }
 
-  vector<std::string> server_names;
-  find_server_names(path, server_names);
+  std::vector<std::pair<std::string, bool>> server_names;
+  find_server_names(s_path, server_names);
 
-  for (vector<std::string>::iterator it = server_names.begin();
-      it != server_names.end();
-      ++it) {
-    loadFromFile(*it);
+  for (auto it = server_names.begin(); it != server_names.end(); ++it) {
+    loadFromFile(it->first, it->second, certHandlerFn);
   }
-
-  // Register our per-request server name indication callback.
-  // We register our callback even if there's no additional certs so that
-  // a cert added in the future will get picked up without a restart.
-  SSL_CTX_set_tlsext_servername_callback(
-      (SSL_CTX*)ctx,
-      ServerNameIndication::callback);
 }
 
-bool ServerNameIndication::loadFromFile(const std::string &server_name) {
-  std::string key_file = path + server_name + key_ext;
-  std::string crt_file = path + server_name + crt_ext;
-  struct ssl_config tmp_config = config;
+bool ServerNameIndication::loadFromFile(const std::string &server_name,
+                                        bool duplicate,
+                                        CertHanlderFn certHandlerFn) {
+  std::string key_file = s_path + server_name + key_ext;
+  std::string crt_file = s_path + server_name + crt_ext;
 
   if (!fileIsValid(key_file) || !fileIsValid(crt_file)) {
     return false;
   }
 
-  // Create an SSL_CTX for this cert pair.
-  tmp_config.cert_file = (char *)(crt_file.c_str());
-  tmp_config.pk_file = (char *)(key_file.c_str());
-  SSL_CTX *tmp_ctx = (SSL_CTX*)evhttp_init_openssl(&tmp_config);
-  if (tmp_ctx) {
-    sn_ctxd_map.insert(make_pair(server_name, tmp_ctx));
-    return true;
-  }
-  return false;
+  return certHandlerFn(server_name, key_file, crt_file, duplicate);
+}
+
+void ServerNameIndication::insertSNICtx(const std::string &server_name,
+                                        SSL_CTX *ctx) {
+  s_sn_ctxd_map.insert(make_pair(server_name, ctx));
 }
 
 bool ServerNameIndication::fileIsValid(const std::string &filename) {
@@ -103,18 +86,15 @@ bool ServerNameIndication::fileIsValid(const std::string &filename) {
 
 void ServerNameIndication::find_server_names(
     const std::string &path,
-    vector<std::string> &server_names) {
+    std::vector<std::pair<std::string, bool>> &server_names) {
 
   hphp_string_map<bool> crt_files;
   hphp_string_map<bool> key_files;
 
   // Iterate through all files in the cert directory.
-  vector<std::string> crt_dir_files;
-  Util::find(crt_dir_files, "/", path.c_str(), /* php */ false);
-  for (vector<std::string>::iterator it = crt_dir_files.begin();
-       it != crt_dir_files.end();
-       ++it) {
-
+  std::vector<std::string> crt_dir_files;
+  FileUtil::find(crt_dir_files, "/", path.c_str(), /* php */ false);
+  for (auto it = crt_dir_files.begin(); it != crt_dir_files.end(); ++it) {
     // Skip default cert and key; we'll fall back to those anyway.
     size_t filename_len = it->size() - path.size();
     if (ends_with(*it, crt_ext) && *it != RuntimeOption::SSLCertificateFile) {
@@ -128,13 +108,24 @@ void ServerNameIndication::find_server_names(
   }
 
   // Intersect key_files and crt_files to find valid pairs.
-  for (hphp_string_map<bool>::iterator it = key_files.begin();
-      it != key_files.end();
-      ++it) {
-    if (crt_files.find(it->first) == crt_files.end()) {
+  std::unordered_set<ino_t> crt_inodes;
+  for (auto it = key_files.begin(); it != key_files.end(); ++it) {
+    auto crt_file_it = crt_files.find(it->first);
+    if (crt_file_it == crt_files.end()) {
       continue;
     }
-    server_names.push_back(it->first);
+    struct stat statbuf;
+    std::string crt_path = folly::to<std::string>(path, crt_file_it->first,
+                                                  crt_ext);
+    int rc = stat(crt_path.c_str(), &statbuf);
+    bool dup = false;
+    if (rc == 0) {
+      dup = !crt_inodes.insert(statbuf.st_ino).second;
+    } else {
+      Logger::Warning("Stat '%s' failed with errno=%d", crt_path.c_str(),
+                      errno);
+    }
+    server_names.push_back({it->first, dup});
   }
 }
 
@@ -157,7 +148,7 @@ int ServerNameIndication::callback(void *s, int *ad, void *arg) {
   std::string fqdn = sn_ptr;
   size_t pos = fqdn.find('.');
   std::string wildcard;
-  if (pos != string::npos) {
+  if (pos != std::string::npos) {
     wildcard = fqdn.substr(pos + 1);
   }
 
@@ -178,8 +169,8 @@ bool ServerNameIndication::setCTXFromMemory(SSL *ssl, const std::string &name) {
   if (!ssl || name.empty()) {
     return false;
   }
-  hphp_string_map<SSL_CTX *>::iterator it = sn_ctxd_map.find(name);
-  if (it != sn_ctxd_map.end()) {
+  auto it = s_sn_ctxd_map.find(name);
+  if (it != s_sn_ctxd_map.end()) {
     SSL_CTX *ctx = it->second;
     if (ctx && ctx == SSL_set_SSL_CTX(ssl, ctx)) {
       return true;
@@ -189,7 +180,9 @@ bool ServerNameIndication::setCTXFromMemory(SSL *ssl, const std::string &name) {
 }
 
 bool ServerNameIndication::setCTXFromFile(SSL *ssl, const std::string &name) {
-  return loadFromFile(name) && setCTXFromMemory(ssl, name);
+  return s_certHandlerFn &&
+    loadFromFile(name, false, s_certHandlerFn) && setCTXFromMemory(ssl, name);
+  return false;
 }
 
 }

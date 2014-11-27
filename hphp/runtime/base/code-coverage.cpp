@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,10 +13,16 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/runtime/base/code-coverage.h"
-#include "hphp/runtime/base/complex-types.h"
+
+#include <fstream>
+#include <vector>
+
 #include "hphp/runtime/base/execution-context.h"
+#include "hphp/runtime/base/type-array.h"
+#include "hphp/runtime/base/type-string.h"
+#include "hphp/runtime/ext/extension.h"
+
 #include "hphp/util/logger.h"
 
 namespace HPHP {
@@ -87,13 +93,13 @@ void CodeCoverage::Record(const char *filename, int line0, int line1) {
 
   CodeCoverageMap::iterator iter = m_hits.find(filename);
   if (iter == m_hits.end()) {
-    vector<int> &lines = m_hits[filename];
+    std::vector<int> &lines = m_hits[filename];
     lines.resize(line1 + 1);
     for (int i = line0; i <= line0 /* should be line1 one day */; i++) {
       lines[i] = 1;
     }
   } else {
-    vector<int> &lines = iter->second;
+    std::vector<int> &lines = iter->second;
     if ((int)lines.size() < line1 + 1) {
       lines.resize(line1 + 1);
     }
@@ -103,11 +109,14 @@ void CodeCoverage::Record(const char *filename, int line0, int line1) {
   }
 }
 
-Array CodeCoverage::Report() {
+Array CodeCoverage::Report(bool sys /* = true */) {
   Array ret = Array::Create();
   for (CodeCoverageMap::const_iterator iter = m_hits.begin();
        iter != m_hits.end(); ++iter) {
-    const vector<int> &lines = iter->second;
+    if (!sys && Extension::IsSystemlibPath(iter->first)) {
+      continue;
+    }
+    const std::vector<int> &lines = iter->second;
     Array tmp = Array::Create();
     for (int i = 1; i < (int)lines.size(); i++) {
       if (lines[i]) {
@@ -130,7 +139,7 @@ void CodeCoverage::Report(const std::string &filename) {
   f << "{\n";
   for (CodeCoverageMap::const_iterator iter = m_hits.begin();
        iter != m_hits.end();) {
-    const vector<int> &lines = iter->second;
+    const std::vector<int> &lines = iter->second;
     f << "\"" << iter->first << "\": [";
     int count = lines.size();
     for (int i = 0 /* not 1 */; i < count; i++) {
@@ -152,7 +161,7 @@ void CodeCoverage::Report(const std::string &filename) {
 
 void CodeCoverage::Reset() {
   m_hits.clear();
-  g_vmContext->resetCoverageCounters();
+  g_context->resetCoverageCounters();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

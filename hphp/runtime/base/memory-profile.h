@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,9 +17,11 @@
 #ifndef incl_HPHP_MEMORY_PROFILE_H_
 #define incl_HPHP_MEMORY_PROFILE_H_
 
-#include "hphp/runtime/base/memory-profile.h"
 #include "hphp/runtime/base/profile-dump.h"
+#include <map>
 #include "hphp/util/thread-local.h"
+#include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/crash-reporter.h"
 
 namespace HPHP {
 
@@ -37,22 +39,22 @@ struct MemoryProfile {
 
   // Start profiling
   static inline void startProfiling() {
-    if (!memory_profiling) return;
+    if (!RuntimeOption::HHProfServerEnabled) return;
     s_memory_profile->startProfilingImpl();
   }
   // Dumps profiled data
   static inline void finishProfiling() {
-    if (!memory_profiling) return;
+    if (!RuntimeOption::HHProfServerEnabled) return;
     s_memory_profile->finishProfilingImpl();
   }
   // Log allocation event
   static inline void logAllocation(void *ptr, size_t size) {
-    if (!memory_profiling) return;
+    if (!RuntimeOption::HHProfServerEnabled || IsCrashing) return;
     s_memory_profile->logAllocationImpl(ptr, size);
   }
   // Log deallocation event
   static inline void logDeallocation(void *ptr) {
-    if (!memory_profiling) return;
+    if (!RuntimeOption::HHProfServerEnabled || IsCrashing) return;
     s_memory_profile->logDeallocationImpl(ptr);
   }
 
@@ -60,7 +62,7 @@ struct MemoryProfile {
   // the given pointer.
   static size_t getSizeOfPtr(void *ptr);
   // Gets the amount of heap memory owned by a TypedValue.
-  static size_t getSizeOfTV(TypedValue *tv);
+  static size_t getSizeOfTV(const TypedValue* tv);
 
 private:
   // implementations
@@ -70,13 +72,15 @@ private:
   void logDeallocationImpl(void *ptr);
 
   // some helpers to dive into compound TVs
-  static size_t getSizeOfArray(ArrayData *arr);
-  static size_t getSizeOfObject(ObjectData *obj);
+  static size_t getSizeOfArray(ArrayData* arr);
+  static size_t getSizeOfObject(ObjectData* obj);
 
   // Map of live allocations, keyed on their pointers.
   std::map<void *, Allocation> m_livePointers;
   // Profile dump of the current thread's request.
   ProfileDump m_dump;
+
+  bool m_active = false;
 };
 
 }

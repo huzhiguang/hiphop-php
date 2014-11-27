@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,37 +13,27 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/util/exception.h"
 
-#include <string>
-
-#include "util.h"
-#include "hphp/util/base.h"
+#include "hphp/util/string-vsnprintf.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-Exception::Exception(const char *fmt, ...)
-  : m_handled(false) {
+Exception::Exception(const char *fmt, ...) {
   va_list ap; va_start(ap, fmt); format(fmt, ap); va_end(ap);
 }
 
 Exception::Exception(const std::string& msg)
-  : m_handled(false), m_msg(msg) {
+  : m_msg(msg) {
 }
 
 Exception::Exception(const Exception &e)
-  : m_handled(true), m_msg(e.m_msg), m_what(e.m_what) {
-  e.m_handled = true;
-}
-
-Exception::Exception()
-    : m_handled(true) {
-}
+  : m_msg(e.m_msg), m_what(e.m_what)
+{}
 
 void Exception::format(const char *fmt, va_list ap) {
-  Util::string_vsnprintf(m_msg, fmt, ap);
+  string_vsnprintf(m_msg, fmt, ap);
 }
 
 Exception::~Exception() throw() {

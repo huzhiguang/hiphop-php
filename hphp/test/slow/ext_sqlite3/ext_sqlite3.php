@@ -19,8 +19,7 @@ function sumlen_fini($a) {
  return (int)$a;
 }
 
-$db = new SQLite3(':memory:');
-//$db->open(":memory:test");
+$db = new SQLite3(':memory:test');
 $db->exec("DROP TABLE IF EXISTS foo");
 $db->exec("CREATE TABLE foo (bar STRING)");
 
@@ -72,21 +71,20 @@ VS($db->querysingle("SELECT * FROM foo", true), array("bar" => "ABC"));
 }
 
 // testing UDF
-// TODO(#2512701): broken under the JIT compiler
 {
-  //VERIFY($db->createfunction("tolower", "lower", 1));
-  //$res = $db->query("SELECT tolower(bar) FROM foo");
-  //VS($res->fetcharray(SQLITE3_NUM), array("abc"));
+  VERIFY($db->createfunction("tolower", "lower", 1));
+  $res = $db->query("SELECT tolower(bar) FROM foo");
+  VS($res->fetcharray(SQLITE3_NUM), array("abc"));
 }
 {
-  // VERIFY($db->createaggregate("sumlen", "sumlen_step", "sumlen_fini", 1));
-  // $res = $db->query("SELECT sumlen(bar) FROM foo");
-  // VS($res->fetcharray(SQLITE3_NUM), array(6));
+  VERIFY($db->createaggregate("sumlen", "sumlen_step", "sumlen_fini", 1));
+  $res = $db->query("SELECT sumlen(bar) FROM foo");
+  VS($res->fetcharray(SQLITE3_NUM), array(6));
 }
-
-$db->close();
 
 // Since minor version can change frequently, just test the major version
 VS($db->version()['versionString'][0], "3");
 VERIFY((int)$db->version()['versionNumber'] > (int)3000000);
+
+$db->close();
 unlink(":memory:test");

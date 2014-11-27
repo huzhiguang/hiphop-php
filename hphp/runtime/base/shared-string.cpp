@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -25,7 +25,7 @@ SharedStringData::SharedStringData(const std::string &data) : m_data(data) {
   m_count = 1;
 }
 
-int SharedStringData::decRefCount() const {
+int SharedStringData::decAtomicCount() const {
   assert(m_count > 0);
   int cur = m_count.fetch_and_decrement() - 1;
   if (cur == 0) {
@@ -45,7 +45,7 @@ int SharedStringData::decRefCount() const {
   return 1;
 }
 
-void SharedStringData::release() {
+void SharedStringData::atomicRelease() {
   delete this;
 }
 
@@ -81,7 +81,7 @@ SharedString &SharedString::operator=(const std::string &data) {
   SharedStringData::InternMap::accessor acc;
   SharedStringData::Create(acc, data);
   // Ref count already incremented in Create
-  m_px = acc->second;
+  overwrite_unsafe(acc->second);
   return *this;
 }
 

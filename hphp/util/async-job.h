@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,11 +17,12 @@
 #ifndef incl_HPHP_ASYNC_JOB_H_
 #define incl_HPHP_ASYNC_JOB_H_
 
-#include "hphp/util/base.h"
+#include <algorithm>
+
+#include <sys/time.h>
+
 #include "hphp/util/async-func.h"
 #include "hphp/util/lock.h"
-#include <algorithm>
-#include <sys/time.h>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -56,7 +57,7 @@ public:
   void doJob() {
     m_worker.onThreadEnter();
     while (true) {
-      boost::shared_ptr<TJob> job = m_dispatcher.getNextJob();
+      std::shared_ptr<TJob> job = m_dispatcher.getNextJob();
       if (!job) break;
       m_worker.doJob(job);
     }
@@ -98,7 +99,7 @@ private:
 template<class TJob, class TWorker>
 class JobDispatcher {
  public:
-  JobDispatcher(std::vector<boost::shared_ptr<TJob> > &jobs,
+  JobDispatcher(std::vector<std::shared_ptr<TJob> > &jobs,
                 unsigned int workerCount, bool showStatus = false)
     : m_index(0), m_jobs(jobs), m_showStatus(showStatus), m_lastPercent(0) {
     std::random_shuffle(m_jobs.begin(), m_jobs.end());
@@ -107,7 +108,7 @@ class JobDispatcher {
     }
     m_workers.resize(workerCount);
     for (unsigned int i = 0; i < m_workers.size(); i++) {
-      m_workers[i] = boost::shared_ptr<WorkerWrapper<TJob, TWorker> >
+      m_workers[i] = std::shared_ptr<WorkerWrapper<TJob, TWorker> >
         (new WorkerWrapper<TJob, TWorker>(*this));
     }
   }
@@ -165,10 +166,10 @@ class JobDispatcher {
     }
   }
 
-  boost::shared_ptr<TJob> getNextJob() {
+  std::shared_ptr<TJob> getNextJob() {
     Lock lock(m_mutex);
     if (m_index >= m_jobs.size()) {
-      return boost::shared_ptr<TJob>();
+      return std::shared_ptr<TJob>();
     }
     if (m_showStatus && m_index > m_workers.size()) {
       setStatus((m_index - m_workers.size()) * 100 / m_jobs.size());
@@ -179,8 +180,8 @@ class JobDispatcher {
  private:
   Mutex m_mutex;
   unsigned int m_index;
-  std::vector<boost::shared_ptr<TJob> > &m_jobs;
-  std::vector<boost::shared_ptr<WorkerWrapper<TJob, TWorker> > > m_workers;
+  std::vector<std::shared_ptr<TJob> > &m_jobs;
+  std::vector<std::shared_ptr<WorkerWrapper<TJob, TWorker> > > m_workers;
   bool m_showStatus;
   int m_lastPercent;
   struct timeval m_start;

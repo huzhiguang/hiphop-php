@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,20 +13,25 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/runtime/server/request-uri.h"
+
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include "hphp/runtime/server/virtual-host.h"
 #include "hphp/runtime/server/transport.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/server/static-content-cache.h"
 #include "hphp/runtime/base/string-util.h"
+#include "hphp/runtime/base/file-util.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 RequestURI::RequestURI(const VirtualHost *vhost, Transport *transport,
-                       const std::string &sourceRoot,
-                       const std::string &pathTranslation)
+                       const std::string &pathTranslation,
+                       const std::string &sourceRoot)
   :  m_rewritten(false), m_defaultDoc(false), m_done(false),
      m_forbidden(false), m_ext(nullptr) {
   if (!process(vhost, transport, sourceRoot, pathTranslation,
@@ -35,7 +40,7 @@ RequestURI::RequestURI(const VirtualHost *vhost, Transport *transport,
     m_forbidden = false; // put down forbidden flag since we are redirecting
     if (!RuntimeOption::ErrorDocument404.empty()) {
       String redirectURL(RuntimeOption::ErrorDocument404);
-      if (!m_queryString->empty()) {
+      if (!m_queryString.empty()) {
         if (redirectURL.find('?') == -1) {
           redirectURL += "?";
         } else {
@@ -50,7 +55,7 @@ RequestURI::RequestURI(const VirtualHost *vhost, Transport *transport,
         return;
       }
     }
-    transport->sendString("Not Found", 404);
+    transport->sendString(getDefault404(), 404);
     transport->onSendEnd();
     m_done = true;
   }
@@ -62,19 +67,44 @@ RequestURI::RequestURI(const std::string & rpcFunc)
 }
 
 bool RequestURI::process(const VirtualHost *vhost, Transport *transport,
-                         const string &sourceRoot,
-                         const string &pathTranslation, const char *url) {
+                         const std::string &sourceRoot,
+                         const std::string &pathTranslation, const char *url) {
   splitURL(url, m_originalURL, m_queryString);
   m_originalURL = StringUtil::UrlDecode(m_originalURL, false);
   m_rewritten = false;
 
-  // Fast path for files that exist
-  String canon(Util::canonicalize(m_originalURL.c_str(), m_originalURL.size()),
-               AttachString);
-  if (virtualFileExists(vhost, sourceRoot, pathTranslation, canon)) {
-    m_rewrittenURL = canon;
-    m_resolvedURL = canon;
+  auto scriptFilename = transport->getScriptFilename();
+  if (!scriptFilename.empty()) {
+    // The transport is overriding everything and just handing us the filename
+    m_originalURL = scriptFilename;
+    if (!resolveURL(vhost, pathTranslation, sourceRoot)) {
+      return false;
+    }
+    if (m_origPathInfo.empty()) {
+      // PATH_INFO wasn't filled by resolveURL() because m_originalURL
+      // didn't contain it. We set it now, based on PATH_TRANSLATED.
+      m_origPathInfo = transport->getPathTranslated();
+      if (!m_origPathInfo.empty() &&
+          m_origPathInfo.charAt(0) != '/') {
+        m_origPathInfo = "/" + m_origPathInfo;
+      }
+    }
+    if (transport->isPathInfoSet()) {
+      m_pathInfo =transport->getPathInfo();
+    } else {
+      m_pathInfo = m_origPathInfo;
+    }
     return true;
+  }
+
+  // Fast path for files that exist
+  if (vhost->checkExistenceBeforeRewrite()) {
+    String canon = FileUtil::canonicalize(m_originalURL);
+    if (virtualFileExists(vhost, sourceRoot, pathTranslation, canon)) {
+      m_rewrittenURL = canon;
+      m_resolvedURL = canon;
+      return true;
+    }
   }
 
   if (!rewriteURL(vhost, transport, pathTranslation, sourceRoot)) {
@@ -122,11 +152,11 @@ const StaticString s_https("https://");
  *  m_rewrittenURL is set and m_queryString is updated if needed
  */
 bool RequestURI::rewriteURL(const VirtualHost *vhost, Transport *transport,
-                            const string &pathTranslation,
-                            const string &sourceRoot) {
+                            const std::string &pathTranslation,
+                            const std::string &sourceRoot) {
   bool qsa = false;
   int redirect = 0;
-  string host = transport->getHeader("host");
+  std::string host = transport->getHeader("host");
   m_rewrittenURL = m_originalURL;
   if (vhost->rewriteURL(host, m_rewrittenURL, qsa, redirect)) {
     m_rewritten = true;
@@ -139,14 +169,12 @@ bool RequestURI::rewriteURL(const VirtualHost *vhost, Transport *transport,
           m_rewrittenURL.substr(0, 8) != s_https) {
         PrependSlash(m_rewrittenURL);
       }
-      transport->redirect(m_rewrittenURL.c_str(), redirect, "rewriteURL");
+      transport->redirect(m_rewrittenURL.c_str(), redirect);
       return false;
     }
     splitURL(m_rewrittenURL, m_rewrittenURL, m_queryString);
   }
-  m_rewrittenURL = String(
-      Util::canonicalize(m_rewrittenURL.c_str(), m_rewrittenURL.size()),
-      AttachString);
+  m_rewrittenURL = FileUtil::canonicalize(m_rewrittenURL);
   if (!m_rewritten && m_rewrittenURL.charAt(0) == '/') {
     // A un-rewritten URL is always relative, so remove prepending /
     m_rewrittenURL = m_rewrittenURL.substr(1);
@@ -171,7 +199,7 @@ bool RequestURI::rewriteURL(const VirtualHost *vhost, Transport *transport,
           m_rewrittenURL.substr(0, 8) != s_https) {
         PrependSlash(m_rewrittenURL);
       }
-      transport->redirect(m_rewrittenURL.c_str(), 301, "rewriteURL");
+      transport->redirect(m_rewrittenURL.c_str(), 301);
       return false;
     }
   }
@@ -185,8 +213,8 @@ bool RequestURI::rewriteURL(const VirtualHost *vhost, Transport *transport,
  *   output is false and no file was found
  */
 bool RequestURI::resolveURL(const VirtualHost *vhost,
-                            const string &pathTranslation,
-                            const string &sourceRoot) {
+                            const std::string &pathTranslation,
+                            const std::string &sourceRoot) {
 
   String startURL;
   if (m_rewritten) {
@@ -194,9 +222,7 @@ bool RequestURI::resolveURL(const VirtualHost *vhost,
   } else {
     startURL = m_originalURL;
   }
-  startURL = String(
-      Util::canonicalize(startURL.c_str(), startURL.size(), false),
-      AttachString);
+  startURL = FileUtil::canonicalize(startURL.c_str(), startURL.size(), false);
   m_resolvedURL = startURL;
 
   while (!virtualFileExists(vhost, sourceRoot, pathTranslation,
@@ -221,23 +247,28 @@ bool RequestURI::resolveURL(const VirtualHost *vhost,
     m_resolvedURL = startURL.substr(0, pos);
     m_origPathInfo = startURL.substr(pos);
   }
-  m_pathInfo = String(
-      Util::canonicalize(m_origPathInfo.c_str(), m_origPathInfo.size()),
-      AttachString);
+  if (!m_resolvedURL.empty() &&
+      m_resolvedURL.charAt(0) != '/') {
+    m_resolvedURL = "/" + m_resolvedURL;
+  }
+  if (!m_originalURL.empty() &&
+      m_originalURL.charAt(0) != '/') {
+    m_originalURL = "/" + m_originalURL;
+  }
+  m_pathInfo = FileUtil::canonicalize(m_origPathInfo);
   return true;
 }
 
 bool RequestURI::virtualFileExists(const VirtualHost *vhost,
-                                   const string &sourceRoot,
-                                   const string &pathTranslation,
-                                   CStrRef filename) {
+                                   const std::string &sourceRoot,
+                                   const std::string &pathTranslation,
+                                   const String& filename) {
   if (filename.empty() || filename.charAt(filename.length() - 1) == '/') {
     return false;
   }
-  String canon(Util::canonicalize(filename.c_str(), filename.size()),
-               AttachString);
+  String canon = FileUtil::canonicalize(filename);
   if (!vhost->getDocumentRoot().empty()) {
-    string fullname = canon.data();
+    std::string fullname = canon.data();
     int i = 0;
     while (i < fullname.size() && fullname[i] == '/') ++i;
     if (i) {
@@ -249,6 +280,9 @@ bool RequestURI::virtualFileExists(const VirtualHost *vhost,
     m_path = fullname;
     m_absolutePath = String(sourceRoot) + m_path;
     processExt();
+    if (RuntimeOption::PathDebug) {
+      m_triedURLs.push_back(m_absolutePath.toCppString());
+    }
 
     if (StaticContentCache::TheFileCache && !fullname.empty() &&
         StaticContentCache::TheFileCache->fileExists(fullname.c_str())) {
@@ -268,11 +302,11 @@ bool RequestURI::virtualFileExists(const VirtualHost *vhost,
 }
 
 bool RequestURI::virtualFolderExists(const VirtualHost *vhost,
-                                     const string &sourceRoot,
-                                     const string &pathTranslation,
-                                     CStrRef foldername) {
+                                     const std::string &sourceRoot,
+                                     const std::string &pathTranslation,
+                                     const String& foldername) {
   if (!vhost->getDocumentRoot().empty()) {
-    string fullname = foldername.data();
+    std::string fullname = foldername.data();
     // If there is a trailing slash, remove it
     if (fullname.size() > 0 && fullname[fullname.size()-1] == '/') {
       fullname = fullname.substr(fullname.size()-1);
@@ -291,7 +325,7 @@ bool RequestURI::virtualFolderExists(const VirtualHost *vhost,
       return true;
     }
 
-    const vector<string> &allowedDirectories =
+    const std::vector<std::string> &allowedDirectories =
       VirtualHost::GetAllowedDirectories();
     if (find(allowedDirectories.begin(),
              allowedDirectories.end(),
@@ -323,7 +357,7 @@ void RequestURI::processExt() {
 /*
  * Parse file extension from a path
  */
-const char *RequestURI::parseExt(CStrRef s) {
+const char *RequestURI::parseExt(const String& s) {
   int pos = s.rfind('.');
   if (pos == -1) {
     return nullptr;
@@ -361,6 +395,18 @@ void RequestURI::clear() {
   m_origPathInfo.reset();
   m_absolutePath.reset();
   m_path.reset();
+}
+
+const std::string RequestURI::getDefault404() {
+  std::string ret = "404 File Not Found";
+  if (RuntimeOption::PathDebug) {
+    ret += "<br/>Paths examined:<ul>";
+    for (auto& url : m_triedURLs) {
+      ret += "<li>" + url + "</li>";
+    }
+    ret += "</ul>";
+  }
+  return ret;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

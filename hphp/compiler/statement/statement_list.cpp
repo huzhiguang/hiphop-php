@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -51,6 +51,15 @@ StatementPtr StatementList::clone() {
   stmt->m_stmts.clear();
   for (unsigned int i = 0; i < m_stmts.size(); i++) {
     stmt->m_stmts.push_back(Clone(m_stmts[i]));
+  }
+  return stmt;
+}
+
+StatementListPtr StatementList::shallowClone() {
+  StatementListPtr stmt(new StatementList(*this));
+  stmt->m_stmts.clear();
+  for (unsigned int i = 0; i < m_stmts.size(); i++) {
+    stmt->m_stmts.push_back(m_stmts[i]);
   }
   return stmt;
 }
@@ -262,7 +271,8 @@ bool StatementList::mergeConcatAssign() {
                                     var, exp1, T_CONCAT_EQUAL));
         }
         expStmt = ExpStatementPtr
-          (new ExpStatement(getScope(), getLocation(), exp));
+          (new ExpStatement(getScope(), getLabelScope(),
+                            getLocation(), exp));
 
         m_stmts[i - length] = expStmt;
         for (j = i - (length - 1); i > j; i--) removeElement(j);
@@ -384,32 +394,11 @@ StatementPtr StatementList::preOptimize(AnalysisResultConstPtr ar) {
                  : StatementPtr();
 }
 
-StatementPtr StatementList::postOptimize(AnalysisResultConstPtr ar) {
-  for (unsigned int i = 0; i < m_stmts.size(); i++) {
-    StatementPtr &s = m_stmts[i];
-    if (s->is(KindOfExpStatement) && !s->hasEffect()) {
-      ExpressionPtr e =
-        dynamic_pointer_cast<ExpStatement>(s)->getExpression();
-      if (e->isNoRemove()) continue;
-      if (Option::EliminateDeadCode ||
-          static_pointer_cast<ExpStatement>(s)->getExpression()->isScalar()) {
-        removeElement(i--);
-        getScope()->addUpdates(BlockScope::UseKindCaller);
-        continue;
-      }
-    } else if (s->is(KindOfBlockStatement) &&
-               !static_pointer_cast<BlockStatement>(s)->getStmts()) {
-      removeElement(i--);
-      getScope()->addUpdates(BlockScope::UseKindCaller);
-      continue;
-    }
-  }
-  return StatementPtr();
-}
+///////////////////////////////////////////////////////////////////////////////
 
-void StatementList::inferTypes(AnalysisResultPtr ar) {
+void StatementList::outputCodeModel(CodeGenerator &cg) {
   for (unsigned int i = 0; i < m_stmts.size(); i++) {
-    m_stmts[i]->inferTypes(ar);
+    m_stmts[i]->outputCodeModel(cg);
   }
 }
 

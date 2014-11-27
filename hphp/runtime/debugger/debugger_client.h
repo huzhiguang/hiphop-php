@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,6 +18,11 @@
 #define incl_HPHP_EVAL_DEBUGGER_CLIENT_H_
 
 #include <boost/smart_ptr/shared_array.hpp>
+#include <map>
+#include <memory>
+#include <set>
+#include <utility>
+#include <vector>
 
 #include "hphp/runtime/debugger/debugger.h"
 #include "hphp/runtime/debugger/debugger_client_settings.h"
@@ -34,16 +39,21 @@ namespace Eval {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-DECLARE_BOOST_TYPES(DebuggerCommand);
-DECLARE_BOOST_TYPES(CmdInterrupt);
+struct DebuggerCommand;
+struct CmdInterrupt;
+
+using DebuggerCommandPtr = std::shared_ptr<DebuggerCommand>;
+
 class DebuggerClient {
 public:
   static int LineWidth;
   static int CodeBlockSize;
   static int ScrollBlockSize;
   static const char *LineNoFormat;
+  static const char *LineNoFormatWithStar;
   static const char *LocalPrompt;
   static const char *ConfigFileName;
+  static const char *LegacyConfigFileName;
   static const char *HistoryFileName;
   static std::string HomePrefix;
   static std::string SourceRoot;
@@ -61,10 +71,13 @@ public:
   static const int MinPrintLevel = 1;
 
 public:
-  static void LoadColors(Hdf hdf);
-  static const char *LoadColor(Hdf hdf, const char *defaultName);
-  static const char *LoadBgColor(Hdf hdf, const char *defaultName);
-  static void LoadCodeColor(CodeColor index, Hdf hdf, const char *defaultName);
+  static void LoadColors(const IniSetting::Map& ini, Hdf hdf);
+  static const char *LoadColor(const IniSetting::Map& ini, Hdf hdf,
+                               const char *defaultName);
+  static const char *LoadBgColor(const IniSetting::Map& ini, Hdf hdf,
+                                 const char *defaultName);
+  static void LoadCodeColor(CodeColor index, const IniSetting::Map& ini,
+                            Hdf hdf, const char *defaultName);
 
   /**
    * Starts/stops a debugger client.
@@ -105,7 +118,7 @@ public:
   static void AdjustScreenMetrics();
   static bool Match(const char *input, const char *cmd);
   static bool IsValidNumber(const std::string &arg);
-  static String FormatVariable(CVarRef v, int maxlen = 80,
+  static String FormatVariable(const Variant& v, int maxlen = 80,
                                char format = 'd');
   static String FormatInfoVec(const IDebuggable::InfoVec &info,
                               int *nameLen = nullptr);
@@ -140,13 +153,14 @@ public:
   void output (const std::string &s);
   void error  (const std::string &s);
 
-  void print  (CStrRef s);
-  void help   (CStrRef s);
-  void info   (CStrRef s);
-  void output (CStrRef s);
-  void error  (CStrRef s);
+  void print  (const String& s);
+  void help   (const String& s);
+  void info   (const String& s);
+  void output (const String& s);
+  void error  (const String& s);
 
-  bool code(CStrRef source, int lineFocus = 0, int line1 = 0, int line2 = 0,
+  bool code(const String& source, int lineFocus = 0, int line1 = 0,
+            int line2 = 0,
             int charFocus0 = 0, int lineFocus1 = 0, int charFocus1 = 0);
   void shortCode(BreakPointInfoPtr bp);
   char ask(const char *fmt, ...) ATTRIBUTE_PRINTF(2,3);
@@ -175,7 +189,7 @@ public:
   std::string argValue(int index);
   // The entire line after that argument, un-escaped.
   std::string lineRest(int index);
-  StringVec *args() { return &m_args;}
+  std::vector<std::string> *args() { return &m_args;}
 
   /**
    * Send the commmand to server's DebuggerProxy and expect same type of command
@@ -183,12 +197,12 @@ public:
    * server to run PHP on send when we want to be able to debug that PHP before
    * completing the command.
    */
-  template<typename T> boost::shared_ptr<T> xend(DebuggerCommand *cmd) {
-    return boost::static_pointer_cast<T>(xend(cmd, Nested));
+  template<typename T> std::shared_ptr<T> xend(DebuggerCommand *cmd) {
+    return std::static_pointer_cast<T>(xend(cmd, Nested));
   }
-  template<typename T> boost::shared_ptr<T>
+  template<typename T> std::shared_ptr<T>
   xendWithNestedExecution(DebuggerCommand *cmd) {
-    return boost::static_pointer_cast<T>(xend(cmd, NestedWithExecution));
+    return std::static_pointer_cast<T>(xend(cmd, NestedWithExecution));
   }
 
   void sendToServer(DebuggerCommand *cmd);
@@ -210,7 +224,7 @@ public:
   /**
    * Sandbox functions.
    */
-  void updateSandboxes(DSandboxInfoPtrVec &sandboxes) {
+  void updateSandboxes(std::vector<DSandboxInfoPtr> &sandboxes) {
     m_sandboxes = sandboxes;
   }
   DSandboxInfoPtr getSandbox(int index) const;
@@ -220,7 +234,7 @@ public:
   /**
    * Thread functions.
    */
-  void updateThreads(DThreadInfoPtrVec threads);
+  void updateThreads(std::vector<DThreadInfoPtr> threads);
   DThreadInfoPtr getThread(int index) const;
   int64_t getCurrentThreadId() const { return m_threadId;}
 
@@ -228,10 +242,10 @@ public:
    * Current source location and breakpoints.
    */
   BreakPointInfoPtr getCurrentLocation() const { return m_breakpoint;}
-  BreakPointInfoPtrVec *getBreakPoints() { return &m_breakpoints;}
-  void setMatchedBreakPoints(BreakPointInfoPtrVec breakpoints);
+  std::vector<BreakPointInfoPtr> *getBreakPoints() { return &m_breakpoints;}
+  void setMatchedBreakPoints(std::vector<BreakPointInfoPtr> breakpoints);
   void setCurrentLocation(int64_t threadId, BreakPointInfoPtr breakpoint);
-  BreakPointInfoPtrVec *getMatchedBreakPoints() { return &m_matched;}
+  std::vector<BreakPointInfoPtr> *getMatchedBreakPoints() { return &m_matched;}
 
   // Retrieves a source location that is the current focus of the
   // debugger. The current focus is initially determined by the
@@ -248,7 +262,7 @@ public:
    * Watch expressions.
    */
   typedef std::pair<const char *, std::string> Watch;
-  typedef boost::shared_ptr<Watch> WatchPtr;
+  typedef std::shared_ptr<Watch> WatchPtr;
   typedef std::vector<WatchPtr> WatchPtrVec;
   WatchPtrVec &getWatches() { return m_watches;}
   void addWatch(const char *fmt, const std::string &php);
@@ -257,10 +271,10 @@ public:
    * Stacktraces.
    */
   Array getStackTrace() { return m_stacktrace; }
-  void setStackTrace(CArrRef stacktrace, bool isAsync);
+  void setStackTrace(const Array& stacktrace, bool isAsync);
   bool isStackTraceAsync() { return m_stacktraceAsync; }
   void moveToFrame(int index, bool display = true);
-  void printFrame(int index, CArrRef frame);
+  void printFrame(int index, const Array& frame);
   void setFrame(int frame) { m_frame = frame; }
   int getFrame() const { return m_frame; }
 
@@ -277,7 +291,7 @@ public:
 
   void init(const DebuggerClientOptions &options);
   void clearCachedLocal() {
-    m_stacktrace = null_array;
+    m_stacktrace.reset();
   }
 
   /**
@@ -286,7 +300,9 @@ public:
   void startMacro(std::string name);
   void endMacro();
   bool playMacro(std::string name);
-  const MacroPtrVec &getMacros() const { return m_macros;}
+  const std::vector<std::shared_ptr<Macro>> &getMacros() const {
+    return m_macros;
+  }
   bool deleteMacro(int index);
 
   DECLARE_DBG_CLIENT_SETTING_ACCESSORS
@@ -309,6 +325,7 @@ public:
   // Internal testing helpers. Only used by internal tests!!!
   bool internalTestingIsClientStopped() const { return m_stopped; }
 
+  bool unknownCmdReceived() const { return m_unknownCmd; }
 private:
   enum InputState {
     TakingCommand,
@@ -317,11 +334,11 @@ private:
   };
 
   std::string m_configFileName;
-  Hdf m_config;
   int m_tutorial;
   std::set<std::string> m_tutorialVisited;
   bool m_scriptMode; // Is this client being scripted by a test?
   bool m_neverSaveConfig; // So that tests can avoid clobbering the config file
+  bool m_neverSaveConfigOverride;
 
   DECLARE_DBG_CLIENT_SETTING
 
@@ -352,27 +369,28 @@ private:
   std::string m_command;
   std::string m_commandCanonical;
   std::string m_prevCmd;
-  StringVec m_args;
+  std::vector<std::string> m_args;
   // m_args[i]'s last character is m_line[m_argIdx[i]]
   std::vector<int> m_argIdx;
   std::string m_code;
 
-  MacroPtrVec m_macros;
-  MacroPtr m_macroRecording;
-  MacroPtr m_macroPlaying;
+  std::vector<std::shared_ptr<Macro>> m_macros;
+  std::shared_ptr<Macro> m_macroRecording;
+  std::shared_ptr<Macro> m_macroPlaying;
 
-  DMachineInfoPtrVec m_machines; // All connected machines. 0th is local.
-  DMachineInfoPtr m_machine;     // Current machine
-  std::string m_rpcHost;         // Current RPC host
+  std::vector<std::shared_ptr<DMachineInfo>>
+    m_machines; // All connected machines. 0th is local.
+  std::shared_ptr<DMachineInfo> m_machine; // Current machine
+  std::string m_rpcHost; // Current RPC host
 
-  DSandboxInfoPtrVec m_sandboxes;
-  DThreadInfoPtrVec m_threads;
+  std::vector<DSandboxInfoPtr> m_sandboxes;
+  std::vector<DThreadInfoPtr> m_threads;
   int64_t m_threadId;
   std::map<int64_t, int> m_threadIdMap; // maps threadId to index
 
-  BreakPointInfoPtrVec m_breakpoints;
+  std::vector<BreakPointInfoPtr> m_breakpoints;
   BreakPointInfoPtr m_breakpoint;
-  BreakPointInfoPtrVec m_matched;
+  std::vector<BreakPointInfoPtr> m_matched;
 
   // list command's current location, which may be different from m_breakpoint
 
@@ -415,16 +433,17 @@ private:
                       const char *text);
 
   // config and macros
-  void defineColors();
+  void defineColors(const Hdf &config);
   void loadConfig();
   void saveConfig();
   void record(const char *line);
 
   // connections
   void closeAllConnections();
-  void switchMachine(DMachineInfoPtr machine);
+  void switchMachine(std::shared_ptr<DMachineInfo> machine);
   SmartPtr<Socket> connectLocal();
   bool connectRemote(const std::string &host, int port);
+  bool tryConnect(const std::string &host, int port, bool clearmachines);
 
   enum EventLoopKind {
     TopLevel, // The top-level event loop, called from run().
@@ -437,7 +456,9 @@ private:
                                const char *caller);
 
   // Zend executable for CmdZend, overridable via config.
-  std::string m_zendExe;
+  std::string m_zendExe = "php";
+
+  bool m_unknownCmd;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

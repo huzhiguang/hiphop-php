@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,45 +14,22 @@
    +----------------------------------------------------------------------+
 */
 
+#include <iterator>
 #include <utility>
 
-#include <boost/next_prior.hpp>
-
-#include "hphp/runtime/vm/jit/ir.h"
+#include "hphp/runtime/vm/jit/cfg.h"
+#include "hphp/runtime/vm/jit/ir-unit.h"
+#include "hphp/runtime/vm/jit/ir-opcode.h"
 #include "hphp/runtime/vm/jit/opt.h"
-#include "hphp/runtime/vm/jit/ir-factory.h"
+#include "hphp/runtime/vm/jit/timer.h"
 
-namespace HPHP { namespace JIT {
+namespace HPHP { namespace jit {
 
 TRACE_SET_MOD(hhir);
 
 //////////////////////////////////////////////////////////////////////
 
 namespace {
-
-Block* findMainExitBlock(IRTrace* trace, IRFactory& irFactory) {
-  assert(trace->isMain());
-  auto const back = trace->back();
-
-  /*
-   * We require the invariant that the main trace exit comes last in
-   * the main trace block list.  Right now this is always the case,
-   * but this assertion is here in case we want to make changes that
-   * affect this ordering.  (If we do want to change it, we could use
-   * something like the assert below to find the main exit.)
-   */
-  if (debug) {
-    auto const sorted = rpoSortCfg(trace, irFactory);
-    auto it = sorted.rbegin();
-    while (it != sorted.rend() && !(*it)->isMain()) {
-      ++it;
-    }
-    assert(it != sorted.rend());
-    assert(*it == back && "jumpopts invariant violated");
-  }
-
-  return back;
-}
 
 /*
  * Utility class for pattern matching the instructions in a Block,
@@ -92,53 +69,57 @@ bool isNormalExit(Block* block) {
   return BlockMatcher(block).match(SyncABIRegs, ReqBindJmp);
 }
 
-// Returns whether `opc' is a within-tracelet conditional jump that
-// can be folded into a ReqBindJmpFoo instruction.
-bool jccCanBeDirectExit(Opcode opc) {
-  return isQueryJmpOp(opc) && (opc != JmpIsType) && (opc != JmpIsNType);
-    // TODO(#2404341)
+/*
+ * Returns whether `opc' is a within-tracelet conditional jump that
+ * can be folded into a ReqBindJmpFoo instruction.
+ */
+bool jccCanBeDirectExit(Opcode opc) { return isQueryJmpOp(opc); }
+
+/*
+ * Return true if jccInst is a conditional jump with no side effects
+ * on exit, and both successors of the jcc are normal exits.
+ */
+bool isCondTraceExit(IRInstruction* jccInst, Block* jccExitBlock) {
+  auto mainExit = jccInst->next();
+  return jccCanBeDirectExit(jccInst->op()) &&
+         mainExit &&
+         mainExit->isExit() &&
+         isNormalExit(mainExit) &&
+         mainExit->numPreds() == 1 &&
+         isNormalExit(jccExitBlock);
 }
 
 /*
- * If main trace ends with a conditional jump with no side-effects on
- * exit, followed by the normal ReqBindJmp sequence, convert the whole
- * thing into a conditional ReqBindJmp.
+ * Convert a conditional branch that leads to two normal exits to a single
+ * conditional ReqBindJmp instruction; then delete the unnecessary branch
+ * and exit block.
  *
- * This leads to more efficient code because the service request stubs
- * will patch jumps in the main trace instead of off-trace.
+ * This leads to more efficient code because the service request stubs will
+ * patch jumps in the main trace instead of off-trace.
  */
-void optimizeCondTraceExit(IRTrace* trace, IRFactory& irFactory) {
+void optimizeCondTraceExit(IRUnit& unit, IRInstruction* jccInst,
+                           Block* jccExitBlock) {
+  assert(isCondTraceExit(jccInst, jccExitBlock));
   FTRACE(5, "CondExit:vvvvvvvvvvvvvvvvvvvvv\n");
   SCOPE_EXIT { FTRACE(5, "CondExit:^^^^^^^^^^^^^^^^^^^^^\n"); };
 
-  auto const mainExit     = findMainExitBlock(trace, irFactory);
-  if (!isNormalExit(mainExit)) return;
-
-  auto const& mainPreds = mainExit->preds();
-  if (mainPreds.size() != 1) return;
-
-  auto const jccBlock = mainPreds.front().from();
-  if (!jccCanBeDirectExit(jccBlock->back()->op())) return;
-  FTRACE(5, "previous block ends with jccCanBeDirectExit ({})\n",
-         opcodeName(jccBlock->back()->op()));
-
-  auto const jccInst = jccBlock->back();
-  auto const jccExitTrace = jccInst->taken();
-  if (!isNormalExit(jccExitTrace)) return;
+  FTRACE(5, "block ends with jccCanBeDirectExit ({})\n",
+         opcodeName(jccInst->op()));
   FTRACE(5, "exit trace is side-effect free\n");
 
+  auto mainExit = jccInst->next();
   auto it = mainExit->backIter();
   auto& reqBindJmp = *(it--);
   auto& syncAbi = *it;
   assert(syncAbi.op() == SyncABIRegs);
 
-  auto const newOpcode = jmpToReqBindJmp(jccBlock->back()->op());
+  auto const newOpcode = jmpToReqBindJmp(jccInst->op());
   ReqBindJccData data;
-  data.taken = jccExitTrace->back()->extra<ReqBindJmp>()->offset;
+  data.taken = jccExitBlock->back().extra<ReqBindJmp>()->offset;
   data.notTaken = reqBindJmp.extra<ReqBindJmp>()->offset;
 
   FTRACE(5, "replacing {} with {}\n", jccInst->id(), opcodeName(newOpcode));
-  irFactory.replace(
+  unit.replace(
     &reqBindJmp,
     newOpcode,
     data,
@@ -147,80 +128,153 @@ void optimizeCondTraceExit(IRTrace* trace, IRFactory& irFactory) {
 
   syncAbi.setMarker(jccInst->marker());
   reqBindJmp.setMarker(jccInst->marker());
-  jccInst->convertToNop();
+  unit.replace(jccInst, Jmp, mainExit);
 }
 
 /*
- * Look for CheckStk/CheckLoc instructions in the main trace that
- * branch to "normal exits".  We can optimize these into the
- * SideExitGuard* instructions that can be patched in place.
+ * Return true if inst is a CheckStk/CheckLoc instruction that branches
+ * to a normal exit.
  */
-void optimizeSideExits(IRTrace* trace, IRFactory& irFactory) {
+bool isSideExitCheck(IRInstruction* inst, Block* exit) {
+  return (inst->op() == CheckStk || inst->op() == CheckLoc) &&
+         isNormalExit(exit);
+}
+
+/*
+ * Convert a CheckStk/CheckLoc instruction into a corresponding SideExitGuard*
+ * instruction that can be patched in place.
+ */
+void optimizeSideExitCheck(IRUnit& unit, IRInstruction* inst,
+                           Block* exitBlock) {
+  assert(isSideExitCheck(inst, exitBlock));
   FTRACE(5, "SideExit:vvvvvvvvvvvvvvvvvvvvv\n");
   SCOPE_EXIT { FTRACE(5, "SideExit:^^^^^^^^^^^^^^^^^^^^^\n"); };
 
-  forEachInst(trace, [&] (IRInstruction* inst) {
-    if (inst->op() != CheckStk && inst->op() != CheckLoc) return;
-    auto const exitBlock = inst->taken();
-    if (!isNormalExit(exitBlock)) return;
+  auto const syncABI = &*std::prev(exitBlock->backIter());
+  assert(syncABI->op() == SyncABIRegs);
 
-    auto const syncABI = &*boost::prior(exitBlock->backIter());
-    assert(syncABI->op() == SyncABIRegs);
+  FTRACE(5, "converting jump ({}) to side exit\n",
+         inst->id());
 
-    FTRACE(5, "converting jump ({}) to side exit\n",
-           inst->id());
+  auto const isStack = inst->op() == CheckStk;
+  auto const fp      = syncABI->src(0);
+  auto const sp      = syncABI->src(1);
 
-    auto const isStack = inst->op() == CheckStk;
-    auto const fp      = syncABI->src(0);
-    auto const sp      = syncABI->src(1);
+  SideExitGuardData data;
+  data.checkedSlot = isStack
+    ? inst->extra<CheckStk>()->offset
+    : inst->extra<CheckLoc>()->locId;
+  data.taken = exitBlock->back().extra<ReqBindJmp>()->offset;
 
-    SideExitGuardData data;
-    data.checkedSlot = isStack
-      ? inst->extra<CheckStk>()->offset
-      : inst->extra<CheckLoc>()->locId;
-    data.taken = exitBlock->back()->extra<ReqBindJmp>()->offset;
+  auto const block = inst->block();
+  block->insert(block->iteratorTo(inst),
+                unit.cloneInstruction(syncABI));
 
-    auto const block = inst->block();
-    block->insert(block->iteratorTo(inst),
-                  irFactory.cloneInstruction(syncABI));
+  auto next = inst->next();
+  unit.replace(
+    inst,
+    isStack ? SideExitGuardStk : SideExitGuardLoc,
+    inst->typeParam(),
+    data,
+    isStack ? sp : fp
+  );
+  block->push_back(unit.gen(Jmp, inst->marker(), next));
+}
 
-    irFactory.replace(
-      inst,
-      isStack ? SideExitGuardStk : SideExitGuardLoc,
-      inst->typeParam(),
-      data,
-      isStack ? sp : fp
-    );
-  });
+// Return true if branch is a conditional branch to a normal exit.
+bool isSideExitJcc(IRInstruction* branch, Block* exit) {
+  return jccCanBeDirectExit(branch->op()) && isNormalExit(exit);
+}
+
+/*
+ * Branch is a conditional branch to a normal exit.  Convert it
+ * into a SideExitJcc instruction that can be patched in place.
+ */
+void optimizeSideExitJcc(IRUnit& unit, IRInstruction* inst, Block* exitBlock) {
+  assert(isSideExitJcc(inst, exitBlock));
+  FTRACE(5, "SideExitJcc:vvvvvvvvvvvvvvvvvvvvv\n");
+  SCOPE_EXIT { FTRACE(5, "SideExitJcc:^^^^^^^^^^^^^^^^^^^^^\n"); };
+
+  auto it = exitBlock->backIter();
+  auto& reqBindJmp = *(it--);
+  auto& syncABI = *it;
+  assert(syncABI.op() == SyncABIRegs);
+
+  FTRACE(5, "converting jcc ({}) to side exit\n",
+         inst->id());
+
+  auto const newOpcode = jmpToSideExitJmp(inst->op());
+  SideExitJccData data;
+  data.taken = reqBindJmp.extra<ReqBindJmp>()->offset;
+  data.trflags = reqBindJmp.extra<ReqBindJmp>()->trflags;
+
+  auto const block = inst->block();
+  block->insert(block->iteratorTo(inst),
+                unit.cloneInstruction(&syncABI));
+
+  auto next = inst->next();
+  unit.replace(
+    inst,
+    newOpcode,
+    data,
+    std::make_pair(inst->numSrcs(), inst->srcs().begin())
+  );
+  block->push_back(unit.gen(Jmp, inst->marker(), next));
+}
+
+// Return true if this block ends with a trivial Jmp: a Jmp
+// whose target's only predecessor is b.
+bool isTrivialJmp(IRInstruction* branch, Block* taken) {
+  return branch->op() == Jmp && taken->numPreds() == 1;
+}
+
+// Coalesce two blocks joined by a trivial jump by moving the second block's
+// instructions to the first block and deleting the jump.  If the second block
+// starts with BeginCatch or DefLabel, they will also be deleted.
+void eliminateJmp(Block* lastBlock, IRInstruction* jmp, Block* target,
+                  IRUnit& unit) {
+  assert(isTrivialJmp(jmp, target));
+  auto lastInst = lastBlock->iteratorTo(jmp); // iterator to last instruction
+  if (jmp->numSrcs() != 0) {
+    auto& defLabel = target->front();
+    assert(defLabel.numDsts() == jmp->numSrcs());
+    for (auto i = 0; i < jmp->numSrcs(); i++) {
+      lastBlock->insert(lastInst,
+                        unit.genWithDst(defLabel.dst(i), Mov,
+                                        jmp->marker(), jmp->src(i)));
+    }
+  }
+  lastInst = lastBlock->iteratorTo(jmp); // iterator to last instruction
+  lastBlock->splice(lastInst, target, target->skipHeader(), target->end());
+  jmp->setTaken(nullptr); // unlink edge
+  lastBlock->erase(lastInst); // delete the jmp
 }
 
 }
 
 //////////////////////////////////////////////////////////////////////
 
-// If main trace ends with an unconditional jump, and the target is not
-// reached by any other branch, then copy the target of the jump to the
-// end of the trace
-void eliminateUnconditionalJump(IRTrace* trace) {
-  Block* lastBlock = trace->back();
-  auto lastInst = lastBlock->backIter(); // iterator to last instruction
-  IRInstruction& jmp = *lastInst;
-  if (jmp.op() == Jmp_ && jmp.taken()->numPreds() == 1) {
-    Block* target = jmp.taken();
-    lastBlock->splice(lastInst, target, target->skipHeader(), target->end(),
-                      lastInst->marker());
-    jmp.convertToNop();         // unlink it from its Edge
-    lastBlock->erase(lastInst); // delete the jmp
-  }
-}
+void optimizeJumps(IRUnit& unit) {
+  Timer _t(Timer::optimize_jumpOpts);
 
-void optimizeJumps(IRTrace* trace, IRFactory& irFactory) {
-  eliminateUnconditionalJump(trace);
-
-  if (RuntimeOption::EvalHHIRDirectExit) {
-    optimizeCondTraceExit(trace, irFactory);
-    optimizeSideExits(trace, irFactory);
-  }
+  postorderWalk(unit, [&](Block* b) {
+    if (RuntimeOption::EvalHHIRDirectExit) {
+      auto branch = &b->back();
+      auto taken = branch->taken();
+      if (isCondTraceExit(branch, taken)) {
+        optimizeCondTraceExit(unit, branch, taken);
+      } else if (isSideExitCheck(branch, taken)) {
+        optimizeSideExitCheck(unit, branch, taken);
+      } else if (isSideExitJcc(branch, taken)) {
+        optimizeSideExitJcc(unit, branch, taken);
+      }
+    }
+    auto branch = &b->back();
+    auto taken = branch->taken();
+    if (isTrivialJmp(branch, taken)) {
+      eliminateJmp(b, branch, taken, unit);
+    }
+  });
 }
 
 }}

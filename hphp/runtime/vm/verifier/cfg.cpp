@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -48,7 +48,7 @@ void GraphBuilder::createBlocks() {
   for (Range<Func::ParamInfoVec> p(m_func->params()); !p.empty(); ) {
     const Func::ParamInfo& param = p.popFront();
     m_graph->entries[dv_index++] = !param.hasDefaultValue() ? 0 :
-                                   createBlock(param.funcletOff());
+                                   createBlock(param.funcletOff);
   }
   // main entry point
   assert(dv_index == m_graph->param_count);
@@ -57,8 +57,8 @@ void GraphBuilder::createBlocks() {
   for (InstrRange i = funcInstrs(m_func); !i.empty(); ) {
     PC pc = i.popFront();
     if (isCF(pc) && !i.empty()) createBlock(i.front());
-    if (isSwitch(*pc)) {
-      foreachSwitchTarget((Op*)pc, [&](Offset& o) {
+    if (isSwitch(*reinterpret_cast<const Op*>(pc))) {
+      foreachSwitchTarget(reinterpret_cast<const Op*>(pc), [&](Offset& o) {
         createBlock(pc + o);
       });
     } else {
@@ -80,7 +80,7 @@ void GraphBuilder::linkBlocks() {
     PC pc = i.popFront();
     block->last = pc;
     if (isCF(pc)) {
-      if (isSwitch(*pc)) {
+      if (isSwitch(*reinterpret_cast<const Op*>(pc))) {
         int i = 0;
         foreachSwitchTarget((Op*)pc, [&](Offset& o) {
           succs(block)[i++] = at(pc + o);
@@ -119,11 +119,13 @@ void GraphBuilder::createExBlocks() {
   for (Range<Func::EHEntVec> i(m_func->ehtab()); !i.empty(); ) {
     const EHEnt& handler = i.popFront();
     createBlock(handler.m_base);
-    createBlock(handler.m_past);
+    if (handler.m_past != m_func->past()) {
+      createBlock(handler.m_past);
+    }
     if (handler.m_type == EHEnt::Type::Catch) {
       m_graph->exn_cap += handler.m_catches.size() - 1;
-      for (Range<EHEnt::CatchVec> c(handler.m_catches); !c.empty(); ) {
-        createBlock(c.popFront().second);
+      for (auto const& c : handler.m_catches) {
+        createBlock(c.second);
       }
     } else {
       createBlock(handler.m_fault);
@@ -182,8 +184,8 @@ void GraphBuilder::linkExBlocks() {
       assert(eh->m_base <= off && off < eh->m_past);
       if (eh->m_type == EHEnt::Type::Catch) {
         // each catch block is reachable from b
-        for (Range<EHEnt::CatchVec> j(eh->m_catches); !j.empty(); ) {
-          exns(b)[exn_index++] = at(j.popFront().second);
+        for (auto const& j : eh->m_catches) {
+          exns(b)[exn_index++] = at(j.second);
         }
         eh = nextOuter(ehtab, eh);
       } else {
@@ -200,8 +202,8 @@ void GraphBuilder::linkExBlocks() {
       while (eh) {
         if (eh->m_type == EHEnt::Type::Catch) {
           // each catch target for eh is reachable from b
-          for (Range<EHEnt::CatchVec> j(eh->m_catches); !j.empty(); ) {
-            exns(b)[exn_index++] = at(j.popFront().second);
+          for (auto const& j : eh->m_catches) {
+            exns(b)[exn_index++] = at(j.second);
           }
           eh = nextOuter(ehtab, eh);
         } else {
@@ -246,11 +248,6 @@ Block* GraphBuilder::createBlock(PC pc) {
 Block* GraphBuilder::at(PC target) {
   BlockMap::iterator i = m_blocks.find(target);
   return i == m_blocks.end() ? 0 : i->second;
-}
-
-void GraphBuilder::addEdge(Block* from, EdgeKind k, Block* target) {
-  assert(target != 0);
-  from->succs[k] = target;
 }
 
 /**

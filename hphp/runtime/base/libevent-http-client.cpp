@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,8 +13,12 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/runtime/base/libevent-http-client.h"
+#include <map>
+#include <vector>
+
+#include <folly/Conv.h>
+
 #include "hphp/runtime/server/server-stats.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/util/compression.h"
@@ -48,22 +52,22 @@ namespace HPHP {
 // connection pooling
 
 static std::string get_hash(const std::string &address, int port) {
-  string hash = address;
+  std::string hash = address;
   if (port != 80) {
     hash += ':';
-    hash += lexical_cast<string>(port);
+    hash += folly::to<std::string>(port);
   }
   return hash;
 }
 
 ReadWriteMutex LibEventHttpClient::ConnectionPoolMutex;
-std::map<std::string, int> LibEventHttpClient::ConnectionPoolConfig;
-std::map<std::string, LibEventHttpClientPtrVec>
+std::map<std::string,int> LibEventHttpClient::ConnectionPoolConfig;
+std::map<std::string,std::vector<LibEventHttpClientPtr>>
   LibEventHttpClient::ConnectionPool;
 
 void LibEventHttpClient::SetCache(const std::string &address, int port,
                                   int maxConnection) {
-  string hash = get_hash(address, port);
+  auto const hash = get_hash(address, port);
 
   WriteLock lock(ConnectionPoolMutex);
   if (maxConnection > 0) {
@@ -75,13 +79,12 @@ void LibEventHttpClient::SetCache(const std::string &address, int port,
 
 LibEventHttpClientPtr LibEventHttpClient::Get(const std::string &address,
                                               int port) {
-  string hash = get_hash(address, port);
+  auto const hash = get_hash(address, port);
 
   int maxConnection = 0;
   {
     ReadLock lock(ConnectionPoolMutex);
-    std::map<string, int>::const_iterator iter =
-      ConnectionPoolConfig.find(hash);
+    auto iter = ConnectionPoolConfig.find(hash);
     if (iter == ConnectionPoolConfig.end()) {
       // not configured to cache
       ServerStats::Log("evhttp.skip", 1);
@@ -92,9 +95,9 @@ LibEventHttpClientPtr LibEventHttpClient::Get(const std::string &address,
   }
 
   WriteLock lock(ConnectionPoolMutex);
-  LibEventHttpClientPtrVec &pool = ConnectionPool[hash];
+  auto& pool = ConnectionPool[hash];
   for (unsigned int i = 0; i < pool.size(); i++) {
-    LibEventHttpClientPtr client = pool[i];
+    auto client = pool[i];
     if (!client->m_busy) {
       client->m_busy = true;
       ServerStats::Log("evhttp.hit", 1);
@@ -177,8 +180,8 @@ bool LibEventHttpClient::send(const std::string &url,
   for (unsigned int i = 0; i < headers.size(); i++) {
     const std::string &header = headers[i];
     size_t pos = header.find(':');
-    if (pos != string::npos && header[pos + 1] == ' ') {
-      string name = header.substr(0, pos);
+    if (pos != std::string::npos && header[pos + 1] == ' ') {
+      std::string name = header.substr(0, pos);
       if (strcasecmp(name.c_str(), "Connection") == 0) {
         keepalive = false;
       } else if (strcasecmp(name.c_str(), "Host") == 0) {
@@ -290,7 +293,7 @@ void LibEventHttpClient::onRequestCompleted(evhttp_request* request) {
         // with the value 'gzip' means we treat it as gzip.
         gzip = true;
       }
-      m_responseHeaders.push_back(string(p->key) + ": " + p->value);
+      m_responseHeaders.push_back(std::string(p->key) + ": " + p->value);
     }
   }
 

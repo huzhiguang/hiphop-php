@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,15 +17,24 @@
 #ifndef incl_HPHP_MUTEX_H_
 #define incl_HPHP_MUTEX_H_
 
-#include "hphp/util/assertions.h"
-#include "hphp/util/util.h"
 #include <pthread.h>
 #include <time.h>
-#include "tbb/concurrent_hash_map.h"
-#ifdef __APPLE__
-#include "pthread-spin-lock-shim.h"
+
+// This fixes a bug in tbb headers
+// make sure these aren't defined on cygwin
+#ifdef __CYGWIN__
+# ifdef _WIN32
+#  undef _WIN32
+# endif
+# ifdef _WIN64
+#  undef _WIN64
+# endif
 #endif
 
+#include <tbb/concurrent_hash_map.h>
+
+#include "hphp/util/portability.h"
+#include "hphp/util/assertions.h"
 #include "hphp/util/rank.h"
 
 namespace HPHP {
@@ -103,7 +112,8 @@ public:
     if (recursive) {
       pthread_mutexattr_settype(&m_mutexattr, PTHREAD_MUTEX_RECURSIVE);
     } else {
-#if defined(__APPLE__)
+#if (defined(__APPLE__) || defined(__CYGWIN__) || defined(__MINGW__) || \
+    defined(_MSC_VER))
       pthread_mutexattr_settype(&m_mutexattr, PTHREAD_MUTEX_DEFAULT);
 #else
       pthread_mutexattr_settype(&m_mutexattr, PTHREAD_MUTEX_ADAPTIVE_NP);

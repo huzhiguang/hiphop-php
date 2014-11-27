@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,7 +15,6 @@
 */
 
 #include "hphp/runtime/base/thread-init-fini.h"
-#include "hphp/runtime/base/smart-allocator.h"
 #include "hphp/runtime/base/execution-context.h"
 #include "hphp/runtime/base/preg.h"
 #include "hphp/runtime/server/server-stats.h"
@@ -26,8 +25,9 @@
 #include "hphp/util/alloc.h"
 #include "hphp/runtime/base/hardware-counter.h"
 #include "hphp/runtime/ext/asio/asio_session.h"
-#include "hphp/runtime/ext/ext_icu.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/base/intercept.h"
+#include "hphp/runtime/base/persistent-resource-store.h"
 
 #include "hphp/runtime/vm/repo.h"
 
@@ -49,34 +49,35 @@ InitFiniNode::InitFiniNode(void(*f)(), When init) {
   ifn = this;
 }
 
+// Beware: this is actually called once per request, not as the name suggests
 void init_thread_locals(void *arg /* = NULL */) {
-  Sweepable::InitSweepableList();
-  ObjectData::GetMaxId();
-  ResourceData::GetMaxResourceId();
   ServerStats::GetLogger();
   zend_get_bigint_data();
   zend_get_rand_data();
   get_server_note();
-  g_persistentObjects.getCheck();
+  g_persistentResources.getCheck();
   MemoryManager::TlsWrapper::getCheck();
-  InitAllocatorThreadLocal();
-  RefData::AllocatorType::getCheck();
-  ThreadInfo::s_threadInfo.getCheck();
+  if (ThreadInfo::s_threadInfo.isNull()) {
+    // Only call init() when there isn't a s_threadInfo already
+    ThreadInfo::s_threadInfo.getCheck()->init();
+  }
   g_context.getCheck();
   AsioSession::Init();
-  s_hasRenamedFunction.getCheck();
   HardwareCounter::s_counter.getCheck();
+  Extension::ThreadInitModules();
   for (InitFiniNode *in = extra_init; in; in = in->next) {
     in->func();
   }
 }
 
+// Beware: this is correctly called once per thread, as the name suggests
 void finish_thread_locals(void *arg /* = NULL */) {
   for (InitFiniNode *in = extra_fini; in; in = in->next) {
     in->func();
   }
+  Extension::ThreadShutdownModules();
   if (!g_context.isNull()) g_context.destroy();
-  if (!g_persistentObjects.isNull()) g_persistentObjects.destroy();
+  if (!g_persistentResources.isNull()) g_persistentResources.destroy();
 }
 
 static class SetThreadInitFini {

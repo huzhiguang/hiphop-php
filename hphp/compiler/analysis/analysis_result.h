@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,19 +24,26 @@
 #include "hphp/compiler/analysis/symbol_table.h"
 #include "hphp/compiler/analysis/function_container.h"
 #include "hphp/compiler/package.h"
+#include "hphp/compiler/hphp.h"
 
 #include "hphp/util/string-bag.h"
 #include "hphp/util/thread-local.h"
 
 #include <boost/graph/adjacency_list.hpp>
-#include "tbb/concurrent_hash_map.h"
+#include <tbb/concurrent_hash_map.h>
+#include <atomic>
+#include <map>
+#include <set>
+#include <utility>
+#include <vector>
+#include <functional>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 
 DECLARE_BOOST_TYPES(ClassScope);
-DECLARE_BOOST_TYPES(FileScope);
+DECLARE_EXTENDED_BOOST_TYPES(FileScope);
 DECLARE_BOOST_TYPES(FunctionScope);
 DECLARE_BOOST_TYPES(Location);
 DECLARE_BOOST_TYPES(AnalysisResult);
@@ -57,12 +64,6 @@ public:
 
     // pre-optimize
     FirstPreOptimize,
-
-    // inferTypes
-    FirstInference,
-
-    // post-optimize
-    PostOptimize,
 
     CodeGen,
   };
@@ -120,6 +121,7 @@ public:
 
 public:
   AnalysisResult();
+  ~AnalysisResult();
   Locker lock() const { return Locker(this); }
   void setPackage(Package *package) { m_package = package;}
   void setParseOnDemand(bool v) { m_parseOnDemand = v;}
@@ -128,6 +130,10 @@ public:
     assert(m_package && !m_parseOnDemand);
     m_parseOnDemandDirs = dirs;
   }
+  void setFinish(std::function<void(AnalysisResultPtr)>&& fn) {
+    m_finish = std::move(fn);
+  }
+  void finish();
 
   /**
    * create_function() generates extra PHP code that defines the lambda.
@@ -150,7 +156,8 @@ public:
 
   void addNSFallbackFunc(ConstructPtr c, FileScopePtr fs);
 
-  void loadBuiltins();
+  void addSystemFunction(FunctionScopeRawPtr fs);
+  void addSystemClass(ClassScopeRawPtr cs);
   void analyzeProgram(bool system = false);
   void analyzeIncludes();
   void analyzeProgramFinal();
@@ -164,8 +171,6 @@ public:
   void getScopesSet(BlockScopeRawPtrQueue &v);
 
   void preOptimize();
-  void inferTypes();
-  void postOptimize();
 
   /**
    * Force all class variables to be variants, since l-val or reference
@@ -309,6 +314,7 @@ public:
   void addInteger(int64_t n);
 
 private:
+  std::function<void(AnalysisResultPtr)> m_finish;
   Package *m_package;
   bool m_parseOnDemand;
   std::vector<std::string> m_parseOnDemandDirs;
@@ -457,14 +463,6 @@ public:
     AnalysisResult::s_currentScopeThreadLocal.destroy();
   }
 };
-
-#define IMPLEMENT_INFER_AND_CHECK_ASSERT(scope) \
-  do { \
-    assert(AnalysisResult::s_currentScopeThreadLocal->get()); \
-    assert(AnalysisResult::s_currentScopeThreadLocal->get() == \
-           (scope).get()); \
-    (scope)->getInferTypesMutex().assertOwnedBySelf(); \
-  } while (0)
 
 #ifdef HPHP_INSTRUMENT_TYPE_INF
 typedef std::pair < const char *, int > LEntry;

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,20 +24,18 @@
 
 namespace HPHP {
 
-IMPLEMENT_OBJECT_ALLOCATION(MemFile)
 ///////////////////////////////////////////////////////////////////////////////
 
-StaticString MemFile::s_class_name("MemFile");
-
-///////////////////////////////////////////////////////////////////////////////
-
-MemFile::MemFile()
-  : File(false), m_data(nullptr), m_len(-1), m_cursor(0), m_malloced(false) {
+MemFile::MemFile(const String& wrapper, const String& stream)
+  : File(false, wrapper, stream), m_data(nullptr), m_len(-1), m_cursor(0),
+    m_malloced(false) {
   m_isLocal = true;
 }
 
-MemFile::MemFile(const char *data, int64_t len)
-  : File(false), m_data(nullptr), m_len(len), m_cursor(0), m_malloced(true) {
+MemFile::MemFile(const char *data, int64_t len,
+                 const String& wrapper, const String& stream)
+  : File(false, wrapper, stream), m_data(nullptr), m_len(len), m_cursor(0),
+    m_malloced(true) {
   m_data = (char*)malloc(len + 1);
   if (m_data && len) {
     memcpy(m_data, data, len);
@@ -47,10 +45,15 @@ MemFile::MemFile(const char *data, int64_t len)
 }
 
 MemFile::~MemFile() {
-  closeImpl();
+  close();
 }
 
-bool MemFile::open(CStrRef filename, CStrRef mode) {
+void MemFile::sweep() {
+  close();
+  File::sweep();
+}
+
+bool MemFile::open(const String& filename, const String& mode) {
   assert(m_len == -1);
   // mem files are read-only
   const char* mode_str = mode.c_str();
@@ -88,11 +91,12 @@ bool MemFile::open(CStrRef filename, CStrRef mode) {
 }
 
 bool MemFile::close() {
+  invokeFiltersOnClose();
   return closeImpl();
 }
 
 bool MemFile::closeImpl() {
-  s_file_data->m_pcloseRet = 0;
+  s_pcloseRet = 0;
   m_closed = true;
   if (m_malloced && m_data) {
     free(m_data);
@@ -170,14 +174,23 @@ bool MemFile::rewind() {
 }
 
 int64_t MemFile::writeImpl(const char *buffer, int64_t length) {
-  throw FatalErrorException((string("cannot write a mem stream: ") +
+  throw FatalErrorException((std::string("cannot write a mem stream: ") +
                              m_name).c_str());
 }
 
 bool MemFile::flush() {
-  throw FatalErrorException((string("cannot flush a mem stream: ") +
+  throw FatalErrorException((std::string("cannot flush a mem stream: ") +
                              m_name).c_str());
 }
+
+const StaticString s_unread_bytes("unread_bytes");
+
+Array MemFile::getMetaData() {
+  Array ret = File::getMetaData();
+  ret.set(s_unread_bytes, m_len - m_cursor);
+  return ret;
+}
+
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -188,7 +201,7 @@ void MemFile::unzip() {
   int len = m_len;
   char *data = gzdecode(m_data, len);
   if (data == nullptr) {
-    throw FatalErrorException((string("cannot unzip mem stream: ") +
+    throw FatalErrorException((std::string("cannot unzip mem stream: ") +
                                m_name).c_str());
   }
   m_data = data;

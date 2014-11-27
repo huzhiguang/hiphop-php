@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,6 +18,7 @@
 #define incl_HPHP_EXPRESSION_LIST_H_
 
 #include "hphp/compiler/expression/expression.h"
+#include <vector>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -41,7 +42,6 @@ public:
 
   DECLARE_EXPRESSION_VIRTUAL_FUNCTIONS;
   ExpressionPtr preOptimize(AnalysisResultConstPtr ar);
-  ExpressionPtr postOptimize(AnalysisResultConstPtr ar);
 
   virtual void setContext(Context context);
   void setListKind(ListKind kind) { m_kind = kind; }
@@ -73,15 +73,9 @@ public:
   void markParam(int p, bool noRefWrapper);
   void markParams(bool noRefWrapper);
 
-  void setCollectionType(int cType);
-
-  /**
-   * When a function call has too many arguments, we only want to output
-   * max number of arguments, by limiting output count of subexpressions.
-   */
-  void setOutputCount(int count);
-  int getOutputCount() const;
-  void resetOutputCount();
+  void setCollectionType(Collection::Type cType);
+  void setContainsUnpack() { m_argUnpack = true; };
+  bool containsUnpack() const { return m_argUnpack; }
 
   virtual bool canonCompare(ExpressionPtr e) const;
 
@@ -97,9 +91,9 @@ private:
   unsigned int checkLitstrKeys() const;
 
   ExpressionPtrVec m_exps;
-  int m_outputCount;
   bool m_arrayElements;
   int m_collectionType;
+  bool m_argUnpack;
   ListKind m_kind;
 };
 

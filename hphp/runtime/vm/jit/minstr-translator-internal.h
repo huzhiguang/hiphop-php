@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,15 +17,13 @@
 #ifndef incl_HPHP_RUNTIME_VM_TRANSLATOR_HOPT_VECTOR_TRANSLATOR_HELPERS_H_
 #define incl_HPHP_RUNTIME_VM_TRANSLATOR_HOPT_VECTOR_TRANSLATOR_HELPERS_H_
 
-#include "hphp/util/base.h"
 #include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/stats.h"
 #include "hphp/runtime/vm/jit/translator.h"
+#include "hphp/runtime/vm/jit/ssa-tmp.h"
 #include "hphp/runtime/vm/member-operations.h"
 
-namespace HPHP {  namespace JIT { namespace {
-
-#define CTX() cns(contextClass())
+namespace HPHP { namespace jit { namespace {
 
 static const MInstrAttr Warn = MIA_warn;
 static const MInstrAttr Unset = MIA_unset;
@@ -45,15 +43,9 @@ static const MInstrAttr WarnDefineReffy = MInstrAttr(Warn | Define | Reffy);
  * on a variable number of bool and enum arguments. */
 
 template<typename T> constexpr unsigned bitWidth() {
-  static_assert(IncDec_invalid == 4,
-                "IncDecOp enum must fit in 2 bits");
-  static_assert(SetOp_invalid == 11,
-                "SetOpOp enum must fit in 4 bits");
   return std::is_same<T, bool>::value ? 1
     : std::is_same<T, KeyType>::value ? 2
     : std::is_same<T, MInstrAttr>::value ? 4
-    : std::is_same<T, IncDecOp>::value ? 2
-    : std::is_same<T, SetOpOp>::value ? 4
     : sizeof(T) * CHAR_BIT;
 }
 
@@ -82,40 +74,35 @@ inline unsigned buildBitmask(T c, Args... args) {
 }
 
 // FILL_ROW and BUILD_OPTAB* build up the static table of function pointers
-#define FILL_ROW(nm, ...) do {                                  \
-    OpFunc* dest = &optab[buildBitmask(__VA_ARGS__)];           \
+#define FILL_ROW(nm, ...) {                                     \
+    auto const dest = &optab[buildBitmask(__VA_ARGS__)];        \
     assert(*dest == nullptr);                                   \
-    *dest = (OpFunc)MInstrHelpers::nm;                          \
-  } while (false);
-#define FILL_ROW_HOT(nm, hot, ...) FILL_ROW(nm, __VA_ARGS__)
+    *dest = reinterpret_cast<OpFunc>(MInstrHelpers::nm);        \
+  }
 
-#define BUILD_OPTAB(...) BUILD_OPTAB_ARG(HELPER_TABLE(FILL_ROW), __VA_ARGS__)
-#define BUILD_OPTAB_HOT(...)                            \
-  BUILD_OPTAB_ARG(HELPER_TABLE(FILL_ROW_HOT), __VA_ARGS__)
+#define BUILD_OPTAB(TABLE, ...) BUILD_OPTAB_ARG(TABLE(FILL_ROW), __VA_ARGS__)
 #define BUILD_OPTAB_ARG(FILL_TABLE, ...)                                \
+  using OpFunc = void (*)();                                            \
   static OpFunc* optab = nullptr;                                       \
   if (!optab) {                                                         \
-    optab = (OpFunc*)calloc(1 << multiBitWidth(__VA_ARGS__), sizeof(OpFunc)); \
+    optab = static_cast<OpFunc*>(                                       \
+      calloc(1 << multiBitWidth(__VA_ARGS__), sizeof(OpFunc))           \
+    );                                                                  \
     FILL_TABLE                                                          \
   }                                                                     \
   unsigned idx = buildBitmask(__VA_ARGS__);                             \
-  OpFunc opFunc = optab[idx];                                           \
+  auto const opFunc = optab[idx];                                       \
   always_assert(opFunc);
 
 // getKeyType determines the KeyType to be used as a template argument
 // to helper functions.
 inline KeyType getKeyType(const SSATmp* key) {
-  auto DEBUG_ONLY keyType = key->type();
+  DEBUG_ONLY auto const keyType = key->type();
   assert(keyType.notBoxed());
-  assert(keyType.isKnownDataType() || keyType.equals(Type::Cell));
 
-  if (key->isString()) {
-    return KeyType::Str;
-  } else if (key->isA(Type::Int)) {
-    return KeyType::Int;
-  } else {
-    return KeyType::Any;
-  }
+  if (key->isA(Type::Str)) return KeyType::Str;
+  if (key->isA(Type::Int)) return KeyType::Int;
+  return KeyType::Any;
 }
 
 // like getKeyType, but for cases where we don't have an Int
@@ -131,15 +118,54 @@ inline KeyType getKeyTypeNoInt(const SSATmp* key) {
 // int64 and StringData* keys in their key argument. This should be
 // cleaned up to use the right types: #2174037
 template<KeyType kt>
-static inline TypedValue* keyPtr(TypedValue& key) {
+TypedValue* keyPtr(TypedValue& key) {
   if (kt == KeyType::Any) {
     assert(tvIsPlausible(key));
     return &key;
-  } else {
-    return reinterpret_cast<TypedValue*>(key.m_data.num);
   }
+  return reinterpret_cast<TypedValue*>(key.m_data.num);
 }
 
-} } }
+/*
+ * Information about an array key (this represents however much we know about
+ * whether the key is going to behave like an integer or a string).
+ */
+struct ArrayKeyInfo {
+  int64_t convertedInt{0};
+  KeyType type{KeyType::Any};
+
+  // If true, the string could dynamically contain an integer-like string,
+  // which needs to be checked.
+  bool checkForInt{false};
+
+  // If true, useKey is an integer constant we've materialized, by converting a
+  // string `key' that was strictly an integer.
+  bool converted{false};
+};
+
+inline ArrayKeyInfo checkStrictlyInteger(SSATmp* key) {
+  auto ret = ArrayKeyInfo{};
+
+  if (key->isA(Type::Int)) {
+    ret.type = KeyType::Int;
+    return ret;
+  }
+  assert(key->isA(Type::Str));
+  ret.type = KeyType::Str;
+  if (key->isConst()) {
+    int64_t i;
+    if (key->strVal()->isStrictlyInteger(i)) {
+      ret.converted    = true;
+      ret.type         = KeyType::Int;
+      ret.convertedInt = i;
+    }
+  } else {
+    ret.checkForInt = true;
+  }
+
+  return ret;
+}
+
+}}}
 
 #endif

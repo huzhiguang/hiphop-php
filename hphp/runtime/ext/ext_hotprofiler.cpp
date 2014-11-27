@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -15,6 +15,8 @@
    +----------------------------------------------------------------------+
 */
 
+#include "hphp/runtime/ext/ext_hotprofiler.h"
+
 #include "hphp/runtime/ext/ext_fb.h"
 #include "hphp/runtime/base/memory-manager.h"
 #include "hphp/runtime/base/request-local.h"
@@ -22,44 +24,25 @@
 #include "hphp/runtime/server/server-stats.h"
 #include "hphp/runtime/base/ini-setting.h"
 #include "hphp/runtime/vm/event-hook.h"
+#include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/util/alloc.h"
 #include "hphp/util/vdso.h"
 #include "hphp/util/cycles.h"
+#include "hphp/runtime/base/variable-serializer.h"
+#include "hphp/runtime/ext/std/ext_std_function.h"
+#include "hphp/runtime/ext/xdebug/xdebug_profiler.h"
+#include "hphp/runtime/base/request-event-handler.h"
 
-#ifdef __FreeBSD__
+#include <sys/time.h>
 #include <sys/resource.h>
-#include <sys/param.h>
-#include <sys/cpuset.h>
-#define cpu_set_t cpuset_t
-#define SET_AFFINITY(pid, size, mask) \
-           cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, size, mask)
-#define GET_AFFINITY(pid, size, mask) \
-           cpuset_getaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, size, mask)
-#elif defined(__APPLE__)
-#include <mach/mach_init.h>
-#include <mach/thread_policy.h>
-#include <mach/thread_act.h>
-
-#define cpu_set_t thread_affinity_policy_data_t
-#define CPU_SET(cpu_id, new_mask) \
-        (*(new_mask)).affinity_tag = (cpu_id + 1)
-#define CPU_ZERO(new_mask)                 \
-        (*(new_mask)).affinity_tag = THREAD_AFFINITY_TAG_NULL
-#define GET_AFFINITY(pid, size, mask) \
-         (*(mask)).affinity_tag = THREAD_AFFINITY_TAG_NULL
-#define SET_AFFINITY(pid, size, mask)       \
-        thread_policy_set(mach_thread_self(), THREAD_AFFINITY_POLICY, \
-                          (int *)mask, THREAD_AFFINITY_POLICY_COUNT)
-#else
-#include <sched.h>
-#define SET_AFFINITY(pid, size, mask) sched_setaffinity(0, size, mask)
-#define GET_AFFINITY(pid, size, mask) sched_getaffinity(0, size, mask)
-#endif
-
-
 #include <iostream>
 #include <fstream>
 #include <zlib.h>
+#include <algorithm>
+#include <map>
+#include <new>
+#include <utility>
+#include <vector>
 
 // Append the delimiter
 #define HP_STACK_DELIM        "==>"
@@ -67,35 +50,16 @@
 
 namespace HPHP {
 
-IMPLEMENT_DEFAULT_EXTENSION(hotprofiler);
-IMPLEMENT_DEFAULT_EXTENSION(xhprof);
+IMPLEMENT_DEFAULT_EXTENSION_VERSION(hotprofiler, NO_VERSION_YET);
+IMPLEMENT_DEFAULT_EXTENSION_VERSION(xhprof, 0.9.4);
+
+using std::vector;
+using std::string;
+
+const StaticString s_hotprofiler("hotprofiler");
+
 ///////////////////////////////////////////////////////////////////////////////
 // helpers
-
-/*
- * A hash function to calculate a 8-bit hash code for a function name.
- * This is based on a small modification to 'zend_inline_hash_func' by summing
- * up all bytes of the ulong returned by 'zend_inline_hash_func'.
- *
- * @param str, char *, string to be calculated hash code for.
- *
- * @author cjiang
- */
-static inline uint8_t hprof_inline_hash(const char * str) {
-  unsigned long h = 5381;
-  uint i = 0;
-  uint8_t res = 0;
-
-  while (*str) {
-    h += (h << 5);
-    h ^= (unsigned long) *str++;
-  }
-
-  for (i = 0; i < sizeof(unsigned long); i++) {
-    res += ((uint8_t *)&h)[i];
-  }
-  return res;
-}
 
 /**
  * Get time delta in microseconds.
@@ -156,14 +120,19 @@ static int64_t get_cpu_frequency() {
     return 0.0;
   }
   uint64_t tsc_start = cpuCycles();
-  // Sleep for 5 miliseconds. Comparaing with gettimeofday's  few microseconds
-  // execution time, this should be enough.
-  usleep(5000);
-  if (gettimeofday(&end, 0)) {
-    perror("gettimeofday");
-    return 0.0;
-  }
-  uint64_t tsc_end = cpuCycles();
+  uint64_t tsc_end;
+  volatile int i;
+  // Busy loop for 5 miliseconds. Don't use usleep() here since it causes the
+  // CPU to halt which will generate meaningless results.
+  do {
+    for (i = 0; i < 1000000; i++);
+    if (gettimeofday(&end, 0)) {
+      perror("gettimeofday");
+      return 0.0;
+    }
+    tsc_end = cpuCycles();
+  } while (get_us_interval(&start, &end) < 5000);
+
   return nearbyint((tsc_end - tsc_start) * 1.0
                                    / (get_us_interval(&start, &end)));
 }
@@ -203,35 +172,6 @@ static int64_t* get_cpu_frequency_from_file(const char *file, int ncpus)
   }
   return freqs;
 }
-
-class esyscall {
-public:
-  int num;
-
-  explicit esyscall(const char *syscall_name) {
-    num = -1;
-    char format[strlen(syscall_name) + sizeof(" %d")];
-    sprintf(format, "%s %%d", syscall_name);
-
-    std::ifstream syscalls("/proc/esyscall");
-    if (syscalls.fail()) {
-      return;
-    }
-    char line[MAX_LINELENGTH];
-    if (!syscalls.getline(line, sizeof(line))) {
-      return;
-    }
-    // perhaps we should check the format, but we're just going to assume
-    // Name Number
-    while (syscalls.getline(line, sizeof(line))) {
-      int number;
-      if (sscanf(line, format, &number) == 1) {
-        num = number;
-        return;
-      }
-    }
-  }
-};
 
 ///////////////////////////////////////////////////////////////////////////////
 // Machine information that we collect just once.
@@ -296,8 +236,7 @@ static inline uint64_t
 to_usec(int64_t cycles, int64_t MHz, bool cpu_time = false)
 {
 #ifdef CLOCK_THREAD_CPUTIME_ID
-  static int64_t vdso_usable =
-    Util::Vdso::ClockGetTimeNS(CLOCK_THREAD_CPUTIME_ID);
+  static int64_t vdso_usable = Vdso::ClockGetTimeNS(CLOCK_THREAD_CPUTIME_ID);
 #else
   static int64_t vdso_usable = -1;
 #endif
@@ -307,74 +246,25 @@ to_usec(int64_t cycles, int64_t MHz, bool cpu_time = false)
   return (cycles + MHz/2) / MHz;
 }
 
-static esyscall vtsc_syscall("vtsc");
-
-static inline uint64_t vtsc(int64_t MHz) {
+static inline uint64_t cpuTime(int64_t MHz) {
 #ifdef CLOCK_THREAD_CPUTIME_ID
-  int64_t rval = Util::Vdso::ClockGetTimeNS(CLOCK_THREAD_CPUTIME_ID);
+  int64_t rval = Vdso::ClockGetTimeNS(CLOCK_THREAD_CPUTIME_ID);
   if (rval >= 0) {
     return rval;
   }
 #endif
-  if (vtsc_syscall.num > 0) {
-    return syscall(vtsc_syscall.num);
-  }
   struct rusage usage;
   getrusage(RUSAGE_SELF, &usage);
   return
     tv_to_cycles(usage.ru_utime, MHz) + tv_to_cycles(usage.ru_stime, MHz);
 }
 
-#ifdef USE_JEMALLOC
-
-#define JEMALLOC_STAT_MIB_LEN 2
-size_t mallctl_mib_len = JEMALLOC_STAT_MIB_LEN;
-size_t *mallctl_alloc_mib;
-size_t *mallctl_free_mib;
-bool mallctl_init = false;
-
-bool
-mallctl_mib_init()
-{
-  if (mallctl_init) {
-    return false;
-  }
-  mallctl_init = true;
-  mallctl_alloc_mib = new size_t[mallctl_mib_len];
-  if (mallctlnametomib("thread.allocated",
-                       mallctl_alloc_mib, &mallctl_mib_len))
-  {
-    return false;
-  }
-  mallctl_free_mib = new size_t[mallctl_mib_len];
-  if (mallctlnametomib("thread.deallocated",
-                       mallctl_free_mib, &mallctl_mib_len))
-  {
-    return false;
-  }
-  return true;
-}
-#endif
-
 uint64_t
 get_allocs()
 {
 #ifdef USE_JEMALLOC
-  if (mallctl) {
-    if (!mallctl_alloc_mib) {
-      if (!mallctl_mib_init()) {
-        return 0;
-      }
-    }
-    uint64_t stat;
-    size_t size = sizeof(stat);
-    if (mallctlbymib(mallctl_alloc_mib, mallctl_mib_len, &stat, &size,
-                     nullptr, 0))
-    {
-      return 0;
-    }
-    return stat;
-  }
+  auto& mm = MM();
+  return mm.getAllocated();
 #endif
 #ifdef USE_TCMALLOC
   if (MallocExtensionInstance) {
@@ -391,21 +281,8 @@ uint64_t
 get_frees()
 {
 #ifdef USE_JEMALLOC
-  if (mallctl) {
-    if (!mallctl_free_mib) {
-      if (!mallctl_mib_init()) {
-        return 0;
-      }
-    }
-    uint64_t stat;
-    size_t size = sizeof(stat);
-    if (mallctlbymib(mallctl_free_mib, mallctl_mib_len, &stat, &size,
-                     nullptr, 0))
-    {
-      return 0;
-    }
-    return stat;
-  }
+  auto& mm = MM();
+  return mm.getDeallocated();
 #endif
 #ifdef USE_TCMALLOC
   if (MallocExtensionInstance) {
@@ -418,96 +295,46 @@ get_frees()
   return 0;
 }
 
-///////////////////////////////////////////////////////////////////////////////
-// classes
-
-/**
- * All information we collect about a frame.
- */
-class Frame {
-public:
-  Frame          *m_parent;      // ptr to parent frame
-  const char     *m_name;        // function name
-  uint8_t           m_hash_code;   // hash_code for the function name
-  int             m_recursion;   // recursion level for function
-
-  uint64_t          m_tsc_start;   // start value for TSC counter
-  int64_t           m_mu_start;    // memory usage
-  int64_t           m_pmu_start;   // peak memory usage
-  int64_t           m_vtsc_start;    // user/sys time start
-
-  /**
-   * Returns formatted function name
-   *
-   * @param  result_buf   ptr to result buf
-   * @param  result_len   max size of result buf
-   * @return total size of the function name returned in result_buf
-   * @author veeve
-   */
-  size_t getName(char *result_buf, size_t result_len) {
-    if (result_len <= 1) {
-      return 0; // Insufficient result_bug. Bail!
-    }
-
-    // Add '@recurse_level' if required
-    // NOTE: Dont use snprintf's return val as it is compiler dependent
-    if (m_recursion) {
-      snprintf(result_buf, result_len, "%s@%d", m_name, m_recursion);
-    } else {
-      snprintf(result_buf, result_len, "%s", m_name);
-    }
-
-    // Force null-termination at MAX
-    result_buf[result_len - 1] = 0;
-    return strlen(result_buf);
+size_t Frame::getName(char *result_buf, size_t result_len) {
+  if (result_len <= 1) {
+    return 0; // Insufficient result_bug. Bail!
   }
 
-  /**
-   * Build a caller qualified name for a callee.
-   *
-   * For example, if A() is caller for B(), then it returns "A==>B".
-   * Recursive invokations are denoted with @<n> where n is the recursion
-   * depth.
-   *
-   * For example, "foo==>foo@1", and "foo@2==>foo@3" are examples of direct
-   * recursion. And  "bar==>foo@1" is an example of an indirect recursive
-   * call to foo (implying the foo() is on the call stack some levels
-   * above).
-   */
-  size_t getStack(int level, char *result_buf, size_t result_len) {
-    // End recursion if we dont need deeper levels or
-    // we dont have any deeper levels
-    if (!m_parent || level <= 1) {
-      return getName(result_buf, result_len);
-    }
-
-    // Take care of all ancestors first
-    size_t len = m_parent->getStack(level - 1, result_buf, result_len);
-    if (result_len < (len + HP_STACK_DELIM_LEN)) {
-      return len; // Insufficient result_buf. Bail out!
-    }
-
-    // Add delimiter only if entry had ancestors
-    if (len) {
-      strncat(result_buf + len, HP_STACK_DELIM, result_len - len);
-      len += HP_STACK_DELIM_LEN;
-    }
-
-    // Append the current function name
-    return len + getName(result_buf + len, result_len - len);
+  // Add '@recurse_level' if required
+  // NOTE: Dont use snprintf's return val as it is compiler dependent
+  if (m_recursion) {
+    snprintf(result_buf, result_len, "%s@%d", m_name, m_recursion);
+  } else {
+    snprintf(result_buf, result_len, "%s", m_name);
   }
-};
 
-enum Flag {
-  TrackBuiltins         = 0x1,
-  TrackCPU              = 0x2,
-  TrackMemory           = 0x4,
-  TrackVtsc             = 0x8,
-  XhpTrace              = 0x10,
-  MeasureXhprofDisable  = 0x20,
-  Unused                = 0x40,
-  TrackMalloc           = 0x80,
-};
+  // Force null-termination at MAX
+  result_buf[result_len - 1] = 0;
+  return strlen(result_buf);
+}
+
+size_t Frame::getStack(int level, char *result_buf, size_t result_len) {
+  // End recursion if we dont need deeper levels or
+  // we dont have any deeper levels
+  if (!m_parent || level <= 1) {
+    return getName(result_buf, result_len);
+  }
+
+  // Take care of all ancestors first
+  size_t len = m_parent->getStack(level - 1, result_buf, result_len);
+  if (result_len < (len + HP_STACK_DELIM_LEN)) {
+    return len; // Insufficient result_buf. Bail out!
+  }
+
+  // Add delimiter only if entry had ancestors
+  if (len) {
+    strncat(result_buf + len, HP_STACK_DELIM, result_len - len);
+    len += HP_STACK_DELIM_LEN;
+  }
+
+  // Append the current function name
+  return len + getName(result_buf + len, result_len - len);
+}
 
 const StaticString
   s_ct("ct"),
@@ -522,25 +349,33 @@ const StaticString
 /**
  * Maintain profiles of a running stack.
  */
-class Profiler {
-public:
-  Profiler() : m_successful(true), m_stack(nullptr),
-               m_frame_free_list(nullptr) {
+Profiler::Profiler(bool needCPUAffinity) : m_successful(true),
+                                           m_stack(nullptr),
+                                           m_frame_free_list(nullptr) {
     if (!s_rand_initialized) {
       s_rand_initialized = true;
       srand(math_generate_seed());
     }
 
-    // bind to a random cpu so that we can use rdtsc instruction.
-    int cur_cpu_id = rand() % s_machine.m_cpu_num;
-    GET_AFFINITY(0, sizeof(cpu_set_t), &m_prev_mask);
-    MachineInfo::BindToCPU(cur_cpu_id);
-    m_MHz = s_machine.m_cpu_frequencies[cur_cpu_id];
+    if (needCPUAffinity) {
+      //
+      // Bind to a random cpu so that we can use rdtsc instruction.
+      //
+      int cur_cpu_id = rand() % s_machine.m_cpu_num;
+      GET_AFFINITY(0, sizeof(cpu_set_t), &m_prev_mask);
+      MachineInfo::BindToCPU(cur_cpu_id);
+      m_MHz = s_machine.m_cpu_frequencies[cur_cpu_id];
+    } else {
+      //
+      // Take cpu0's speed as a proxy for all cpus.
+      //
+      m_MHz = s_machine.m_cpu_frequencies[0];
+    }
 
     memset(m_func_hash_counters, 0, sizeof(m_func_hash_counters));
-  }
+}
 
-  virtual ~Profiler() {
+Profiler::~Profiler() {
     SET_AFFINITY(0, sizeof(cpu_set_t), &m_prev_mask);
 
     endAllFrames();
@@ -549,40 +384,35 @@ public:
       p = p->m_parent;
       free(cur);
     }
-  }
+}
 
-  /**
-   * Subclass can do extra work by overriding these two virtual functions.
-   */
-  virtual void beginFrameEx() {} // called right before a function call
-  virtual void endFrameEx() {}   // called right after a function is finished
+/*
+ * Called right before a function call.
+ */
+void Profiler::beginFrameEx(const char *symbol) {
+}
 
-  /**
-   * Final results.
-   */
-  virtual void writeStats(Array &ret) {}
+/*
+ * Called right after a function is finished.
+ */
+void Profiler::endFrameEx(const TypedValue *retval,
+                          const char *_symbol) {
+}
 
-  /**
-   * Start a new frame with the specified symbol.
-   */
-  virtual void beginFrame(const char *symbol) __attribute__ ((noinline)) ;
+void Profiler::writeStats(Array &ret) {
+}
 
-  /**
-   * End top of the stack.
-   */
-  virtual void endFrame(bool endMain = false) __attribute__ ((noinline)) ;
-
-  virtual void endAllFrames() {
+void Profiler::endAllFrames() {
     while (m_stack) {
-      endFrame(true);
+      endFrame(nullptr, nullptr, true);
     }
-  }
+}
 
-  template<class phpret, class Name, class Counts>
-  static void returnVals(phpret& ret, const Name& name, const Counts& counts,
-                  int flags, int64_t MHz)
-  {
-    ArrayInit arr(5);
+template<class phpret, class Name, class Counts>
+void Profiler::returnVals(phpret& ret, const Name& name, const Counts& counts,
+                          int flags, int64_t MHz)
+{
+    ArrayInit arr(5, ArrayInit::Map{});
     arr.set(s_ct,  counts.count);
     arr.set(s_wt,  to_usec(counts.wall_time, MHz));
     if (flags & TrackCPU) {
@@ -595,61 +425,20 @@ public:
       arr.set(s_alloc, counts.memory);
       arr.set(s_free, counts.peak_memory);
     }
-    ret.set(String(name), arr.create());
-  }
+    ret.set(String(name), arr.toArray());
+}
 
-  template<class phpret, class StatsMap>
-  static bool extractStats(phpret& ret, StatsMap& stats, int flags, int64_t MHz)
-  {
+template<class phpret, class StatsMap>
+bool Profiler::extractStats(phpret& ret, StatsMap& stats, int flags,
+                            int64_t MHz)
+{
     for (typename StatsMap::const_iterator iter = stats.begin();
          iter != stats.end(); ++iter) {
       returnVals(ret, iter->first, iter->second, flags, MHz);
     }
     return true;
-  }
+}
 
-  bool m_successful;
-
-  int64_t    m_MHz; // cpu freq for either the local cpu or the saved trace
-  Frame    *m_stack;      // top of the profile stack
-
-  static bool s_rand_initialized;
-
-  cpu_set_t m_prev_mask;               // saved cpu affinity
-  Frame    *m_frame_free_list;         // freelist of Frame
-  uint8_t     m_func_hash_counters[256]; // counter table by hash code;
-
-  /**
-   * Fast allocate a Frame structure. Picks one from the
-   * free list if available, else does an actual allocate.
-   */
-  Frame *createFrame(const char *symbol) {
-    Frame *p = m_frame_free_list;
-    if (p) {
-      m_frame_free_list = p->m_parent;
-    } else {
-      p = (Frame*)malloc(sizeof(Frame));
-    }
-    p->m_parent = m_stack;
-    p->m_name = symbol;
-    p->m_hash_code = hprof_inline_hash(symbol);
-    m_stack = p;
-    return p;
-  }
-
-  /**
-   * Fast free a Frame structure. Simply returns back the Frame to a free list
-   * and doesn't actually perform the free.
-   */
-  void releaseFrame() {
-    assert(m_stack);
-
-    Frame *p = m_stack;
-    m_stack = p->m_parent;
-    p->m_parent = m_frame_free_list; // we overload the m_parent field here
-    m_frame_free_list = p;
-  }
-};
 bool Profiler::s_rand_initialized = false;
 
 void Profiler::beginFrame(const char *symbol) {
@@ -669,114 +458,25 @@ void Profiler::beginFrame(const char *symbol) {
   current->m_recursion = recursion_level;
 
   m_func_hash_counters[current->m_hash_code]++;
-  beginFrameEx();
+  beginFrameEx(symbol);
 }
 
 /**
  * End top of the stack.
  */
-void Profiler::endFrame(bool endMain) {
+void Profiler::endFrame(const TypedValue *retval,
+                        const char *symbol,
+                        bool endMain) {
   if (m_stack) {
     // special case for main() frame that's only ended by endAllFrames()
     if (!endMain && m_stack->m_parent == nullptr) {
       return;
     }
-    endFrameEx();
+    endFrameEx(retval, symbol);
     m_func_hash_counters[m_stack->m_hash_code]--;
     releaseFrame();
   }
 }
-
-///////////////////////////////////////////////////////////////////////////////
-// SimpleProfiler
-
-/**
- * vtsc() based profiler, but simple enough to print basic information.
- *
- * When available, we now use the vtsc() call, which is relatively inexpensive
- * and accurate.  It's still a system call, but a cheap one.  If the call isn't
- * available, the comment below still applies.  --renglish
- *
- * COMMENT(cjiang): getrusage is very expensive and inaccurate. It is based
- * on sampling at the rate about once every 5 to 10 miliseconds. The sampling
- * error can be very significantly, especially given that we are
- * instrumenting at a very fine granularity. (every PHP function call will
- * lead to one invokation of getrusage.) Most PHP functions such as the
- * built-ins typically finish in microseconds. Thus the result we get from
- * getrusage is very likely going to be skewed. Also worth noting that
- * getrusage actually is a system call, which involves expensive swapping
- * between user-mode and kernel mode. I would suggest we remove collecting
- * CPU usage all together, as exclusive wall-time is very useful already.
- * Or at least we should make it an opt-in choice.
- *
- * See: http://ww2.cs.fsu.edu/~hines/present/timing_linux.pdf
- *
- * Above is a nice paper talking about the overhead and the inaccuracy problem
- * associated with getrusage.
- */
-class SimpleProfiler : public Profiler {
-private:
-  class CountMap {
-  public:
-    CountMap() : count(0), tsc(0), vtsc(0) {}
-
-    int64_t count;
-    int64_t tsc;
-    int64_t vtsc;
-  };
-  typedef hphp_hash_map<std::string, CountMap, string_hash> StatsMap;
-  StatsMap m_stats; // outcome
-
-public:
-  SimpleProfiler() {
-    echo("<div style='display:none'>");
-  }
-
-  ~SimpleProfiler() {
-    echo("</div>");
-    print_output();
-  }
-
-  virtual void beginFrameEx() {
-    m_stack->m_tsc_start = cpuCycles();
-    m_stack->m_vtsc_start = vtsc(m_MHz);
-  }
-
-  virtual void endFrameEx() {
-    CountMap &counts = m_stats[m_stack->m_name];
-    counts.count++;
-    counts.tsc += cpuCycles() - m_stack->m_tsc_start;
-    counts.vtsc += vtsc(m_MHz) - m_stack->m_vtsc_start;
-  }
-
-private:
-  void print_output() {
-    echo("<link rel='stylesheet' href='/css/hotprofiler.css' type='text/css'>"
-          "<script language='javascript' src='/js/hotprofiler.js'></script>"
-          "<p><center><h2>Hotprofiler Data</h2></center><br>"
-          "<div id='hotprofiler_stats'></div>"
-          "<script language='javascript'>hotprofiler_data = [");
-    for (StatsMap::const_iterator iter = m_stats.begin();
-         iter != m_stats.end(); ++iter) {
-      echo("{\"fn\": \"");
-      echo(iter->first.c_str());
-      echo("\"");
-
-      const CountMap &counts = iter->second;
-
-      char buf[512];
-      snprintf(
-        buf, sizeof(buf),
-        ",\"ct\": %" PRId64 ",\"wt\": %" PRId64 ",\"ut\": %" PRId64 ",\"st\": 0",
-        counts.count, (int64_t)to_usec(counts.tsc, m_MHz),
-        (int64_t)to_usec(counts.vtsc, m_MHz, true));
-      echo(buf);
-
-      echo("},\n");
-    }
-    echo("]; write_data('ut', false);</script><br><br>&nbsp;<br>");
-  }
-};
 
 ///////////////////////////////////////////////////////////////////////////////
 // HierarchicalProfiler
@@ -797,21 +497,18 @@ private:
   StatsMap m_stats; // outcome
 
 public:
-
-public:
-  explicit HierarchicalProfiler(int flags) : m_flags(flags) {
+  explicit HierarchicalProfiler(int flags) : Profiler(true), m_flags(flags) {
   }
 
-  virtual void beginFrameEx() {
+  virtual void beginFrameEx(const char *symbol) override {
     m_stack->m_tsc_start = cpuCycles();
 
     if (m_flags & TrackCPU) {
-      m_stack->m_vtsc_start = vtsc(m_MHz);
+      m_stack->m_vtsc_start = cpuTime(m_MHz);
     }
 
     if (m_flags & TrackMemory) {
-      MemoryManager *mm = MemoryManager::TheMemoryManager();
-      const MemoryUsageStats &stats = mm->getStats(true);
+      auto const& stats = MM().getStats();
       m_stack->m_mu_start  = stats.usage;
       m_stack->m_pmu_start = stats.peakUsage;
     } else if (m_flags & TrackMalloc) {
@@ -820,7 +517,8 @@ public:
     }
   }
 
-  virtual void endFrameEx() {
+  virtual void endFrameEx(const TypedValue *retval,
+                          const char *given_symbol) override {
     char symbol[512];
     m_stack->getStack(2, symbol, sizeof(symbol));
     CountMap &counts = m_stats[symbol];
@@ -828,12 +526,11 @@ public:
     counts.wall_time += cpuCycles() - m_stack->m_tsc_start;
 
     if (m_flags & TrackCPU) {
-      counts.cpu += vtsc(m_MHz) - m_stack->m_vtsc_start;
+      counts.cpu += cpuTime(m_MHz) - m_stack->m_vtsc_start;
     }
 
     if (m_flags & TrackMemory) {
-      MemoryManager *mm = MemoryManager::TheMemoryManager();
-      const MemoryUsageStats &stats = mm->getStats(true);
+      auto const& stats = MM().getStats();
       int64_t mu_end = stats.usage;
       int64_t pmu_end = stats.peakUsage;
       counts.memory += mu_end - m_stack->m_mu_start;
@@ -844,8 +541,12 @@ public:
     }
   }
 
-  virtual void writeStats(Array &ret) {
+  virtual void writeStats(Array &ret) override {
     extractStats(ret, m_stats, m_flags, m_MHz);
+  }
+
+  virtual bool shouldSkipBuiltins() const override {
+    return m_flags & NoTrackBuiltins;
   }
 
 private:
@@ -866,14 +567,19 @@ class TraceWalker {
     int len; // Length of the function name
   };
 
-  TraceWalker() : m_arcBuffLen(200), m_arcBuff((char*)malloc(200)) {};
+  TraceWalker()
+    : m_arcBuffLen(200)
+    , m_arcBuff((char*)malloc(200))
+    , m_badArcCount(0)
+  {};
 
   ~TraceWalker() {
     free(m_arcBuff);
-    for (auto& r : m_recursion) delete r.first;
+    for (auto& r : m_recursion) delete[] r.first;
   }
 
-  void walk(TraceIterator begin, TraceIterator end, Stats& stats) {
+  void walk(TraceIterator begin, TraceIterator end, TraceIterator final,
+            Stats& stats) {
     if (begin == end) return;
     m_recursion.push_back(std::make_pair(nullptr, 0));
     // Trim exit traces off the front of the log. These may be due to
@@ -882,7 +588,7 @@ class TraceWalker {
     auto current = begin;
     while (current != end && !current->symbol) ++current;
     while (current != end) {
-      if (current->symbol) {
+      if (!current->is_func_exit) {
         unsigned level = ++functionLevel[current->symbol];
         if (level >= m_recursion.size()) {
           char *level_string = new char[8];
@@ -897,17 +603,27 @@ class TraceWalker {
         checkArcBuff(fr.len);
         m_stack.push_back(fr);
       } else if (m_stack.size() > 1) {
+        validateStack(current, stats); // NB: may update m_stack.
         --functionLevel[m_stack.back().trace->symbol];
         popFrame(current, stats);
       }
       ++current;
     }
+    // Close the dangling stack with the last entry. This
+    // under-represents any functions still on the stack.
     --current;
     while (m_stack.size() > 1) {
       popFrame(current, stats);
     }
+    // Close main() with the final data from when profiling was turned
+    // off. This ensures main() represents the entire run, even if we
+    // run out of log space.
     if (!m_stack.empty()) {
-      incStats(m_stack.back().trace->symbol, current, m_stack.back(), stats);
+      assert(strcmp(m_stack.back().trace->symbol, "main()") == 0);
+      incStats(m_stack.back().trace->symbol, final, m_stack.back(), stats);
+    }
+    if (m_badArcCount > 0) {
+      stats["(trace has mismatched calls and returns)"].count = m_badArcCount;
     }
   }
 
@@ -931,6 +647,53 @@ class TraceWalker {
     st.cpu += tr->cpu - fr.trace->cpu;
     st.memory += tr->memory - fr.trace->memory;
     st.peak_memory += tr->peak_memory - fr.trace->peak_memory;
+  }
+
+  // Look for mismatched enter and exit events, and try to correct if
+  // we can. Only try to correct very simple imbalances... we could go
+  // nuts here, but it's likely not worth it.
+  void validateStack(TraceIterator tIt, Stats& stats) {
+    auto enteredName = m_stack.back().trace->symbol;
+    auto exitedName = tIt->symbol;
+    if ((exitedName != nullptr) &&
+        ((enteredName == nullptr) || (strcmp(enteredName, exitedName) != 0))) {
+      // We have a few special names that we form on entry. We don't
+      // have the information to form them again on exit, so tolerate
+      // them here. See EventHook::GetFunctionNameForProfiler().
+      if ((enteredName != nullptr) &&
+          ((strncmp(enteredName, "run_init::", 10) == 0) ||
+           (strcmp(enteredName, "_") == 0))) return;
+      bool fixed = false;
+      if (m_stack.size() > 1) {
+        auto callerName = (m_stack.end() - 2)->trace->symbol;
+        if ((callerName != nullptr) && (strcmp(callerName, exitedName) == 0)) {
+          // We have an exit for Foo(), but we were in Bar(). However,
+          // it appears that Foo() was the caller of Bar(). This
+          // suggests we've missed the exit event for Bar() and have
+          // the exit event for Foo() in hand. So remove Bar() to
+          // re-balance the stack.
+          m_stack.pop_back();
+          fixed = true;
+        }
+      }
+      // The first few bad arcs typically point at the problem, so
+      // report them. The rest we'll just count.
+      if (++m_badArcCount < 20) {
+        std::string badArc;
+        if (fixed) {
+          badArc = folly::format("(warning: corrected bad arc #{}: "
+                                 "enter '{}', exit '{}')",
+                                 m_badArcCount,
+                                 enteredName, exitedName).str();
+        } else {
+          badArc = folly::format("(error: bad arc #{}: "
+                                 "enter '{}', exit '{}')",
+                                 m_badArcCount,
+                                 enteredName, exitedName).str();
+        }
+        ++stats[badArc.data()].count;
+      }
+    }
   }
 
   void popFrame(TraceIterator tIt, Stats& stats) {
@@ -962,6 +725,7 @@ class TraceWalker {
   vector<Frame> m_stack;
   int m_arcBuffLen;
   char *m_arcBuff;
+  int m_badArcCount;
 };
 
 // Profiler which makes a log of all function enter and exit events,
@@ -971,7 +735,8 @@ class TraceWalker {
 class TraceProfiler : public Profiler {
  public:
   explicit TraceProfiler(int flags)
-    : m_traceBuffer(nullptr)
+    : Profiler(true)
+    , m_traceBuffer(nullptr)
     , m_traceBufferSize(0)
     , m_nextTraceEntry(0)
     , m_traceBufferFilled(false)
@@ -979,15 +744,17 @@ class TraceProfiler : public Profiler {
     , m_overflowCalls(0)
     , m_flags(flags)
   {
-    if (pthread_mutex_trylock(&s_inUse)) {
+    if (!(m_flags & IHaveInfiniteMemory) && pthread_mutex_trylock(&s_inUse)) {
       // This profiler uses a very large amount of memory. Only allow
       // one in the process at any time.
       m_successful = false;
     } else {
-      char buf[20];
-      sprintf(buf, "%d", RuntimeOption::ProfilerMaxTraceBuffer);
-      IniSetting::Bind("profiler.max_trace_buffer", buf,
-                       ini_on_update_long, &m_maxTraceBuffer);
+      m_maxTraceBuffer = RuntimeOption::ProfilerMaxTraceBuffer;
+      Extension* ext = Extension::GetExtension(s_hotprofiler);
+      assert(ext);
+      IniSetting::Bind(ext, IniSetting::PHP_INI_ALL,
+                       "profiler.max_trace_buffer",
+                       &m_maxTraceBuffer);
     }
   }
 
@@ -1004,17 +771,28 @@ class TraceProfiler : public Profiler {
   struct TraceData {
     int64_t wall_time;
     int64_t cpu;
-    int64_t memory; // Total memory, or memory allocated, depending on flags
-    int64_t peak_memory; // Peak memory, or memory freed, depending on flags
+
+    // It's not plausible that we need a full 64bits to hold memory
+    // stats, no matter what the collection mode. So we steal one bit
+    // from the memory field to use as a flag. We want to keep this
+    // data structure small since we need a huge number of them during
+    // a profiled run.
+    int64_t memory : 63; // Total memory, or memory allocated depending on flags
+    bool is_func_exit : 1; // Is the entry for a function exit?
+    int64_t peak_memory : 63; // Peak memory, or memory freed depending on flags
+    uint64_t unused : 1; // Unused, to keep memory and peak_memory the same size
 
     void clear() {
       wall_time = cpu = memory = peak_memory = 0;
+    }
+    static void compileTimeAssertions() {
+      static_assert(sizeof(TraceData) == (sizeof(uint64_t) * 4), "");
     }
   };
 
   // One entry in the log, representing a function enter or exit event
   struct TraceEntry : TraceData {
-    const char *symbol; // Function name, only for function entry events
+    const char *symbol; // Function name
   };
 
   bool isTraceSpaceAvailable() {
@@ -1023,7 +801,7 @@ class TraceProfiler : public Profiler {
   }
 
   bool ensureTraceSpace() {
-    bool track_realloc = FALSE;
+    bool track_realloc = false;
     if (m_traceBufferFilled) {
       m_overflowCalls++;
       return false;
@@ -1043,22 +821,26 @@ class TraceProfiler : public Profiler {
         // adding, two realloc entries, and two entries to mark the end of
         // the trace.
         m_traceBufferFilled = true;
-        collectStats("(trace buffer terminated)",
+        collectStats("(trace buffer terminated)", false,
                      m_traceBuffer[m_nextTraceEntry++]);
         return false;
       }
-      track_realloc = TRUE;
+      track_realloc = true;
+    }
+    if (track_realloc) {
+      collectStats("(trace buffer realloc)", false,
+                   m_traceBuffer[m_nextTraceEntry++]);
     }
     {
       DECLARE_THREAD_INFO
-      MemoryManager::MaskAlloc masker(info->m_mm);
+      MemoryManager::MaskAlloc masker(*info->m_mm);
       TraceEntry *r = (TraceEntry*)realloc((void *)m_traceBuffer,
                                            new_array_size * sizeof(TraceEntry));
 
       if (!r) {
         m_traceBufferFilled = true;
         if (m_traceBuffer) {
-          collectStats("(trace buffer terminated)",
+          collectStats("(trace buffer terminated)", false,
                        m_traceBuffer[m_nextTraceEntry++]);
         }
         return false;
@@ -1067,29 +849,32 @@ class TraceProfiler : public Profiler {
       m_traceBuffer = r;
     }
     if (track_realloc) {
-      collectStats("(trace buffer realloc)", m_traceBuffer[m_nextTraceEntry++]);
-      collectStats(nullptr, m_traceBuffer[m_nextTraceEntry++]);
+      collectStats("(trace buffer realloc)", true,
+                   m_traceBuffer[m_nextTraceEntry++]);
     }
     return true;
   }
 
-  virtual void beginFrame(const char *symbol) {
-    doTrace(symbol);
+  virtual void beginFrame(const char *symbol) override {
+    doTrace(symbol, false);
   }
 
-  virtual void endFrame(bool endMain = false) {
-    doTrace(nullptr);
+  virtual void endFrame(const TypedValue *retval,
+                        const char *symbol,
+                        bool endMain = false) override {
+    doTrace(symbol, true);
   }
 
-  virtual void endAllFrames() {
+  virtual void endAllFrames() override {
     if (m_traceBuffer && m_nextTraceEntry < m_traceBufferSize - 1) {
-      collectStats(nullptr, m_traceBuffer[m_nextTraceEntry++]);
+      collectStats(nullptr, true, m_finalEntry);
       m_traceBufferFilled = true;
     }
   }
 
-  void collectStats(const char *symbol, TraceEntry& te) {
+  void collectStats(const char *symbol, bool isFuncExit, TraceEntry& te) {
     te.symbol = symbol;
+    te.is_func_exit = isFuncExit;
     collectStats(te);
   }
 
@@ -1097,11 +882,10 @@ class TraceProfiler : public Profiler {
     te.wall_time = cpuCycles();
     te.cpu = 0;
     if (m_flags & TrackCPU) {
-      te.cpu = vtsc(m_MHz);
+      te.cpu = cpuTime(m_MHz);
     }
     if (m_flags & TrackMemory) {
-      MemoryManager *mm = MemoryManager::TheMemoryManager();
-      const MemoryUsageStats &stats = mm->getStats(true);
+      auto const& stats = MM().getStats();
       te.memory = stats.usage;
       te.peak_memory = stats.peakUsage;
     } else if (m_flags & TrackMalloc) {
@@ -1120,23 +904,25 @@ class TraceProfiler : public Profiler {
     return &m_traceBuffer[m_nextTraceEntry++];
   }
 
-  void doTrace(const char *symbol) {
+  void doTrace(const char *symbol, bool isFuncExit) {
     TraceEntry *te = nextTraceEntry();
     if (te != nullptr) {
-      collectStats(symbol, *te);
+      collectStats(symbol, isFuncExit, *te);
     }
   }
 
   template<class TraceIterator, class Stats>
-  void walkTrace(TraceIterator begin, TraceIterator end, Stats& stats) {
+  void walkTrace(TraceIterator begin, TraceIterator end, TraceIterator final,
+                 Stats& stats) {
     TraceWalker<TraceIterator, Stats> walker;
-    walker.walk(begin, end, stats);
+    walker.walk(begin, end, final, stats);
   }
 
-  virtual void writeStats(Array &ret) {
+  virtual void writeStats(Array &ret) override {
     TraceData my_begin;
     collectStats(my_begin);
-    walkTrace(m_traceBuffer, m_traceBuffer + m_nextTraceEntry, m_stats);
+    walkTrace(m_traceBuffer, m_traceBuffer + m_nextTraceEntry, &m_finalEntry,
+              m_stats);
     if (m_overflowCalls) {
       m_stats["(trace buffer terminated)"].count += m_overflowCalls/2;
     }
@@ -1158,7 +944,12 @@ class TraceProfiler : public Profiler {
     }
   }
 
+  virtual bool shouldSkipBuiltins() const override {
+    return m_flags & NoTrackBuiltins;
+  }
+
   TraceEntry* m_traceBuffer;
+  TraceEntry m_finalEntry;
   int m_traceBufferSize;
   int m_nextTraceEntry;
   bool m_traceBufferFilled;
@@ -1189,12 +980,12 @@ pthread_mutex_t TraceProfiler::s_inUse = PTHREAD_MUTEX_INITIALIZER;
  */
 class SampleProfiler : public Profiler {
 private:
-  typedef hphp_hash_map<std::string, int64_t, string_hash> CountMap;
-  typedef hphp_hash_map<std::string, CountMap, string_hash> StatsMap;
-  StatsMap m_stats; // outcome
+  typedef std::pair<int64_t, int64_t> Timestamp;
+  typedef smart::vector<std::pair<Timestamp, std::string>> SampleVec;
+  SampleVec m_samples; // outcome
 
 public:
-  SampleProfiler() {
+  SampleProfiler() : Profiler(true) {
     struct timeval  now;
     uint64_t truncated_us;
     uint64_t truncated_tsc;
@@ -1219,24 +1010,23 @@ public:
     m_sampling_interval_tsc = SAMPLING_INTERVAL * m_MHz;
   }
 
-  virtual void beginFrameEx() {
+  virtual void beginFrameEx(const char *symbol) override {
     sample_check();
   }
 
-  virtual void endFrameEx() {
+  virtual void endFrameEx(const TypedValue *retvalue,
+                          const char *symbol) override {
     sample_check();
   }
 
-  virtual void writeStats(Array &ret) {
-    for (StatsMap::const_iterator iter = m_stats.begin();
-         iter != m_stats.end(); ++iter) {
-      Array arr;
-      const CountMap &counts = iter->second;
-      for (CountMap::const_iterator iterCount = counts.begin();
-           iterCount != counts.end(); ++iterCount) {
-        arr.set(String(iterCount->first), iterCount->second);
-      }
-      ret.set(String(iter->first), arr);
+  virtual void writeStats(Array &ret) override {
+    for (auto const& sample : m_samples) {
+      auto const& time = sample.first;
+      char timestr[512];
+      snprintf(timestr, sizeof(timestr), "%" PRId64 ".%06" PRId64,
+               time.first, time.second);
+
+      ret.set(String(timestr), String(sample.second));
     }
   }
 
@@ -1256,14 +1046,12 @@ private:
    * @author veeve
    */
   void sample_stack() {
-    char key[512];
-    snprintf(key, sizeof(key), "%" PRId64 ".%06" PRId64,
-             (int64_t)m_last_sample_time.tv_sec,
-             (int64_t)m_last_sample_time.tv_usec);
-
     char symbol[5120];
     m_stack->getStack(INT_MAX, symbol, sizeof(symbol));
-    m_stats[key][symbol] = 1;
+
+    auto time = std::make_pair((int64_t)m_last_sample_time.tv_sec,
+                               (int64_t)m_last_sample_time.tv_usec);
+    m_samples.push_back(std::make_pair(time, symbol));
   }
 
   /**
@@ -1291,153 +1079,340 @@ private:
 };
 
 ///////////////////////////////////////////////////////////////////////////////
+// Memoization Opportunity Profiler
+//
+// Identifies potential memoization opportunities by comparing the
+// serialized form of function return values. Functions which return
+// the same data every time, but not the same instance, are
+// candidates.
+//
+// For member functions, the args are serialized and kept along with
+// the 'this' pointer, and used to look for constant returns given the
+// same args.
+//
+// This profiler is very, very slow. It tries to be faster by giving
+// up on functions quickly, and making a quick test to ignore them
+// later. It also ignores functions which return "small"
+// things. Nevertheless, you likely need to adjust
+// Server.RequestTimeoutSeconds to get a full request processed.
+//
+// Future options:
+// - Collect the data cross-request to find APC opportunities.
+// - Auto-identify keys to functions which could be used to place things in APC
+//   - i.e., same per-request, but not cross-request unless, say, locale is
+//     considered.
+//
+// @TODO: this is quite ghetto right now, but is useful as is to
+// others. In particular, it should provide the results via the return
+// value from writeStats, not print to stderr :) Task 3396401 tracks this.
 
-class ProfilerFactory : public RequestEventHandler {
-public:
-  enum Level {
-    Simple       = 1,
-    Hierarchical = 2,
-    Memory       = 3,
-    Trace        = 4,
-    Sample       = 620002, // Rockfort's zip code
-  };
+class MemoProfiler : public Profiler {
+ public:
+  explicit MemoProfiler(int flags) : Profiler(true) {}
 
-  static bool EnableNetworkProfiler;
-
-public:
-  ProfilerFactory() : m_profiler(nullptr) {
+  ~MemoProfiler() {
   }
 
-  ~ProfilerFactory() {
-    stop();
+ private:
+  virtual void beginFrame(const char *symbol) override {
+    VMRegAnchor _;
+    ActRec *ar = vmfp();
+    Frame f(symbol);
+    if (ar->hasThis()) {
+      auto& memo = m_memos[symbol];
+      if (!memo.m_ignore) {
+        auto args = hhvm_get_frame_args(ar, 0);
+        args.append((int64_t)(ar->getThis())); // Use the pointer not the obj
+        VariableSerializer vs(VariableSerializer::Type::DebuggerSerialize);
+        String sdata;
+        try {
+          sdata = vs.serialize(args, true);
+          f.m_args = sdata;
+        } catch (...) {
+          fprintf(stderr, "Args Serialization failure: %s\n", symbol);
+        }
+      }
+    }
+    m_stack.push_back(f);
   }
 
-  Profiler *getProfiler() {
-    return m_profiler;
-  }
-
-  virtual void requestInit() {
-  }
-
-  virtual void requestShutdown() {
-    stop();
-    m_artificialFrameNames.reset();
-  }
-
-  void start(Level level, long flags) {
-    if (!RuntimeOption::EnableHotProfiler) {
+  virtual void endFrame(const TypedValue *retval,
+                        const char *symbol,
+                        bool endMain = false) override {
+    if (m_stack.empty()) {
+      fprintf(stderr, "STACK IMBALANCE empty %s\n", symbol);
       return;
     }
+    auto f = m_stack.back();
+    m_stack.pop_back();
+    if (strcmp(f.m_symbol, symbol) != 0) {
+      fprintf(stderr, "STACK IMBALANCE %s\n", symbol);
+      return;
+    }
+    auto& memo = m_memos[symbol];
+    if (memo.m_ignore) return;
+    ++memo.m_count;
+    memo.m_ignore = true;
+    VMRegAnchor _;
+    ActRec *ar = vmfp();
+    // Lots of random cases to skip just to keep this simple for
+    // now. There's no reason not to do more later.
+    if (!g_context->m_faults.empty()) return;
+    if (ar->m_func->isCPPBuiltin() || ar->resumed()) return;
+    auto ret_tv = vmStack().topTV();
+    auto ret = tvAsCVarRef(ret_tv);
+    if (ret.isNull()) return;
+    if (!(ret.isString() || ret.isObject() || ret.isArray())) return;
+    VariableSerializer vs(VariableSerializer::Type::DebuggerSerialize);
+    String sdata;
+    try {
+      sdata = vs.serialize(ret, true);
+    } catch (...) {
+      fprintf(stderr, "Serialization failure: %s\n", symbol);
+      return;
+    }
+    if (sdata.length() < 3) return;
+    if (ar->hasThis()) {
+      memo.m_has_this = true;
+      auto& member_memo = memo.m_member_memos[f.m_args.data()];
+      ++member_memo.m_count;
+      if (member_memo.m_return_value.length() == 0) { // First time
+        member_memo.m_return_value = sdata;
+        // Intentionally copy the raw pointer value
+        member_memo.m_ret_tv = *ret_tv;
+        memo.m_ignore = false;
+      } else if (member_memo.m_return_value == sdata) { // Same
+        memo.m_ignore = false;
+        if ((member_memo.m_ret_tv.m_data.num != ret_tv->m_data.num) ||
+            (member_memo.m_ret_tv.m_type != ret_tv->m_type)) {
+          memo.m_ret_tv_same = false;
+        }
+      } else {
+        memo.m_member_memos.clear(); // Cleanup and ignore
+      }
+    } else {
+      if (memo.m_return_value.length() == 0) { // First time
+        memo.m_return_value = sdata;
+        // Intentionally copy the raw pointer value
+        memo.m_ret_tv = *ret_tv;
+        memo.m_ignore = false;
+      } else if (memo.m_return_value == sdata) { // Same
+        memo.m_ignore = false;
+        if ((memo.m_ret_tv.m_data.num != ret_tv->m_data.num) ||
+            (memo.m_ret_tv.m_type != ret_tv->m_type)) {
+          memo.m_ret_tv_same = false;
+        }
+      } else {
+        memo.m_return_value = ""; // Different, cleanup and ignore
+      }
+    }
+  }
+
+  virtual void endAllFrames() override {
+    // Nothing to do for this profiler since all work is done as we go.
+  }
+
+  virtual void writeStats(Array &ret) override {
+    fprintf(stderr, "writeStats start\n");
+    // RetSame: the return value is the same instance every time
+    // HasThis: call has a this argument
+    // AllSame: all returns were the same data even though args are different
+    // MemberCount: number of different arg sets (including this)
+    fprintf(stderr, "Count Function MinSerLen MaxSerLen RetSame HasThis "
+            "AllSame MemberCount\n");
+    for (auto& me : m_memos) {
+      if (me.second.m_ignore) continue;
+      if (me.second.m_count == 1) continue;
+      int min_ser_len = 999999999;
+      int max_ser_len = 0;
+      int count = 0;
+      int member_count = 0;
+      bool all_same = true;
+      if (me.second.m_has_this) {
+        bool any_multiple = false;
+        auto& fr = me.second.m_member_memos.begin()->second.m_return_value;
+        member_count = me.second.m_member_memos.size();
+        for (auto& mme : me.second.m_member_memos) {
+          if (mme.second.m_return_value != fr) all_same = false;
+          count += mme.second.m_count;
+          auto ser_len = mme.second.m_return_value.length();
+          min_ser_len = std::min(min_ser_len, ser_len);
+          max_ser_len = std::max(max_ser_len, ser_len);
+          if (mme.second.m_count > 1) any_multiple = true;
+        }
+        if (!any_multiple && !all_same) continue;
+      } else {
+        min_ser_len = max_ser_len = me.second.m_return_value.length();
+        count = me.second.m_count;
+        all_same = me.second.m_ret_tv_same;
+      }
+      fprintf(stderr, "%d %s %d %d %s %s %s %d\n",
+              count, me.first.data(),
+              min_ser_len, max_ser_len,
+              me.second.m_ret_tv_same ? " true" : "false",
+              me.second.m_has_this ? " true" : "false",
+              all_same ? " true" : "false",
+              member_count
+             );
+    }
+    fprintf(stderr, "writeStats end\n");
+  }
+
+  class MemberMemoInfo {
+   public:
+    MemberMemoInfo()
+        : m_count(0)
+      {}
+
+    String m_return_value;
+    TypedValue m_ret_tv;
+    int m_count;
+  };
+  typedef hphp_hash_map<std::string, MemberMemoInfo, string_hash>
+    MemberMemoMap;
+
+  class MemoInfo {
+   public:
+    MemoInfo()
+        : m_count(0)
+        , m_ignore(false)
+        , m_has_this(false)
+        , m_ret_tv_same(true)
+      {}
+
+    MemberMemoMap m_member_memos; // Keyed by serialized args
+    String m_return_value;
+    TypedValue m_ret_tv;
+    int m_count;
+    bool m_ignore;
+    bool m_has_this;
+    bool m_ret_tv_same;
+  };
+  typedef hphp_hash_map<std::string, MemoInfo, string_hash> MemoMap;
+  MemoMap m_memos; // Keyed by function name
+
+  class Frame {
+   public:
+    explicit Frame(const char* symbol)
+        : m_symbol(symbol)
+      {}
+
+    const char* m_symbol;
+    String m_args;
+  };
+  vector<Frame> m_stack;
+};
+
+///////////////////////////////////////////////////////////////////////////////
+// ProfilerFactory
+
+bool ProfilerFactory::start(ProfilerKind kind,
+                            long flags,
+                            bool beginFrame /* = true */) {
+  if (m_profiler != nullptr) {
+    return false;
+  }
+
+  switch (kind) {
+  case ProfilerKind::Hierarchical:
+    m_profiler = new HierarchicalProfiler(flags);
+    break;
+  case ProfilerKind::Sample:
+    m_profiler = new SampleProfiler();
+    break;
+  case ProfilerKind::Trace:
+    m_profiler = new TraceProfiler(flags);
+    break;
+  case ProfilerKind::Memo:
+    m_profiler = new MemoProfiler(flags);
+    break;
+  case ProfilerKind::XDebug:
+    m_profiler = new XDebugProfiler();
+    break;
+  case ProfilerKind::External:
+    if (m_external_profiler) {
+      m_profiler = m_external_profiler;
+    } else {
+      throw_invalid_argument(
+        "ProfilerFactory::setExternalProfiler() not yet called");
+      return false;
+    }
+    break;
+  default:
+    throw_invalid_argument("level: %d", kind);
+    return false;
+  }
+  if (m_profiler->m_successful) {
     // This will be disabled automatically when the thread completes the request
     HPHP::EventHook::Enable();
-    if (m_profiler == nullptr) {
-      switch (level) {
-      case Simple:
-        m_profiler = new SimpleProfiler();
-        break;
-      case Hierarchical:
-        m_profiler = new HierarchicalProfiler(flags);
-        break;
-      case Sample:
-        m_profiler = new SampleProfiler();
-        break;
-      case Trace:
-        m_profiler = new TraceProfiler(flags);
-        break;
-      default:
-        throw_invalid_argument("level: %d", level);
-        return;
-      }
-      if (m_profiler->m_successful) {
-        m_profiler->beginFrame("main()");
-        ThreadInfo::s_threadInfo->m_profiler = m_profiler;
-      } else {
-        delete m_profiler;
-        m_profiler = nullptr;
-      }
+    ThreadInfo::s_threadInfo->m_profiler = m_profiler;
+    if (beginFrame) {
+      m_profiler->beginFrame("main()");
     }
+    return true;
+  } else {
+    delete m_profiler;
+    m_profiler = nullptr;
+    return false;
   }
+}
 
-  Variant stop() {
-    if (m_profiler) {
-      m_profiler->endAllFrames();
+Variant ProfilerFactory::stop() {
+  if (m_profiler) {
+    m_profiler->endAllFrames();
 
-      Array ret;
-      m_profiler->writeStats(ret);
-      delete m_profiler;
-      m_profiler = nullptr;
-      ThreadInfo::s_threadInfo->m_profiler = nullptr;
+    Array ret;
+    m_profiler->writeStats(ret);
+    delete m_profiler;
+    m_profiler = nullptr;
+    ThreadInfo::s_threadInfo->m_profiler = nullptr;
 
-      return ret;
-    }
-    return uninit_null();
+    return ret;
   }
-
-  /**
-   * The whole purpose to make sure "const char *" is safe to take on these
-   * strings.
-   */
-  void cacheString(CStrRef name) {
-    m_artificialFrameNames.append(name);
-  }
-
-private:
-  Profiler *m_profiler;
-  Array m_artificialFrameNames;
-};
+  return init_null();
+}
 
 bool ProfilerFactory::EnableNetworkProfiler = false;
 
-#ifdef HOTPROFILER
-IMPLEMENT_STATIC_REQUEST_LOCAL(ProfilerFactory, s_factory);
-#endif
+IMPLEMENT_REQUEST_LOCAL(ProfilerFactory, s_profiler_factory);
 
 ///////////////////////////////////////////////////////////////////////////////
 // main functions
 
-void f_hotprofiler_enable(int level) {
-#ifdef HOTPROFILER
+void f_hotprofiler_enable(int ikind) {
+  auto kind = static_cast<ProfilerKind>(ikind);
   long flags = 0;
-  if (level == ProfilerFactory::Hierarchical) {
-    flags = TrackBuiltins;
-  } else if (level == ProfilerFactory::Memory) {
-    level = ProfilerFactory::Hierarchical;
-    flags = TrackBuiltins | TrackMemory;
+  if (kind == ProfilerKind::Hierarchical) {
+    flags = NoTrackBuiltins;
+  } else if (kind == ProfilerKind::Memory) {
+    kind = ProfilerKind::Hierarchical;
+    flags = NoTrackBuiltins | TrackMemory;
   }
-  s_factory->start((ProfilerFactory::Level)level, flags);
-#endif
+  if (RuntimeOption::EnableHotProfiler) {
+    s_profiler_factory->start(kind, flags);
+  }
 }
 
 Variant f_hotprofiler_disable() {
-#ifdef HOTPROFILER
-  return s_factory->stop();
-#else
-  return uninit_null();
-#endif
+  return s_profiler_factory->stop();
 }
 
 void f_phprof_enable(int flags /* = 0 */) {
-#ifdef HOTPROFILER
-  s_factory->start(ProfilerFactory::Hierarchical, flags);
-#endif
+  if (RuntimeOption::EnableHotProfiler) {
+    s_profiler_factory->start(ProfilerKind::Hierarchical, flags);
+  }
 }
 
 Variant f_phprof_disable() {
-#ifdef HOTPROFILER
-  return s_factory->stop();
-#else
-  return uninit_null();
-#endif
+  return s_profiler_factory->stop();
 }
 
-void f_fb_setprofile(CVarRef callback) {
-#ifdef HOTPROFILER
+void f_fb_setprofile(const Variant& callback) {
   if (ThreadInfo::s_threadInfo->m_profiler != nullptr) {
     // phpprof is enabled, don't let PHP code override it
     return;
   }
-#endif
-  g_vmContext->m_setprofileCallback = callback;
+  g_context->m_setprofileCallback = callback;
   if (callback.isNull()) {
     HPHP::EventHook::Disable();
   } else {
@@ -1445,54 +1420,65 @@ void f_fb_setprofile(CVarRef callback) {
   }
 }
 
-void f_xhprof_frame_begin(CStrRef name) {
-#ifdef HOTPROFILER
+void f_xhprof_frame_begin(const String& name) {
   Profiler *prof = ThreadInfo::s_threadInfo->m_profiler;
   if (prof) {
-    s_factory->cacheString(name);
+    s_profiler_factory->cacheString(name);
     prof->beginFrame(name.data());
   }
-#endif
 }
 
 void f_xhprof_frame_end() {
-#ifdef HOTPROFILER
   Profiler *prof = ThreadInfo::s_threadInfo->m_profiler;
   if (prof) {
-    prof->endFrame();
+    prof->endFrame(nullptr, nullptr);
   }
-#endif
 }
 
 void f_xhprof_enable(int flags/* = 0 */,
-                     CArrRef args /* = null_array */) {
-#ifdef HOTPROFILER
+                     const Array& args /* = null_array */) {
+  if (!RuntimeOption::EnableHotProfiler) {
+    raise_warning("The runtime option Stats.EnableHotProfiler must be on to "
+                  "use xhprof.");
+    return;
+  }
 #ifdef CLOCK_THREAD_CPUTIME_ID
   bool missingClockGetTimeNS =
-    Util::Vdso::ClockGetTimeNS(CLOCK_THREAD_CPUTIME_ID) == -1;
+    Vdso::ClockGetTimeNS(CLOCK_THREAD_CPUTIME_ID) == -1;
 #else
   bool missingClockGetTimeNS = true;
 #endif
-  if (vtsc_syscall.num <= 0 && missingClockGetTimeNS) {
+  if (missingClockGetTimeNS) {
+    // Both TrackVtsc and TrackCPU mean "do CPU time profiling".
+    //
+    // TrackVtsc means: require clock_gettime, or else no data.
+    // TrackCPU means: prefer clock_gettime, but fall back to getrusage.
     flags &= ~TrackVtsc;
   }
   if (flags & TrackVtsc) {
     flags |= TrackCPU;
   }
+
   if (flags & XhpTrace) {
-    s_factory->start(ProfilerFactory::Trace, flags);
+    s_profiler_factory->start(ProfilerKind::Trace, flags);
+  } else if (flags & Memo) {
+    flags = 0;  /* flags are not used by MemoProfiler::MemoProfiler */
+    s_profiler_factory->start(ProfilerKind::Memo, flags);
+  } else if (flags & External) {
+    flags = NoTrackBuiltins;
+    for (ArrayIter iter(args); iter; ++iter) {
+      if (iter.first().toInt32() == 0) {
+         flags = iter.second().toInt32();
+      }
+    }
+    s_profiler_factory->start(ProfilerKind::External, flags);
   } else {
-    s_factory->start(ProfilerFactory::Hierarchical, flags);
+    s_profiler_factory->start(ProfilerKind::Hierarchical, flags);
   }
-#endif
 }
 
 Variant f_xhprof_disable() {
-#ifdef HOTPROFILER
-  return s_factory->stop();
-#else
-  return uninit_null();
-#endif
+  return s_profiler_factory->stop();
 }
 
 void f_xhprof_network_enable() {
@@ -1504,38 +1490,41 @@ Variant f_xhprof_network_disable() {
 }
 
 void f_xhprof_sample_enable() {
-#ifdef HOTPROFILER
-  s_factory->start(ProfilerFactory::Sample, 0);
-#endif
+  if (RuntimeOption::EnableHotProfiler) {
+    s_profiler_factory->start(ProfilerKind::Sample, 0);
+  } else {
+    raise_warning("The runtime option Stats.EnableHotProfiler must be on to "
+                  "use xhprof.");
+  }
 }
 
 Variant f_xhprof_sample_disable() {
-#ifdef HOTPROFILER
-  return s_factory->stop();
-#else
-  return uninit_null();
-#endif
+  return s_profiler_factory->stop();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // constants
-const int64_t k_XHPROF_FLAGS_NO_BUILTINS = TrackBuiltins;
+const int64_t k_XHPROF_FLAGS_NO_BUILTINS = NoTrackBuiltins;
 const int64_t k_XHPROF_FLAGS_CPU = TrackCPU;
 const int64_t k_XHPROF_FLAGS_MEMORY = TrackMemory;
 const int64_t k_XHPROF_FLAGS_VTSC = TrackVtsc;
 const int64_t k_XHPROF_FLAGS_TRACE = XhpTrace;
 const int64_t k_XHPROF_FLAGS_MEASURE_XHPROF_DISABLE = MeasureXhprofDisable;
 const int64_t k_XHPROF_FLAGS_MALLOC = TrackMalloc;
+const int64_t k_XHPROF_FLAGS_I_HAVE_INFINITE_MEMORY = IHaveInfiniteMemory;
 
 ///////////////////////////////////////////////////////////////////////////////
 // injected code
 
-void begin_profiler_frame(Profiler *p, const char *symbol) {
+void begin_profiler_frame(Profiler *p,
+                          const char *symbol) {
   p->beginFrame(symbol);
 }
 
-void end_profiler_frame(Profiler *p) {
-  p->endFrame();
+void end_profiler_frame(Profiler *p,
+                        const TypedValue *retval,
+                        const char *symbol) {
+  p->endFrame(retval, symbol);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

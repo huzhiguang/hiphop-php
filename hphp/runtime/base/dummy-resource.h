@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,7 +18,8 @@
 #ifndef incl_HPHP_DUMMY_RESOURCE_H_
 #define incl_HPHP_DUMMY_RESOURCE_H_
 
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/resource-data.h"
+#include "hphp/runtime/base/type-string.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -32,11 +33,11 @@ namespace HPHP {
  */
 class DummyResource : public ResourceData {
 public:
-  DECLARE_RESOURCE_ALLOCATION(DummyResource);
+  DECLARE_RESOURCE_ALLOCATION_NO_SWEEP(DummyResource);
+  CLASSNAME_IS("Unknown");
   DummyResource();
-  static StaticString s_class_name;
   String m_class_name;
-  virtual CStrRef o_getClassNameHook() const;
+  virtual const String& o_getClassNameHook() const;
   virtual bool isInvalid() const { return m_class_name.empty(); }
   void o_setResourceId(int64_t id) { o_id = id; }
 };
@@ -44,4 +45,4 @@ public:
 ///////////////////////////////////////////////////////////////////////////////
 }
 
-#endif // incl_HPHP_PHP_MAILPARSE_MIME_H_
+#endif

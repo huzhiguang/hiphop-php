@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,11 +24,6 @@
 #include "hphp/runtime/base/hphp-system.h"
 #include "hphp/runtime/ext/extension.h"
 #include "hphp/util/compatibility.h"
-#ifdef HHVM_FBMAKE
-#include "hphp/system/constants.h"
-#else
-#include "system/constants.h"
-#endif
 ///////////////////////////////////////////////////////////////////////////////
 
 #endif // incl_HPHP_BASE_INCLUDES_H_

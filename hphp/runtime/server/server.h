@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,12 +17,13 @@
 #ifndef incl_HPHP_HTTP_SERVER_SERVER_H_
 #define incl_HPHP_HTTP_SERVER_SERVER_H_
 
+#include <chrono>
+#include <memory>
+
+#include "hphp/runtime/server/takeover-agent.h"
 #include "hphp/runtime/server/transport.h"
 #include "hphp/util/exception.h"
 #include "hphp/util/lock.h"
-
-#include <chrono>
-#include <memory>
 
 /**
  * (1) For people who want to quickly come up with an HTTP server handling
@@ -38,7 +39,7 @@
  *
  *     Then, run a server like this,
  *
- *       ServerPtr server = make_shared<LibEventServer>("127.0.0.1", 80, 20);
+ *       auto server = std::make_shared<LibEventServer>("127.0.0.1", 80, 20);
  *       server->setRequestHandlerFactory<MyRequestHandler>();
  *       Server::InstallStopSignalHandlers(server);
  *       server->start();
@@ -67,8 +68,10 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-DECLARE_BOOST_TYPES(Server);
-DECLARE_BOOST_TYPES(ServerFactory);
+struct Server;
+struct ServerFactory;
+using ServerPtr = std::unique_ptr<Server>;
+using ServerFactoryPtr = std::shared_ptr<ServerFactory>;
 
 /**
  * Base class of an HTTP request handler. Defining minimal interface an
@@ -83,22 +86,41 @@ public:
   virtual ~RequestHandler() {}
 
   /**
+   * Called before and after request-handling work.
+   */
+  virtual void setupRequest(Transport* transport) {}
+  virtual void teardownRequest(Transport* transport) noexcept {}
+
+  /**
    * Sub-class handles a request by implementing this function.
    */
-  virtual void handleRequest(Transport *transport) = 0;
+  virtual void handleRequest(Transport* transport) = 0;
+
+  /**
+   * Sub-class handles a request by implementing this function. This is called
+   * when the server determines this request should not be processed (e.g., due
+   * to timeout).
+   */
+  virtual void abortRequest(Transport* transport) = 0;
+
+  /**
+   * Convenience wrapper around {setup,handle,teardown}Request().
+   */
+  void run(Transport* transport) {
+    SCOPE_EXIT { teardownRequest(transport); };
+    setupRequest(transport);
+    handleRequest(transport);
+  }
+
+  /**
+   * Write an entry to the handler's access log.
+   */
+  virtual void logToAccessLog(Transport* transport) {}
+
   int getDefaultTimeout() const { return m_timeout; }
+
 private:
   int m_timeout;
-};
-
-/**
- * A callback to be informed when a server is shutting down because its socket
- * has been taken over by a new process.
- */
-class TakeoverListener {
-public:
-  virtual ~TakeoverListener();
-  virtual void takeoverShutdown(Server* server) = 0;
 };
 
 typedef std::function<std::unique_ptr<RequestHandler>()> RequestHandlerFactory;
@@ -129,6 +151,12 @@ public:
   static void InstallStopSignalHandlers(ServerPtr server);
 
 public:
+  class ServerEventListener {
+   public:
+    virtual ~ServerEventListener() {}
+    virtual void serverStopped(Server* server) {}
+  };
+
   /**
    * Constructor.
    */
@@ -163,12 +191,25 @@ public:
   }
 
   /**
+   * Add or remove a ServerEventListener.
+   */
+  void addServerEventListener(ServerEventListener* listener) {
+    m_listeners.push_back(listener);
+  }
+  void removeServerEventListener(ServerEventListener* listener) {
+    auto it = std::find(m_listeners.begin(), m_listeners.end(), listener);
+    if (it != m_listeners.end()) {
+      m_listeners.erase(it);
+    }
+  }
+
+  /**
    * Add or remove a TakeoverListener to this server.
    *
    * This is a no-op for servers that do not support socket takeover.
    */
-  virtual void addTakeoverListener(TakeoverListener* lisener) {}
-  virtual void removeTakeoverListener(TakeoverListener* lisener) {}
+  virtual void addTakeoverListener(TakeoverListener* listener) {}
+  virtual void removeTakeoverListener(TakeoverListener* listener) {}
 
   /**
    * Add additional worker threads
@@ -242,7 +283,7 @@ public:
    * To enable SSL of the current server, it will listen to an additional
    * port as specified in parameter.
    */
-  virtual bool enableSSL(void *sslCTX, int port) = 0;
+  virtual bool enableSSL(int port) = 0;
 
 protected:
   std::string m_address;
@@ -251,6 +292,7 @@ protected:
   mutable Mutex m_mutex;
   RequestHandlerFactory m_handlerFactory;
   URLChecker m_urlChecker;
+  std::list<ServerEventListener*> m_listeners;
 
 private:
   RunStatus m_status;
@@ -266,7 +308,8 @@ public:
       m_numThreads(numThreads),
       m_serverFD(-1),
       m_sslFD(-1),
-      m_takeoverFilename() {
+      m_takeoverFilename(),
+      m_useFileSocket(false) {
   }
 
   std::string m_address;
@@ -275,6 +318,7 @@ public:
   int m_serverFD;
   int m_sslFD;
   std::string m_takeoverFilename;
+  bool m_useFileSocket;
 };
 
 /**
@@ -328,6 +372,9 @@ public:
 
 class FailedToListenException : public ServerException {
 public:
+  explicit FailedToListenException(const std::string &addr)
+    : ServerException("Failed to listen to unix socket at %s", addr.c_str()) {
+  }
   FailedToListenException(const std::string &addr, int port)
     : ServerException("Failed to listen on %s:%d", addr.c_str(), port) {
   }

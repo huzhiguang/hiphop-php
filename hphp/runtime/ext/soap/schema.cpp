@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -14,11 +14,16 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/runtime/ext/soap/sdl.h"
+
+#include <folly/Conv.h>
+
 #include "hphp/runtime/ext/soap/soap.h"
 
 namespace HPHP {
+
+using std::string;
+
 ///////////////////////////////////////////////////////////////////////////////
 
 static bool schema_simpleType
@@ -78,7 +83,7 @@ static void schema_type_fixup(sdlCtx *ctx, sdlTypePtr type);
 
 static encodePtr create_encoder(sdlPtr sdl, sdlTypePtr cur_type,
                                 const xmlChar *ns, const xmlChar *type) {
-  string nscat = (char*)ns;
+  std::string nscat = (char*)ns;
   nscat += ':';
   nscat += (char*)type;
 
@@ -164,7 +169,7 @@ bool checkBaseAttribute(sdlPtr sdl, xmlNodePtr extType, sdlTypePtr cur_type,
                         bool logError = true) {
   xmlAttrPtr base = get_attribute(extType->properties, "base");
   if (base) {
-    string type, ns;
+    std::string type, ns;
     parse_namespace(base->children->content, type, ns);
     xmlNsPtr nsptr = xmlSearchNs(extType->doc, extType, NS_STRING(ns));
     if (nsptr) {
@@ -358,7 +363,7 @@ static bool schema_simpleType(sdlPtr sdl, xmlAttrPtr tns,
     cur_type->encode->details.sdl_type = newType.get();
     cur_type->encode->to_xml = sdl_guess_convert_xml;
     cur_type->encode->to_zval = sdl_guess_convert_zval;
-    sdl->encoders[lexical_cast<string>(sdl->encoders.size())] =
+    sdl->encoders[folly::to<std::string>(sdl->encoders.size())] =
       cur_type->encode;
 
     cur_type = newType;
@@ -421,7 +426,7 @@ static bool schema_list(sdlPtr sdl, xmlAttrPtr tns, xmlNodePtr listType,
                         sdlTypePtr cur_type) {
   xmlAttrPtr itemType = get_attribute(listType->properties, "itemType");
   if (itemType) {
-    string type, ns;
+    std::string type, ns;
     parse_namespace(itemType->children->content, type, ns);
     xmlNsPtr nsptr = xmlSearchNs(listType->doc, listType, NS_STRING(ns));
     if (nsptr) {
@@ -445,7 +450,7 @@ static bool schema_list(sdlPtr sdl, xmlAttrPtr tns, xmlNodePtr listType,
                           "attribute and subtype");
     }
     sdlTypePtr newType(new sdlType());
-    newType->name = "anonymous" + lexical_cast<string>(sdl->types.size());
+    newType->name = "anonymous" + folly::to<string>(sdl->types.size());
     newType->namens = (char*)tns->children->content;
     cur_type->elements.push_back(newType);
 
@@ -510,7 +515,7 @@ static bool schema_union(sdlPtr sdl, xmlAttrPtr tns, xmlNodePtr unionType,
   while (trav) {
     if (node_is_equal(trav,"simpleType")) {
       sdlTypePtr newType(new sdlType());
-      newType->name = "anonymous" + lexical_cast<string>(sdl->types.size());
+      newType->name = "anonymous" + folly::to<string>(sdl->types.size());
       newType->namens = (char*)tns->children->content;
       cur_type->elements.push_back(newType);
       schema_simpleType(sdl, tns, trav, newType);
@@ -1218,7 +1223,7 @@ static bool schema_complexType(sdlPtr sdl, xmlAttrPtr tns, xmlNodePtr compType,
     cur_type->encode->details.sdl_type = newType.get();
     cur_type->encode->to_xml = sdl_guess_convert_xml;
     cur_type->encode->to_zval = sdl_guess_convert_zval;
-    sdl->encoders[lexical_cast<string>(sdl->encoders.size())] =
+    sdl->encoders[folly::to<string>(sdl->encoders.size())] =
       cur_type->encode;
 
     cur_type = newType;
@@ -1631,7 +1636,7 @@ static bool schema_attribute(sdlPtr sdl, xmlAttrPtr tns, xmlNodePtr attrType,
       xmlNsPtr nsPtr = attr_find_ns(attr);
       if (strncmp((char*)nsPtr->href, SCHEMA_NAMESPACE,
                   sizeof(SCHEMA_NAMESPACE))) {
-        sdlExtraAttributePtr ext(new sdlExtraAttribute());
+        auto ext = std::make_shared<sdlExtraAttribute>();
         string value, ns;
         parse_namespace(attr->children->content, value, ns);
         xmlNsPtr nsptr = xmlSearchNs(attr->doc, attr->parent, NS_STRING(ns));
@@ -1689,7 +1694,7 @@ static bool schema_attribute(sdlPtr sdl, xmlAttrPtr tns, xmlNodePtr attrType,
       }
       sdlTypePtr dummy_type(new sdlType());
       dummy_type->name = string("anonymous") +
-        lexical_cast<string>(sdl->types.size());
+        folly::to<string>(sdl->types.size());
       dummy_type->namens = (char*)tns->children->content;
       schema_simpleType(sdl, tns, trav, dummy_type);
       newAttr->encode = dummy_type->encode;
@@ -1746,7 +1751,7 @@ static bool schema_attributeGroup(sdlPtr sdl, xmlAttrPtr tns,
       }
       key += group_name;
       newAttr->ref = key;
-      cur_type->attributes[lexical_cast<string>(cur_type->attributes.size())] =
+      cur_type->attributes[folly::to<string>(cur_type->attributes.size())] =
         newAttr;
       cur_type = sdlTypePtr();
     }
@@ -1801,7 +1806,7 @@ static void copy_extra_attributes(sdlAttributePtr dest, sdlAttributePtr src) {
   for (sdlExtraAttributeMap::const_iterator iter =
          src->extraAttributes.begin(); iter != src->extraAttributes.end();
        ++iter) {
-    sdlExtraAttributePtr eattr(new sdlExtraAttribute());
+    auto eattr = std::make_shared<sdlExtraAttribute>();
     eattr->ns = iter->second->ns;
     eattr->val = iter->second->val;
     dest->extraAttributes[iter->first] = eattr;

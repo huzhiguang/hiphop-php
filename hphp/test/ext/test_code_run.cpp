@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,13 +20,13 @@
 #include "hphp/compiler/code_generator.h"
 #include "hphp/compiler/analysis/analysis_result.h"
 #include "hphp/compiler/analysis/type.h"
-#include "hphp/util/util.h"
 #include "hphp/util/process.h"
+#include "hphp/runtime/base/file-util.h"
 #include "hphp/compiler/option.h"
 #include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/ext/std/ext_std_file.h"
 #include <pcre.h>
-#include "hphp/test/ext/test_mysql_info.h"
-#include "hphp/runtime/ext/ext_file.h"
+#include <folly/Conv.h>
 
 using std::istringstream;
 using std::ostringstream;
@@ -61,7 +61,7 @@ bool TestCodeRun::CleanUp() {
 static bool GenerateMainPHP(const std::string &fullPath,
                             const char *file, int line,
                             const char *input) {
-  Util::mkdir(fullPath.c_str());
+  FileUtil::mkdir(fullPath.c_str());
   std::ofstream f(fullPath.c_str());
   if (!f) {
     printf("Unable to open %s for write. Run this test from hphp/.\n",
@@ -111,7 +111,7 @@ static bool verify_result(const char *input, const char *output, bool perfMode,
   string expected;
   if (output) {
     if (fileoutput) {
-      String s = f_file_get_contents(output);
+      String s = HHVM_FN(file_get_contents)(output);
       expected = string(s.data(), s.size());
     } else {
       expected = output;
@@ -238,7 +238,7 @@ bool TestCodeRun::RecordMulti(const char *input, const char *output,
                               const char *file, int line, bool nowarnings,
                               bool fileoutput) {
   string fullPath = "runtime/tmp/" + Test::s_suite + "/" + test_name + "/tcr-" +
-    boost::lexical_cast<string>(m_test++);
+    folly::to<string>(m_test++);
 
   if (!GenerateMainPHP(fullPath + "/main.php", file, line, input)) return false;
   if (nowarnings) {
@@ -248,7 +248,7 @@ bool TestCodeRun::RecordMulti(const char *input, const char *output,
   if (output) {
     std::ofstream s((fullPath + "/test.result").c_str());
     if (fileoutput) {
-      String expected = f_file_get_contents(output);
+      String expected = HHVM_FN(file_get_contents)(output);
       s << string(expected.data(), expected.size());
     } else {
       s << output;

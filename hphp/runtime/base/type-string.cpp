@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,19 +14,22 @@
    +----------------------------------------------------------------------+
 */
 
-#include "hphp/runtime/base/complex-types.h"
-#include "hphp/runtime/base/type-conversions.h"
+#include "hphp/runtime/base/type-string.h"
+
 #include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/comparisons.h"
+#include "hphp/runtime/base/type-conversions.h"
 #include "hphp/runtime/base/variable-serializer.h"
 #include "hphp/runtime/base/zend-functions.h"
 #include "hphp/runtime/base/zend-string.h"
 #include "hphp/runtime/base/zend-printf.h"
 
+#include <algorithm>
+
 namespace HPHP {
 
 const String null_string = String();
-const StaticString empty_string("");
+const StaticString empty_string_ref("");
 
 ///////////////////////////////////////////////////////////////////////////////
 // statics
@@ -41,13 +44,9 @@ String::IntegerStringDataMap String::integer_string_data_map;
 
 static const StringData* convert_integer_helper(int64_t n) {
   char tmpbuf[21];
-  char *p;
-  int is_negative;
-  int len;
-
   tmpbuf[20] = '\0';
-  p = conv_10(n, &is_negative, &tmpbuf[20], &len);
-  return StringData::GetStaticString(p);
+  auto sl = conv_10(n, &tmpbuf[20]);
+  return makeStaticString(sl.ptr, sl.len);
 }
 
 void String::PreConvertInteger(int64_t n) {
@@ -64,7 +63,7 @@ const StringData *String::ConvertInteger(int64_t n) {
   return sd;
 }
 
-static int precompute_integers() ATTRIBUTE_COLD;
+static int precompute_integers();
 static int precompute_integers() {
   String::converted_integers_raw =
     (StringData const **)calloc(NUM_CONVERTED_INTEGERS, sizeof(StringData*));
@@ -90,13 +89,10 @@ String::~String() {}
 
 StringData* buildStringData(int n) {
   char tmpbuf[12];
-  char* p;
-  int is_negative;
-  int len;
 
   tmpbuf[11] = '\0';
-  p = conv_10(n, &is_negative, &tmpbuf[11], &len);
-  return StringData::Make(p, len, CopyString);
+  auto sl = conv_10(n, &tmpbuf[11]);
+  return StringData::Make(sl, CopyString);
 }
 
 String::String(int n) {
@@ -112,16 +108,12 @@ String::String(int n) {
 
 StringData* buildStringData(int64_t n) {
   char tmpbuf[21];
-  char* p;
-  int is_negative;
-  int len;
 
   tmpbuf[20] = '\0';
-  p = conv_10(n, &is_negative, &tmpbuf[20], &len);
-  return StringData::Make(p, len, CopyString);
+  auto const sl = conv_10(n, &tmpbuf[20]);
+  return StringData::Make(sl, CopyString);
 }
 
-HOT_FUNC
 String::String(int64_t n) {
   const StringData *sd = GetIntegerStringData(n);
   if (sd) {
@@ -133,12 +125,23 @@ String::String(int64_t n) {
   m_px->setRefCount(1);
 }
 
-StringData* buildStringData(double n) {
-  char *buf;
-
+void formatPhpDblStr(char **pbuf, double n) {
   if (n == 0.0) n = 0.0; // so to avoid "-0" output
-  vspprintf(&buf, 0, "%.*G", 14, n);
+  vspprintf(pbuf, 0, "%.*G", 14, n);
+}
+
+StringData* buildStringData(double n) {
+  char *buf = nullptr;
+  formatPhpDblStr(&buf, n);
   return StringData::Make(buf, AttachString);
+}
+
+std::string convDblToStrWithPhpFormat(double n) {
+  char *buf = nullptr;
+  formatPhpDblStr(&buf, n);
+  std::string retVal(buf);
+  free(buf);
+  return retVal;
 }
 
 String::String(double n) {
@@ -159,14 +162,6 @@ String String::substr(int start, int length /* = 0x7FFFFFFF */,
   return nullable ? String() : String("", 0, CopyString);
 }
 
-String String::lastToken(char delimiter) {
-  int pos = rfind(delimiter);
-  if (pos >= 0) {
-    return substr(pos + 1);
-  }
-  return *this;
-}
-
 int String::find(char ch, int pos /* = 0 */,
                  bool caseSensitive /* = true */) const {
   if (empty()) return -1;
@@ -185,8 +180,7 @@ int String::find(const char *s, int pos /* = 0 */,
                      pos, caseSensitive);
 }
 
-HOT_FUNC
-int String::find(CStrRef s, int pos /* = 0 */,
+int String::find(const String& s, int pos /* = 0 */,
                  bool caseSensitive /* = true */) const {
   if (empty()) return -1;
   if (s.size() == 1) {
@@ -214,7 +208,7 @@ int String::rfind(const char *s, int pos /* = 0 */,
                       pos, caseSensitive);
 }
 
-int String::rfind(CStrRef s, int pos /* = 0 */,
+int String::rfind(const String& s, int pos /* = 0 */,
                   bool caseSensitive /* = true */) const {
   if (empty()) return -1;
   if (s.size() == 1) {
@@ -224,45 +218,18 @@ int String::rfind(CStrRef s, int pos /* = 0 */,
                       s.data(), s.size(), pos, caseSensitive);
 }
 
-String String::replace(int start, int length, CStrRef replacement) const {
-  int len = size();
-  char *ret = string_replace(data(), len, start, length, replacement.data(),
-                             replacement.size());
-  return String(ret, len, AttachString);
-}
-
-String String::replace(CStrRef search, CStrRef replacement) const {
-  int count;
-  return replace(search, replacement, count, true);
-}
-
-String String::replace(CStrRef search, CStrRef replacement, int &count,
-                       bool caseSensitive) const {
-  count = 0;
-  if (!search.empty() && !empty()) {
-    int len = m_px->size();
-    char *ret = string_replace(m_px->data(), len, search.data(), search.size(),
-                               replacement.data(), replacement.size(), count,
-                               caseSensitive);
-    if (ret) {
-      return String(ret, len, AttachString);
-    }
-  }
-  return *this;
-}
-
 ///////////////////////////////////////////////////////////////////////////////
 // offset functions: cannot inline these due to dependencies
 
-String String::rvalAt(CArrRef key) const {
+String String::rvalAt(const Array& key) const {
   return rvalAtImpl(key.toInt32());
 }
 
-String String::rvalAt(CObjRef key) const {
+String String::rvalAt(const Object& key) const {
   return rvalAtImpl(key.toInt32());
 }
 
-String String::rvalAt(CVarRef key) const {
+String String::rvalAt(const Variant& key) const {
   return rvalAtImpl(key.toInt32());
 }
 
@@ -298,13 +265,18 @@ String &String::operator=(const std::string & s) {
   return *this;
 }
 
-HOT_FUNC
-String &String::operator=(CStrRef str) {
+String &String::operator=(const String& str) {
   StringBase::operator=(str.m_px);
   return *this;
 }
 
-String &String::operator=(CVarRef var) {
+String &String::operator=(const StaticString& str) {
+  if (m_px) decRefStr(m_px);
+  m_px = str.m_px;
+  return *this;
+}
+
+String &String::operator=(const Variant& var) {
   return operator=(var.toString());
 }
 
@@ -316,7 +288,7 @@ String &String::operator+=(litstr s) {
     if (empty()) {
       m_px = StringData::Make(s, CopyString);
       m_px->setRefCount(1);
-    } else if (m_px->getCount() == 1) {
+    } else if (m_px->hasExactlyOneRef()) {
       auto const tmp = m_px->append(StringSlice(s, strlen(s)));
       if (UNLIKELY(tmp != m_px)) StringBase::operator=(tmp);
     } else {
@@ -329,11 +301,11 @@ String &String::operator+=(litstr s) {
   return *this;
 }
 
-String &String::operator+=(CStrRef str) {
+String &String::operator+=(const String& str) {
   if (!str.empty()) {
     if (empty()) {
       StringBase::operator=(str.m_px);
-    } else if (m_px->getCount() == 1) {
+    } else if (m_px->hasExactlyOneRef()) {
       auto tmp = m_px->append(str.slice());
       if (UNLIKELY(tmp != m_px)) StringBase::operator=(tmp);
     } else {
@@ -350,7 +322,7 @@ String& String::operator+=(const StringSlice& slice) {
   if (slice.size() == 0) {
     return *this;
   }
-  if (m_px && m_px->getCount() == 1) {
+  if (m_px && m_px->hasExactlyOneRef()) {
     auto const tmp = m_px->append(slice);
     if (UNLIKELY(tmp != m_px)) StringBase::operator=(tmp);
     return *this;
@@ -383,22 +355,18 @@ String operator+(const String & lhs, litstr rhs) {
   return StringData::Make(lhs.slice(), rhs);
 }
 
-HOT_FUNC
 String&& operator+(String&& lhs, String&& rhs) {
   return std::move(lhs += rhs);
 }
 
-HOT_FUNC
 String operator+(String&& lhs, const String & rhs) {
   return std::move(lhs += rhs);
 }
 
-HOT_FUNC
 String operator+(const String & lhs, String&& rhs) {
   return StringData::Make(lhs.slice(), rhs.slice());
 }
 
-HOT_FUNC
 String operator+(const String & lhs, const String & rhs) {
   if (lhs.empty()) return rhs;
   if (rhs.empty()) return lhs;
@@ -408,9 +376,8 @@ String operator+(const String & lhs, const String & rhs) {
 ///////////////////////////////////////////////////////////////////////////////
 // conversions
 
-HOT_FUNC
 VarNR String::toKey() const {
-  if (!m_px) return VarNR(empty_string);
+  if (!m_px) return VarNR(staticEmptyString());
   int64_t n = 0;
   if (m_px->isStrictlyInteger(n)) {
     return VarNR(n);
@@ -426,19 +393,19 @@ bool String::same(const StringData *v2) const {
   return HPHP::same(m_px, v2);
 }
 
-bool String::same(CStrRef v2) const {
+bool String::same(const String& v2) const {
   return HPHP::same(m_px, v2);
 }
 
-bool String::same(CArrRef v2) const {
+bool String::same(const Array& v2) const {
   return HPHP::same(m_px, v2);
 }
 
-bool String::same(CObjRef v2) const {
+bool String::same(const Object& v2) const {
   return HPHP::same(m_px, v2);
 }
 
-bool String::same(CResRef v2) const {
+bool String::same(const Resource& v2) const {
   return HPHP::same(m_px, v2);
 }
 
@@ -446,19 +413,19 @@ bool String::equal(const StringData *v2) const {
   return HPHP::equal(m_px, v2);
 }
 
-bool String::equal(CStrRef v2) const {
+bool String::equal(const String& v2) const {
   return HPHP::equal(m_px, v2);
 }
 
-bool String::equal(CArrRef v2) const {
+bool String::equal(const Array& v2) const {
   return HPHP::equal(m_px, v2);
 }
 
-bool String::equal(CObjRef v2) const {
+bool String::equal(const Object& v2) const {
   return HPHP::equal(m_px, v2);
 }
 
-bool String::equal(CResRef v2) const {
+bool String::equal(const Resource& v2) const {
   return HPHP::equal(m_px, v2);
 }
 
@@ -466,19 +433,19 @@ bool String::less(const StringData *v2) const {
   return HPHP::less(m_px, v2);
 }
 
-bool String::less(CStrRef v2) const {
+bool String::less(const String& v2) const {
   return HPHP::less(m_px, v2);
 }
 
-bool String::less(CArrRef v2) const {
+bool String::less(const Array& v2) const {
   return HPHP::less(m_px, v2);
 }
 
-bool String::less(CObjRef v2) const {
+bool String::less(const Object& v2) const {
   return HPHP::less(m_px, v2);
 }
 
-bool String::less(CResRef v2) const {
+bool String::less(const Resource& v2) const {
   return HPHP::less(m_px, v2);
 }
 
@@ -486,54 +453,54 @@ bool String::more(const StringData *v2) const {
   return HPHP::more(m_px, v2);
 }
 
-bool String::more(CStrRef v2) const {
+bool String::more(const String& v2) const {
   return HPHP::more(m_px, v2);
 }
 
-bool String::more(CArrRef v2) const {
+bool String::more(const Array& v2) const {
   return HPHP::more(m_px, v2);
 }
 
-bool String::more(CObjRef v2) const {
+bool String::more(const Object& v2) const {
   return HPHP::more(m_px, v2);
 }
 
-bool String::more(CResRef v2) const {
+bool String::more(const Resource& v2) const {
   return HPHP::more(m_px, v2);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // comparison operators
 
-bool String::operator==(CStrRef v) const {
+bool String::operator==(const String& v) const {
   return HPHP::equal(m_px, v);
 }
 
-bool String::operator!=(CStrRef v) const {
+bool String::operator!=(const String& v) const {
   return !HPHP::equal(m_px, v);
 }
 
-bool String::operator>(CStrRef v) const {
+bool String::operator>(const String& v) const {
   return HPHP::more(m_px, v);
 }
 
-bool String::operator<(CStrRef v) const {
+bool String::operator<(const String& v) const {
   return HPHP::less(m_px, v);
 }
 
-bool String::operator==(CVarRef v) const {
+bool String::operator==(const Variant& v) const {
   return HPHP::equal(m_px, v);
 }
 
-bool String::operator!=(CVarRef v) const {
+bool String::operator!=(const Variant& v) const {
   return !HPHP::equal(m_px, v);
 }
 
-bool String::operator>(CVarRef v) const {
+bool String::operator>(const Variant& v) const {
   return HPHP::more(m_px, v);
 }
 
-bool String::operator<(CVarRef v) const {
+bool String::operator<(const Variant& v) const {
   return HPHP::less(m_px, v);
 }
 
@@ -569,7 +536,7 @@ void String::unserialize(VariableUnserializer *uns,
     throw Exception("Expected '%c' but got '%c'", delimiter0, ch);
   }
   StringData *px = StringData::Make(int(size));
-  MutableSlice buf = px->mutableSlice();
+  auto const buf = px->bufferSlice();
   assert(size <= buf.len);
   uns->read(buf.ptr, size);
   px->setSize(size);
@@ -598,20 +565,15 @@ void String::dump() const {
 // StaticString
 
 StaticString::StaticString(litstr s) {
-  m_px = StringData::GetStaticString(s);
+  m_px = makeStaticString(s);
 }
 
 StaticString::StaticString(litstr s, int length) {
-  m_px = StringData::GetStaticString(s, length);
+  m_px = makeStaticString(s, length);
 }
 
 StaticString::StaticString(std::string s) {
-  m_px = StringData::GetStaticString(s.c_str(), s.size());
-}
-
-StaticString::StaticString(const StaticString &str) {
-  assert(str.m_px->isStatic());
-  m_px = str.m_px;
+  m_px = makeStaticString(s.c_str(), s.size());
 }
 
 StaticString& StaticString::operator=(const StaticString &str) {
@@ -639,29 +601,26 @@ const StaticString
   s_array("array"),
   s_object("object"),
   s_resource("resource"),
-  s_indirect("indirect"),
   s_ref("reference");
 
 String getDataTypeString(DataType t) {
   switch (t) {
     case KindOfUninit:
-    case KindOfNull:     return s_NULL;
-    case KindOfBoolean:  return s_boolean;
-    case KindOfInt64:    return s_integer;
-    case KindOfDouble:   return s_double;
+    case KindOfNull:       return s_NULL;
+    case KindOfBoolean:    return s_boolean;
+    case KindOfInt64:      return s_integer;
+    case KindOfDouble:     return s_double;
     case KindOfStaticString:
-    case KindOfString:   return s_string;
-    case KindOfArray:    return s_array;
-    case KindOfObject:   return s_object;
-    case KindOfResource: return s_resource;
-    case KindOfRef:      return s_ref;
-    case KindOfIndirect: return s_indirect;
+    case KindOfString:     return s_string;
+    case KindOfArray:      return s_array;
+    case KindOfObject:     return s_object;
+    case KindOfResource:   return s_resource;
+    case KindOfRef:        return s_ref;
 
-    default:
-      assert(false);
+    case KindOfClass:
       break;
   }
-  return empty_string;
+  not_reached();
 }
 
 //////////////////////////////////////////////////////////////////////////////

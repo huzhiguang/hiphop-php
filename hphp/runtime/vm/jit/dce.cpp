@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,45 +14,36 @@
    +----------------------------------------------------------------------+
 */
 
-#include <boost/range/adaptors.hpp>
+#include <array>
+
+#include <folly/MapUtil.h>
 
 #include "hphp/util/trace.h"
-#include "hphp/runtime/vm/jit/ir.h"
-#include "hphp/runtime/vm/jit/opt.h"
-#include "hphp/runtime/vm/jit/ir-factory.h"
-#include "hphp/runtime/vm/jit/simplifier.h"
-#include "hphp/runtime/vm/jit/state-vector.h"
+#include "hphp/runtime/vm/jit/ir-opcode.h"
+#include "hphp/runtime/vm/jit/ir-unit.h"
 #include "hphp/runtime/vm/jit/mutation.h"
+#include "hphp/runtime/vm/jit/opt.h"
+#include "hphp/runtime/vm/jit/print.h"
+#include "hphp/runtime/vm/jit/simplify.h"
+#include "hphp/runtime/vm/jit/state-vector.h"
+#include "hphp/runtime/vm/jit/timer.h"
+#include "hphp/runtime/vm/jit/cfg.h"
 
-namespace HPHP {
-namespace JIT {
+namespace HPHP { namespace jit {
 namespace {
 
-TRACE_SET_MOD(hhir);
+TRACE_SET_MOD(hhir_dce);
 
 /* DceFlags tracks the state of one instruction during dead code analysis. */
 struct DceFlags {
   DceFlags()
     : m_state(DEAD)
     , m_weakUseCount(0)
-    , m_decRefNZ(false)
   {}
 
-  bool isDead()                const { return m_state == DEAD; }
-  bool countConsumed()         const { return m_state == REFCOUNT_CONSUMED; }
-  bool countConsumedOffTrace() const {
-    return m_state == REFCOUNT_CONSUMED_OFF_TRACE;
-  }
-  bool countConsumedAny()      const {
-    return countConsumed() || countConsumedOffTrace();
-  }
-  bool decRefNZed()            const { return m_decRefNZ; }
-
-  void setDead()                  { m_state = DEAD; }
-  void setLive()                  { m_state = LIVE; }
-  void setCountConsumed()         { m_state = REFCOUNT_CONSUMED; }
-  void setCountConsumedOffTrace() { m_state = REFCOUNT_CONSUMED_OFF_TRACE; }
-  void setDecRefNZed()            { m_decRefNZ = true; }
+  bool isDead() const { return m_state == DEAD; }
+  void setDead()      { m_state = DEAD; }
+  void setLive()      { m_state = LIVE; }
 
   /*
    * "Weak" uses are used in optimizeActRecs.
@@ -74,644 +65,442 @@ struct DceFlags {
   }
 
   std::string toString() const {
-    static const char* const names[] = {
+    std::array<const char*,2> const names = {{
       "DEAD",
       "LIVE",
-      "REFCOUNT_CONSUMED",
-      "REFCOUNT_CONSUMED_OFF_TRACE",
-    };
+    }};
     return folly::format(
-      "{} nz:{}",
-      m_state > array_size(names) ? "<invalid>" : names[m_state],
-      m_decRefNZ).str();
+      "{}",
+      m_state < names.size() ? names[m_state] : "<invalid>"
+    ).str();
   }
 
 private:
-  /*
-   * An IncRef is marked as consumed if it is a source for an instruction other
-   * than DecRefNZ that accounts for the newly created reference, either by
-   * decrementing the refcount, or by storing an additional reference to the
-   * value to memory.
-   * REFCOUNT_CONSUMED: consumed by such an instruction in the main trace.
-   * REFCOUNT_CONSUMED_OFF_TRACE: consumed by such an instruction only in exits.
-   * DecRefNZed: True iff the IncRef has been consumed by a DecRefNZ
-   */
   enum {
     DEAD = 0,
     LIVE,
-    REFCOUNT_CONSUMED,
-    REFCOUNT_CONSUMED_OFF_TRACE,
   };
-  uint8_t m_state:3;
-  static constexpr uint8_t kMaxWeakUseCount = 15;
-  uint8_t m_weakUseCount:4;
-  bool m_decRefNZ:1;
+  uint8_t m_state:1;
+  static constexpr uint8_t kMaxWeakUseCount = 0x7f;
+  uint8_t m_weakUseCount:7;
 };
 static_assert(sizeof(DceFlags) == 1, "sizeof(DceFlags) should be 1 byte");
 
 // DCE state indexed by instr->id().
 typedef StateVector<IRInstruction, DceFlags> DceState;
 typedef StateVector<SSATmp, uint32_t> UseCounts;
-typedef smart::list<const IRInstruction*> WorkList;
+typedef jit::vector<const IRInstruction*> WorkList;
 
-void removeDeadInstructions(IRTrace* trace, const DceState& state) {
-  auto &blocks = trace->blocks();
-  for (auto it = blocks.begin(), end = blocks.end(); it != end;) {
-    auto cur = it; ++it;
-    Block* block = *cur;
+void removeDeadInstructions(IRUnit& unit, const DceState& state) {
+  postorderWalk(unit, [&](Block* block) {
     block->remove_if([&] (const IRInstruction& inst) {
-      ONTRACE(7,
+      ONTRACE(4,
               if (state[inst].isDead()) {
-                FTRACE(3, "Removing dead instruction {}\n", inst.toString());
+                FTRACE(1, "Removing dead instruction {}\n", inst.toString());
               });
+
+      // For now, all control flow instructions are essential. If we ever
+      // change this, we'll need to be careful about unlinking dead CF
+      // instructions here.
+      assert(IMPLIES(inst.isControlFlow(), !state[inst].isDead()));
       return state[inst].isDead();
     });
-    if (block->empty()) {
-      // Update any predecessors to point to the empty block's next block.
-      auto next = block->next();
-      for (auto it = block->preds().begin(); it != block->preds().end(); ) {
-        auto cur = it;
-        ++it;
-        cur->setTo(next);
-      }
-      trace->erase(cur);
-    }
-  }
+  });
 }
 
-bool isUnguardedLoad(IRInstruction* inst) {
-  if (!inst->hasDst() || !inst->dst()) return false;
-  Opcode opc = inst->op();
-  SSATmp* dst = inst->dst();
-  Type type = dst->type();
-  return ((opc == LdStack && (type == Type::Gen || type == Type::Cell)) ||
-          (opc == LdLoc && type == Type::Gen) ||
-          (opc == LdRef && type == Type::Cell) ||
-          (opc == LdMem && type == Type::Cell &&
-           inst->src(0)->type() == Type::PtrToCell) ||
-          (opc == Unbox && type == Type::Cell));
-}
-
-// removeUnreachable erases unreachable blocks from trace, and returns
+// removeUnreachable erases unreachable blocks from unit, and returns
 // a sorted list of the remaining blocks.
-BlockList removeUnreachable(IRTrace* trace, IRFactory& factory) {
-  FTRACE(5, "RemoveUnreachable:vvvvvvvvvvvvvvvvvvvv\n");
-  SCOPE_EXIT { FTRACE(5, "RemoveUnreachable:^^^^^^^^^^^^^^^^^^^^\n"); };
+BlockList prepareBlocks(IRUnit& unit) {
+  FTRACE(1, "RemoveUnreachable:vvvvvvvvvvvvvvvvvvvv\n");
+  SCOPE_EXIT { FTRACE(1, "RemoveUnreachable:^^^^^^^^^^^^^^^^^^^^\n"); };
 
-  // 1. simplify unguarded loads to remove unnecssary branches, and
-  //    perform copy propagation on every instruction. Targets that become
-  //    unreachable from this pass will be eliminated in step 2 below.
-  forEachTraceInst(trace, [](IRInstruction* inst) {
-    copyProp(inst);
-    // if this is a load that does not generate a guard, then get rid
-    // of its label so that its not an essential control-flow
-    // instruction
-    if (isUnguardedLoad(inst)) {
-      // LdStack and LdLoc instructions that produce generic types
-      // and LdStack instruction that produce Cell types will not
-      // generate guards, so remove the label from this instruction so
-      // that it's no longer an essential control-flow instruction
-      inst->setTaken(nullptr);
+  auto const blocks = rpoSortCfg(unit);
+
+  // 1. perform copy propagation on every instruction
+  for (auto block : blocks) {
+    for (auto& inst : *block) {
+      copyProp(&inst);
     }
-  });
-
-  // 2. get a list of reachable blocks by sorting them, and erase any
-  //    blocks that are unreachable.
-  bool needsReflow = false;
-  BlockList blocks = rpoSortCfg(trace, factory);
-  StateVector<Block, bool> reachable(factory, false);
-  for (Block* b : blocks) reachable[b] = true;
-  for (Block* b : blocks) {
-    b->forEachPred([&](Block *p) {
-      if (!reachable[p]) {
-        // remove edges from unreachable block to reachable block.
-        if (!p->empty()) p->back()->setTaken(nullptr);
-        p->setNext(nullptr);
-      }
-    });
   }
-  forEachTrace(trace, [&](IRTrace* t) {
-    for (auto bit = t->begin(); bit != t->end();) {
-      if (reachable[*bit]) {
-        ++bit;
-        continue;
-      }
-      FTRACE(5, "erasing block {}\n", (*bit)->id());
-      if ((*bit)->taken() && (*bit)->back()->op() == Jmp_) {
-        needsReflow = true;
-      }
-      bit = t->erase(bit);
-    }
-  });
 
-  // 3. if we removed any whole blocks that ended in Jmp_
-  //    instructions, reflow all types in case they change the
-  //    incoming types of DefLabel instructions.
-  if (needsReflow) reflowTypes(blocks.front(), blocks);
+  // 2. erase unreachable blocks and get an rpo sorted list of what remains.
+  bool needsReflow = removeUnreachable(unit);
+
+  // 3. if we removed any whole blocks that ended in Jmp instructions, reflow
+  //    all types in case they change the incoming types of DefLabel
+  //    instructions.
+  if (needsReflow) reflowTypes(unit);
 
   return blocks;
 }
 
-WorkList
-initInstructions(const BlockList& blocks, DceState& state) {
-  TRACE(5, "DCE(initInstructions):vvvvvvvvvvvvvvvvvvvv\n");
-  // mark reachable, essential, instructions live and enqueue them
+WorkList initInstructions(const IRUnit& unit, const BlockList& blocks,
+                          DceState& state) {
+  TRACE(1, "DCE(initInstructions):vvvvvvvvvvvvvvvvvvvv\n");
+  // Mark reachable, essential, instructions live and enqueue them.
   WorkList wl;
-  for (Block* block : blocks) {
-    for (IRInstruction& inst : *block) {
-      if (inst.isEssential()) {
-        state[inst].setLive();
-        wl.push_back(&inst);
-      }
-      if (inst.op() == DecRefNZ) {
-        auto* srcInst = inst.src(0)->inst();
-        Opcode srcOpc = srcInst->op();
-        if (srcOpc != DefConst) {
-          assert(srcInst->op() == IncRef);
-          assert(state[srcInst].isDead()); // IncRef isn't essential so it
-                                           // should be dead here
-          state[srcInst].setDecRefNZed();
-        }
-      }
+  wl.reserve(unit.numInsts());
+  forEachInst(blocks, [&] (IRInstruction* inst) {
+    if (inst->isEssential()) {
+      state[inst].setLive();
+      wl.push_back(inst);
     }
-  }
-  TRACE(5, "DCE:^^^^^^^^^^^^^^^^^^^^\n");
+  });
+  TRACE(1, "DCE:^^^^^^^^^^^^^^^^^^^^\n");
   return wl;
 }
 
-// Perform the following transformations:
-// 1) Change all unconsumed IncRefs to Mov.
-// 2) Mark a conditionally dead DecRefNZ as live if its corresponding IncRef
-//    cannot be eliminated.
-// 3) Eliminates IncRef-DecRef pairs who value is used only by the DecRef and
-//    whose type does not run a destructor with side effects.
-void optimizeRefCount(IRTrace* trace, DceState& state, UseCounts& uses) {
-  WorkList decrefs;
-  forEachInst(trace, [&](IRInstruction* inst) {
-    if (inst->op() == IncRef && !state[inst].countConsumedAny()) {
-      // This assert is often hit when an instruction should have a
-      // consumesReferences flag but doesn't.
-      auto& s = state[inst];
-      always_assert_log(s.decRefNZed(), [&]{
-        IRTrace* mainTrace = trace->isMain() ? trace : trace->main();
-        return folly::format("\n{} has state {} in trace:\n{}{}\n",
-               inst->toString(), s.toString(), mainTrace->toString(),
-               trace == mainTrace ? "" : trace->toString()).str();
-      });
-      inst->setOpcode(Mov);
-      s.setDead();
-    }
-    if (inst->op() == DecRefNZ) {
-      SSATmp* src = inst->src(0);
-      IRInstruction* srcInst = src->inst();
-      if (state[srcInst].countConsumedAny()) {
-        state[inst].setLive();
-        uses[src]++;
-      }
-    }
-    if (inst->op() == DecRef) {
-      SSATmp* src = inst->src(0);
-      if (uses[src] == 1 && !src->type().canRunDtor()) {
-        IRInstruction* srcInst = src->inst();
-        if (srcInst->op() == IncRef) {
-          decrefs.push_back(inst);
-        }
-      }
-    }
-    // Do copyProp at last. When processing DecRefNZs, we still need to look at
-    // its source which should not be trampled over.
-    copyProp(inst);
-  });
-  for (const IRInstruction* decref : decrefs) {
-    assert(decref->op() == DecRef);
-    SSATmp* src = decref->src(0);
-    assert(src->inst()->op() == IncRef);
-    assert(!src->type().canRunDtor());
-    if (uses[src] == 1) {
-      state[decref].setDead();
-      state[src->inst()].setDead();
-    }
-  }
-}
+//////////////////////////////////////////////////////////////////////
 
 /*
- * Sink IncRefs consumed off trace.
- * Assumptions:
- *   a) Flow graph must not have critical edges.
- *   b) The main trace doesn't unconditionally jump to an exit trace.
- *   c) The instructions have been annotated already by the DCE algorithm.
- *      This pass uses the REFCOUNT_CONSUMED* flags to copy IncRefs from the
- *      main trace to each exit trace that consumes the incremented pointer.
+ * A use of an inlined frame that can be modified to work without the
+ * frame is called a "weak use" here.  For example, storing to a local
+ * on a frame is weak because if no other uses of the frame are
+ * keeping it alive (for example a load of that same local), we can
+ * just remove the store.
  *
- * Algorithm:
- * 1. toSink = {}
- * 2. iterate forwards over the main trace:
- *    * when a movable IncRef is found, insert into toSink list and mark
- *      it as DEAD.
- *    * If a decref of a dead incref is found, remove the corresponding
- *      incref from toSink, and mark the decref DEAD because too.
- *    * the first time we see a branch to an exit trace, process the
- *      exit tace.
- * 3. to process an exit trace:
- *    * clone each IncRef found in toSink then prepend to the exit trace.
- *    * replace each use of the original incref's result with the new
- *      incref's result.
+ * This routine counts the weak uses of inlined frames and marks them
+ * dead if they have no non-weak uses.  Returns true if any inlined
+ * frames were marked dead.
  */
-void sinkIncRefs(IRTrace* trace, IRFactory& irFactory, DceState& state) {
-  assert(trace->isMain());
-
-  assert(trace->back()->back()->op() != Jmp_);
-
-  auto copyPropTrace = [] (IRTrace* trace) {
-    forEachInst(trace, copyProp);
-  };
-
-  WorkList toSink;
-
-  // Hoisted outside the loop to reduce allocations.
-  smart::flat_map<SSATmp*,SSATmp*> sunkTmps;
-
-  auto processExit = [&] (IRTrace* exit) {
-    // Sink REFCOUNT_CONSUMED_OFF_TRACE IncRefs before the first non-label
-    // instruction, and create a mapping between the original tmps to the sunk
-    // tmps so that we can later replace the original ones with the sunk ones.
-    sunkTmps.clear();
-    for (auto* inst : boost::adaptors::reverse(toSink)) {
-      // prepend inserts an instruction to the beginning of a block, after
-      // the label. Therefore, we iterate through toSink in the reversed order.
-      auto* sunkInst = irFactory.gen(IncRef, inst->marker(), inst->src(0));
-      state[sunkInst].setLive();
-      exit->front()->prepend(sunkInst);
-
-      assert(!sunkTmps[inst->dst()]);
-      sunkTmps[inst->dst()] = sunkInst->dst();
-    }
-    forEachInst(exit, [&](IRInstruction* inst) {
-      // Replace the original tmps with the sunk tmps.
-      for (uint32_t i = 0; i < inst->numSrcs(); ++i) {
-        SSATmp* src = inst->src(i);
-        auto it = sunkTmps.find(src);
-        if (it != sunkTmps.end()) {
-          inst->setSrc(i, it->second);
-        }
-      }
-    });
-    // Do copyProp at last, because we need to keep REFCOUNT_CONSUMED_OFF_TRACE
-    // Movs as the prototypes for sunk instructions.
-    copyPropTrace(exit);
-  };
-
-  // An exit trace may be entered from multiple exit points. We keep track of
-  // which exit traces we already pushed sunk IncRefs to, so that we won't push
-  // them multiple times.
-  boost::dynamic_bitset<> pushedTo(irFactory.numBlocks());
-  forEachInst(trace, [&](IRInstruction* inst) {
-    if (inst->op() == IncRef) {
-      // Must be REFCOUNT_CONSUMED or REFCOUNT_CONSUMED_OFF_TRACE;
-      // otherwise, it should be already removed in optimizeRefCount.
-      if (state[inst].countConsumedOffTrace()) {
-        inst->setOpcode(Mov);
-        // Mark them as dead so that they'll be removed later.
-        state[inst].setDead();
-        // Put all REFCOUNT_CONSUMED_OFF_TRACE IncRefs to the sinking list.
-        toSink.push_back(inst);
-      } else if (!state[inst].isDead()) {
-        assert(state[inst].countConsumed());
-      }
-    }
-    if (inst->op() == DecRefNZ) {
-      IRInstruction* srcInst = inst->src(0)->inst();
-      if (state[srcInst].isDead()) {
-        state[inst].setDead();
-        // This may take O(I) time where I is the number of IncRefs
-        // in the main trace.
-        toSink.remove(srcInst);
-      }
-    }
-    if (Block* target = inst->taken()) {
-      if (!pushedTo[target->id()]) {
-        pushedTo[target->id()] = 1;
-        IRTrace* exit = target->trace();
-        if (exit != trace) processExit(exit);
-      }
-    }
-  });
-
-  // Do copyProp at last, because we need to keep REFCOUNT_CONSUMED_OFF_TRACE
-  // Movs as the prototypes for sunk instructions.
-  copyPropTrace(trace);
-}
-
-/*
- * Look for InlineReturn instructions that are the only "non-weak" use
- * of a DefInlineFP.  In this case we can kill both, which may allow
- * removing a SpillFrame as well.
- */
-void optimizeActRecs(IRTrace* trace, DceState& state, IRFactory& factory,
-                     UseCounts& uses) {
-  FTRACE(5, "AR:vvvvvvvvvvvvvvvvvvvvv\n");
-  SCOPE_EXIT { FTRACE(5, "AR:^^^^^^^^^^^^^^^^^^^^^\n"); };
-
+bool findWeakActRecUses(const BlockList& blocks,
+                        DceState& state,
+                        IRUnit& unit,
+                        const UseCounts& uses) {
   bool killedFrames = false;
 
-  smart::map<SSATmp*, Offset> retFixupMap;
-  forEachInst(trace, [&](IRInstruction* inst) {
-    if (!state[inst].isDead()) return;
+  auto const incWeak = [&] (const IRInstruction* inst, const SSATmp* src) {
+    assert(src->isA(Type::FramePtr));
+    auto const frameInst = src->inst();
+    if (frameInst->op() == DefInlineFP) {
+      ITRACE(3, "weak use of {} from {}\n", *frameInst, *inst);
+      state[frameInst].incWeakUse();
+    }
+  };
+
+  /*
+   * Maintain a list of the Calls depending on each DefInlineFP.
+   * Calls can count as weak uses as long as there is only one right
+   * now.  The limit to 1 is just because we have tested or
+   * investigated the more-than-one case.
+   */
+  jit::flat_map<const IRInstruction*,uint32_t> callCounts;
+
+  forEachInst(blocks, [&] (IRInstruction* inst) {
+    if (state[inst].isDead()) return;
+
     switch (inst->op()) {
-    // We don't need to generate stores to a frame if it can be
-    // eliminated.
+    // We don't need to generate stores to a frame if it can be eliminated.
+    case StLocNT:
     case StLoc:
-      {
-        auto const frameInst = inst->src(0)->inst();
-        if (frameInst->op() == DefInlineFP) {
-          FTRACE(5, "Marking StLoc for {}\n", frameInst->id());
-          state[frameInst].incWeakUse();
-        }
-      }
+      incWeak(inst, inst->src(0));
       break;
 
-    case SpillFrame:
-      {
-        auto const frameInst = inst->src(1)->inst();
-        auto const reason = inst->src(2);
-        if (frameInst->op() == DefInlineFP &&
-            reason->type().subtypeOf(Type::Func)) {
-            FTRACE(5, "Marking SpillFrame for {}\n", frameInst->id());
-          state[frameInst].incWeakUse();
-        }
-      }
-      break;
-
+    /*
+     * You can use the stack inside an inlined callee without using
+     * the frame, and we can adjust the initial ReDefSP that comes at
+     * the start of the callee in this situation, but only if we're
+     * not in a resumable.  In a resumable, there is no relation
+     * between the main frame and the stack, so we can't modify this
+     * ReDefSP to work on the outer frame.
+     */
     case ReDefSP:
-    case DefInlineSP:
       {
-        auto const frameInst = inst->src(0)->inst();
-        if (frameInst->op() == DefInlineFP) {
-          FTRACE(5, "Marking DefSP for {}\n", frameInst->id());
-          state[frameInst].incWeakUse();
+        auto const fp = inst->src(1)->inst();
+        if (fp->is(DefInlineFP) &&
+            !fp->src(2)->inst()->marker().resumed()) {
+          ITRACE(3, "weak use of {} from {}\n", fp->dst(), *inst);
+          state[fp].incWeakUse();
+        }
+      }
+      break;
+
+    /*
+     * Calls can count as weak frame uses with some restrictions:
+     *
+     *   o We must statically know what we're calling.
+     *
+     *   o The call itself is not protected by an EH region.
+     *
+     *   o We're not calling a native function.
+     *
+     *   o The callee must already have a translation for the prologue
+     *     we need (has knownPrologue).
+     *
+     *   o There's only one Call instruction depending on this frame.
+     *
+     * The reason it is limited to a known prologue is that otherwise
+     * the REQ_BIND_CALL service request could need to enter the
+     * interpreter at the FCall instruction, which means it needs the
+     * ActRec for the function containing that instruction to be on
+     * the stack.  To know this also implies the first requirement.
+     *
+     * Similarly, we can't eliminate the outer frame if we may need it
+     * to enter a catch block that is in the calling function.
+     *
+     * The other limits are just conservative while this was being
+     * developed.
+     *
+     * Important: Right now all of this is disabled in
+     * hhbc-translator, because the knownPrologue mechanism is buggy.
+     * So we'll never have a knownPrologue here.  TODO(#4357498).
+     */
+    case Call:
+      {
+        auto const extra  = inst->extra<Call>();
+        if (!extra->callee ||
+            isNativeImplCall(extra->callee, extra->numParams) ||
+            !inst->extra<Call>()->knownPrologue) {
+          break;
+        }
+        if (inst->marker().func()->findEH(inst->marker().bcOff())) {
+          FTRACE(2, "strong due to EH: {}\n", inst->toString());
+          break;
+        }
+        auto const frameInst = inst->src(1)->inst();
+        if (frameInst->is(DefInlineFP)) {
+          // See above about the limit to 1.
+          if (callCounts[inst->src(1)->inst()]++ < 1) {
+            ITRACE(3, "weak use of {} from {}\n", *frameInst->dst(), *inst);
+            state[frameInst].incWeakUse();
+          }
         }
       }
       break;
 
     case InlineReturn:
       {
-        auto frameUses = uses[inst->src(0)];
-        auto srcInst = inst->src(0)->inst();
-        if (srcInst->op() == DefInlineFP) {
-          auto weakUses = state[srcInst].weakUseCount();
-          // We haven't counted this InlineReturn as a weak use yet,
-          // which is where this '1' comes from.
-          if (frameUses - weakUses == 1) {
-            FTRACE(5, "killing frame {}\n", srcInst->id());
-            killedFrames = true;
-            auto const stkInst = srcInst->src(0)->inst();
-
-            Offset retBCOff = srcInst->extra<DefInlineFP>()->retBCOff;
-            retFixupMap[srcInst->dst()] = retBCOff;
-            factory.replace(srcInst, PassFP, srcInst->src(2));
-            if (stkInst->op() == SpillFrame) {
-              factory.replace(stkInst, PassSP, stkInst->src(0));
-            }
-          }
-        }
-      }
-      break;
-
-    case PassFP:
-      {
-        auto frameInst = inst->src(0)->inst();
-        if (frameInst->op() == DefInlineFP) {
-          FTRACE(5, "Marking PassFP for {}\n", frameInst->id());
-          state[frameInst].incWeakUse();
-        }
-      }
-      break;
-
-    case DefInlineFP:
-      {
-        auto outerInst = inst->src(2)->inst();
-        if (outerInst->op() == DefInlineFP) {
-          FTRACE(5, "Marking DefInlineFP for {}\n", outerInst->id());
-          state[outerInst].incWeakUse();
+        auto const frameInst = inst->src(0)->inst();
+        assert(frameInst->is(DefInlineFP));
+        auto const frameUses = uses[frameInst->dst()];
+        auto const weakUses  = state[frameInst].weakUseCount();
+        /*
+         * We can kill the frame if all uses of the frame are counted
+         * as weak uses.  Note that this InlineReturn counts as a weak
+         * use, but we haven't incremented for it yet, which is where
+         * the "+ 1" comes from below.
+         */
+        ITRACE(2, "frame {}: weak/strong {}/{}\n",
+          *frameInst, weakUses, frameUses);
+        if (frameUses - (weakUses + 1) == 0) {
+          ITRACE(1, "killing frame {}\n", *frameInst);
+          killedFrames = true;
+          state[inst].setDead();
+          state[frameInst].setDead();
         }
       }
       break;
 
     default:
-      {
-        for (uint32_t i = 0; i < inst->numSrcs(); i++) {
-          auto src = inst->src(i);
-          if (src->inst()->op() == DefInlineFP) {
-            FTRACE(5, "not killing frame {} b/c: {}\n", src->inst()->id(),
-                   inst->toString());
-          }
-        }
-      }
+      // Default is conservative: we don't increment a weak use if it
+      // uses the frame (or stack), so they can't be eliminated.
       break;
     }
   });
 
-  if (!killedFrames) return;
+  return killedFrames;
+}
 
-  /*
-   * The first time through, we've counted up weak uses of the frame
-   * and then finally marked it dead.  The instructions in between
-   * that were weak uses may need modifications now that their frame
-   * is going away.
-   */
-  forEachInst(trace, [&](IRInstruction* inst) {
-    switch (inst->op()) {
-    case DefInlineSP:
-      {
-        auto const fp = inst->src(0);
-        if (fp->inst()->op() == PassFP) {
-          FTRACE(5, "{} ({}) masking\n",
-                 opcodeName(inst->op()),
-                 inst->id());
-          factory.replace(inst, PassSP, inst->src(1));
-          break;
-        }
-      }
-      break;
+/*
+ * The first time through, we've counted up weak uses of the frame and
+ * then finally marked it dead.  The instructions in between that were
+ * weak uses may need modifications now that their frame is going
+ * away.
+ *
+ * Also, if we eliminated some frames, DecRef instructions (which can
+ * re-enter the VM without requiring a materialized frame) need to
+ * have stack depths in their markers adjusted so they can't stomp on
+ * parts of the outer function.  We handle this conservatively by just
+ * pushing all DecRef markers where the DecRef is from a function
+ * other than the outer function down to a safe re-entry depth.
+ */
+void performActRecFixups(const BlockList& blocks,
+                         DceState& state,
+                         IRUnit& unit,
+                         const UseCounts& uses) {
+  // We limit the total stack depth during inlining, so this is the deepest
+  // we'll ever have to worry about.
+  auto const outerFunc = blocks.front()->front().marker().func();
+  auto const safeDepth = outerFunc->maxStackCells() + kStackCheckLeafPadding;
+  ITRACE(3, "safeDepth: {}, outerFunc depth: {}\n",
+         safeDepth,
+         outerFunc->maxStackCells());
 
-    case StLoc: case InlineReturn:
-      {
-        auto const fp = inst->src(0);
-        if (fp->inst()->op() == PassFP) {
-          FTRACE(5, "{} ({}) setDead\n",
-                 opcodeName(inst->op()),
-                 inst->id());
-          state[inst].setDead();
-        }
-      }
-      break;
+  for (auto block : blocks) {
+    ITRACE(2, "Visiting block {}\n", block->id());
+    Trace::Indent indenter;
+
+    for (auto& inst : *block) {
+      ITRACE(5, "{}\n", inst.toString());
+
+      switch (inst.op()) {
+      case DefInlineFP:
+        ITRACE(3, "DefInlineFP ({}): weak/strong uses: {}/{}\n",
+             inst, state[inst].weakUseCount(), uses[inst.dst()]);
+        break;
 
       /*
-       * When we unroll the stack during an exception the unwinder relies on
-       * m_soff whenever it encounters an ActRec to properly restore the
-       * PC once the frame has been destroyed.  When we elide a frame from the
-       * stack we also update the PC pushed in any ActRec's pushed by a Call
-       * so that they reflect the frame that they logically fall inside of.
+       * A ReDefSP that depends on a removable DefInlineFP needs to be
+       * adjusted.  Its current frame is going away, so we have to
+       * adjust it to depend on the outer frame, and have an offset
+       * relative to that frame.
+       *
+       * In the common cases this ReDefSP is also going to be dce'd,
+       * but we need to adjust it in case it isn't.
+       *
+       * The offset from the current frame (DefInlineFP) is a
+       * parameter to the ReDefSP.  To turn that into an effective
+       * offset from the outer frame we take the following: the
+       * returnSpOffset that we recorded in this DefInlineFP, plus
+       * whatever offset the ReDefSP had from the frame, plus the
+       * cells for the ActRec, minus the space for the frame had for
+       * locals or iterators.
+       *
+       * If this is the first ReDefSP in a callee, the spOffset here
+       * will be numSlotsInFrame, so it cancels out and we just use
+       * the return sp offset (plus the ActRec cells).  However, if
+       * it's the ReDefSP that comes /after/ an InlineReturn, the fact
+       * that it depends on a DefInlineFP (instead of a DefFP) means
+       * we're in a nested inlining situation, and it is depending on
+       * a stack defined inside the outer inlined callee.  In this
+       * case, its offset will potentially not just be
+       * numSlotsInFrame, because we may have more spills going on in
+       * the outer callee.
+       *
+       * It's easiest to understand this by ignoring the above
+       * particulars and thinking about what it should mean to adjust
+       * a ReDefSP whose frame is being eliminated in isolation.
        */
-      case Call:
+      case ReDefSP:
         {
-          auto const arInst = inst->src(0)->inst();
-          if (arInst->op() == SpillFrame) {
-            auto const fp = arInst->src(1);
-            if (fp->inst()->op() == PassFP) {
-              auto fpInst = fp->inst();
-              while (fpInst->src(0)->inst()->op() == PassFP) {
-                fpInst = fpInst->src(0)->inst();
-              }
-              assert(retFixupMap.find(fpInst->dst()) != retFixupMap.end());
-              FTRACE(5, "{} ({}) repairing\n",
-                     opcodeName(inst->op()),
-                     inst->id());
-              Offset retBCOff = retFixupMap[fpInst->dst()];
-              inst->setSrc(1, factory.cns(retBCOff));
-            }
+          auto const fp = inst.src(1)->inst();
+          if (fp->is(DefInlineFP) && state[fp].isDead()) {
+            inst.setSrc(1, fp->src(2));
+            inst.extra<ReDefSP>()->spOffset +=
+              fp->extra<DefInlineFP>()->retSPOff + kNumActRecCells -
+              fp->extra<DefInlineFP>()->target->numSlotsInFrame();
           }
         }
         break;
 
-    case DefInlineFP:
-      FTRACE(5, "DefInlineFP ({}): weak/strong uses: {}/{}\n",
-             inst->id(),
-             state[inst].weakUseCount(),
-             uses[inst->dst()]);
-      break;
-
-    default:
-      break;
-    }
-  });
-}
-
-// Assuming that the 'consumer' instruction consumes 'src', trace back through
-// src's instruction to the real origin of the value. Currently this traces
-// through CheckType, AssertType and DefLabel.
-void consumeIncRef(const IRInstruction* consumer, const SSATmp* src,
-                   DceState& state) {
-  const IRInstruction* srcInst = src->inst();
-  if ((srcInst->op() == CheckType || srcInst->op() == AssertType) &&
-      srcInst->typeParam().maybeCounted()) {
-    // srcInst is a CheckType/AsserType that guards to a refcounted type. We
-    // need to trace through to its source. If the instruction guards to a
-    // non-refcounted type then the reference is consumed by CheckType itself.
-    consumeIncRef(consumer, srcInst->src(0), state);
-    return;
-  }
-
-  if (srcInst->op() == DefLabel) {
-    // srcInst is a DefLabel that may be a join node. We need to find
-    // the dst index of src in srcInst and trace through to each jump
-    // providing a value for it.
-    for (unsigned i = 0, n = srcInst->numDsts(); i < n; ++i) {
-      if (srcInst->dst(i) == src) {
-        srcInst->block()->forEachSrc(i,
-          [&](IRInstruction* jmp, SSATmp* val) {
-            consumeIncRef(consumer, val, state);
+      case Call:
+        {
+          auto const fp = inst.src(1)->inst();
+          if (state[fp].isDead()) {
+            assert(fp->is(DefInlineFP));
+            inst.setSrc(1, fp->src(2));
+            inst.extra<Call>()->after = fp->extra<DefInlineFP>()->retBCOff;
           }
-        );
+        }
+        break;
+
+      case StLocNT:
+      case StLoc:
+        if (state[inst.src(0)->inst()].isDead()) {
+          ITRACE(3, "marking {} as dead\n", inst);
+          state[inst].setDead();
+        }
+        break;
+
+      /*
+       * DecRef* are special: they're the only instructions that can reenter
+       * but not throw. This means it's safe to elide their inlined frame, as
+       * long as we adjust their markers to a depth that is guaranteed to not
+       * stomp on the caller's frame if it reenters.
+       */
+      case DecRef:
+      case DecRefLoc:
+      case DecRefStack:
+      case DecRefMem:
+        if (inst.marker().func() != outerFunc) {
+          ITRACE(3, "pushing stack depth of {} to {}\n", safeDepth, inst);
+          inst.marker().setSpOff(safeDepth);
+        }
+        break;
+
+      default:
         break;
       }
     }
-    return;
-  }
-
-  if (srcInst->op() != IncRef) return;
-
-  // <inst> consumes <srcInst> which is an IncRef, so we mark <srcInst> as
-  // REFCOUNT_CONSUMED.
-  if (consumer->trace()->isMain() || !srcInst->trace()->isMain()) {
-    // <srcInst> is consumed from its own trace.
-    state[srcInst].setCountConsumed();
-  } else {
-    // <srcInst> is consumed off trace.
-    if (!state[srcInst].countConsumed()) {
-      // mark <srcInst> as REFCOUNT_CONSUMED_OFF_TRACE unless it is
-      // also consumed from its own trace.
-      state[srcInst].setCountConsumedOffTrace();
-    }
   }
 }
+
+/*
+ * Look for InlineReturn instructions that are the only "non-weak" use
+ * of a DefInlineFP.  In this case we can kill both, which may allow
+ * removing a SpillFrame as well.
+ *
+ * Prior to calling this routine, `uses' should contain the direct
+ * (non-transitive) use counts of each DefInlineFP instruction.  If
+ * the weak references are equal to the normal references, the
+ * instruction is not necessary and can be removed (if we make the
+ * required changes to each instruction that used it weakly).
+ */
+void optimizeActRecs(const BlockList& blocks,
+                     DceState& state,
+                     IRUnit& unit,
+                     const UseCounts& uses) {
+  FTRACE(1, "AR:vvvvvvvvvvvvvvvvvvvvv\n");
+  SCOPE_EXIT { FTRACE(1, "AR:^^^^^^^^^^^^^^^^^^^^^\n"); };
+
+  // Make a pass to find if we can kill any of the frames.  If so, we
+  // have to do some fixups.  These two routines are coupled---most
+  // cases in findWeakActRecUses should have a corresponding case in
+  // performActRecFixups to deal with the frame being removed.
+  auto const killedFrames = findWeakActRecUses(blocks, state, unit, uses);
+  if (killedFrames) {
+    ITRACE(1, "Killed some frames. Iterating over blocks for fixups.\n");
+    performActRecFixups(blocks, state, unit, uses);
+  }
+}
+
+//////////////////////////////////////////////////////////////////////
 
 } // anonymous namespace
 
 // Publicly exported functions:
 
-void eliminateDeadCode(IRTrace* trace, IRFactory& irFactory) {
-  auto removeEmptyExitTraces = [&] {
-    trace->exitTraces().remove_if([](IRTrace* exit) {
-      return exit->blocks().empty();
-    });
-  };
+void eliminateDeadCode(IRUnit& unit) {
+  Timer dceTimer(Timer::optimize_dce);
 
   // kill unreachable code and remove any traces that are now empty
-  BlockList blocks = removeUnreachable(trace, irFactory);
-  removeEmptyExitTraces();
-
-  // Ensure that main trace doesn't unconditionally jump to an exit
-  // trace.  This invariant is needed by the ref-counting optimization.
-  eliminateUnconditionalJump(trace);
+  auto const blocks = prepareBlocks(unit);
 
   // mark the essential instructions and add them to the initial
   // work list; this will also mark reachable exit traces. All
   // other instructions marked dead.
-  DceState state(irFactory, DceFlags());
-  UseCounts uses(irFactory, 0);
-  WorkList wl = initInstructions(blocks, state);
+  DceState state(unit, DceFlags());
+  UseCounts uses(unit, 0);
+  WorkList wl = initInstructions(unit, blocks, state);
 
   // process the worklist
   while (!wl.empty()) {
-    auto* inst = wl.front();
-    wl.pop_front();
-    for (uint32_t i = 0; i < inst->numSrcs(); i++) {
-      SSATmp* src = inst->src(i);
+    auto* inst = wl.back();
+    wl.pop_back();
+    for (auto src : inst->srcs()) {
       IRInstruction* srcInst = src->inst();
-      if (srcInst->op() == DefConst) {
-        continue;
+      if (srcInst->op() == DefConst) continue;
+
+      if (RuntimeOption::EvalHHIRInlineFrameOpts) {
+        if (srcInst->is(DefInlineFP)) {
+          FTRACE(3, "adding use to {} from {}\n", *src, *inst);
+          ++uses[src];
+        }
       }
 
-      if (srcInst->op() == DefInlineFP) {
-        FTRACE(5, "adding use to frame {} b/c: {}\n", srcInst->id(),
-               inst->toString());
-      }
-
-      uses[src]++;
       if (state[srcInst].isDead()) {
         state[srcInst].setLive();
         wl.push_back(srcInst);
       }
-
-      // If inst consumes this source, find the true source instruction and
-      // mark it as consumed if it's an IncRef.
-      if (inst->consumesReference(i)) {
-        consumeIncRef(inst, src, state);
-      }
     }
   }
 
-  // Optimize IncRefs and DecRefs.
-  forEachTrace(trace, [&](IRTrace* t) { optimizeRefCount(t, state, uses); });
-
-  if (RuntimeOption::EvalHHIREnableSinking) {
-    // Sink IncRefs consumed off trace.
-    sinkIncRefs(trace, irFactory, state);
+  if (RuntimeOption::EvalHHIRInlineFrameOpts) {
+    optimizeActRecs(blocks, state, unit, uses);
   }
 
-  // Optimize unused inlined activation records.  It's not necessary
-  // to look at non-main traces for this.
-  optimizeActRecs(trace, state, irFactory, uses);
-
-  // now remove instructions whose id == DEAD
-  removeDeadInstructions(trace, state);
-  for (IRTrace* exit : trace->exitTraces()) {
-    removeDeadInstructions(exit, state);
-  }
-
-  // and remove empty exit traces
-  removeEmptyExitTraces();
+  // Now remove instructions whose state is DEAD.
+  removeDeadInstructions(unit, state);
 }
 
-} }
+}}

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,15 +20,14 @@
 
 namespace HPHP {
 
-IMPLEMENT_OBJECT_ALLOCATION(TempFile)
-///////////////////////////////////////////////////////////////////////////////
-
-StaticString TempFile::s_class_name("TempFile");
-
 ///////////////////////////////////////////////////////////////////////////////
 // constructor and destructor
 
-TempFile::TempFile(bool autoDelete /* = true */) : m_autoDelete(autoDelete) {
+TempFile::TempFile(bool autoDelete /* = true */,
+                   const String& wrapper_type,
+                   const String& stream_type)
+  : PlainFile(nullptr, false, wrapper_type, stream_type),
+    m_autoDelete(autoDelete) {
   char path[PATH_MAX];
 
   // open a temporary file
@@ -39,30 +38,39 @@ TempFile::TempFile(bool autoDelete /* = true */) : m_autoDelete(autoDelete) {
     return;
   }
   m_fd = fd;
-  m_name = string(path);
-  m_rawName = string(path);
+  m_stream = fdopen(fd, "r+");
+  m_name = std::string(path);
+  m_rawName = std::string(path);
 }
 
 TempFile::~TempFile() {
   closeImpl();
 }
 
-bool TempFile::open(CStrRef filename, CStrRef mode) {
-  throw FatalErrorException((string("cannot open a temp file ") +
+void TempFile::sweep() {
+  closeImpl();
+  using std::string;
+  m_rawName.~string();
+  PlainFile::sweep();
+}
+
+bool TempFile::open(const String& filename, const String& mode) {
+  throw FatalErrorException((std::string("cannot open a temp file ") +
                              m_name).c_str());
 }
 
 bool TempFile::close() {
+  invokeFiltersOnClose();
   return closeImpl();
 }
 
 bool TempFile::closeImpl() {
   bool ret = true;
-  s_file_data->m_pcloseRet = 0;
+  s_pcloseRet = 0;
   if (!m_closed) {
     assert(valid());
-    s_file_data->m_pcloseRet = ::close(m_fd);
-    ret = (s_file_data->m_pcloseRet == 0);
+    s_pcloseRet = ::fclose(m_stream);
+    ret = (s_pcloseRet == 0);
     m_closed = true;
     m_stream = nullptr;
     m_fd = -1;

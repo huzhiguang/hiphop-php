@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,29 +14,48 @@
    +----------------------------------------------------------------------+
 */
 
-
 #ifndef incl_HPHP_VM_PROFILER_H_
 #define incl_HPHP_VM_PROFILER_H_
+
+#include "hphp/runtime/base/datatype.h"
 #include "hphp/runtime/vm/bytecode.h"
 #include "hphp/runtime/vm/runtime.h"
-#include "hphp/runtime/base/datatype.h"
 
-#include "hphp/util/atomic-vector.h"
 namespace HPHP {
-#ifdef FACEBOOK
-void profileOneArgument(TypedValue value, int param, const Func* func);
-void logType(const Func* func, const char* typeString, int64_t param);
+
+/*
+ * Create a data structure to hold type profile information.  This
+ * structure is logically a map with the structure:
+ *
+ *   (function, parameter index, type) -> observed count
+ *
+ * In this map "type" is a tuple containing both the PHP DataType and,
+ * if the type is KindOfObject, the Class of the object.
+ */
+void initTypeProfileStructure();
+
+/*
+ * Record an observation of (func, paramIndex, type of value)
+ */
+void profileOneArgument(TypedValue value, int32_t paramIndex, const Func* func);
+
+/*
+ * Record observation of all types passed to a function.
+ */
+void profileAllArguments(ActRec* ar);
+
+/*
+ * Return an array containing function's type profile, where counts
+ * are expressed as a percentage of total observations.
+ */
+Array getPercentParamInfoArray(const Func* func);
+
+/*
+ * Format the type profile as JSON and write it to disk at
+ * /tmp/type-profile.txt
+ */
 void writeProfileInformationToDisk();
-const char* giveTypeString(const TypedValue* value);
-std::string dumpRawParamInfo(const Func* function);
-void initFuncTypeProfileData(const Func* func);
-typedef folly::AtomicHashMap<const char*, int64_t> TypeCounter;
-typedef AtomicVector<TypeCounter*> FuncTypeCounter;
-typedef AtomicVector<FuncTypeCounter*> RuntimeProfileInfo;
-#else
-// Waiting for a fix for OSS
-void profileOneArgument(TypedValue value, int param, const Func* func){}
-#endif
+
 }
 
 #endif

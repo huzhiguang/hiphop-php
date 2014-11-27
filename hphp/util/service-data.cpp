@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,12 +18,14 @@
 
 #include <array>
 #include <memory>
+#include <vector>
 #include <tbb/concurrent_unordered_map.h>
 
-#include "folly/Conv.h"
-#include "folly/MapUtil.h"
-#include "folly/stats/Histogram-defs.h"
-#include "hphp/util/base.h"
+#include <folly/Conv.h>
+#include <folly/MapUtil.h>
+#include <folly/stats/Histogram-defs.h>
+
+#include "hphp/util/portability.h"
 
 namespace HPHP {
 
@@ -78,6 +80,23 @@ void ExportedTimeSeries::exportAll(const std::string& prefix,
       }
     }
   }
+}
+
+int64_t ExportedTimeSeries::getSum() {
+  int64_t sum = 0;
+  SYNCHRONIZED(m_timeseries) {
+    m_timeseries.update(detail::nowAsSeconds());
+
+    for (int i = 0; i < m_timeseries.numLevels(); ++i) {
+      auto& level = m_timeseries.getLevel(i);
+      if (level.isAllTime()) {
+        sum = m_timeseries.sum(i);
+        break;
+      }
+      sum += m_timeseries.sum(i);
+    }
+  }
+  return sum;
 }
 
 ExportedHistogram::ExportedHistogram(

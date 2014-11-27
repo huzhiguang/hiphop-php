@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,22 +15,25 @@
 */
 
 #include "hphp/runtime/base/string-data.h"
-#include "hphp/runtime/base/shared-variant.h"
-#include "hphp/runtime/base/zend-functions.h"
-#include "hphp/runtime/base/exceptions.h"
+
+#include <cmath>
+#include <utility>
+
 #include "hphp/util/alloc.h"
-#include <math.h>
+#include "hphp/util/safe-cast.h"
+#include "hphp/util/stacktrace-profiler.h"
+
+#include "hphp/runtime/base/apc-string.h"
+#include "hphp/runtime/base/builtin-functions.h"
+#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/exceptions.h"
+#include "hphp/runtime/base/runtime-error.h"
+#include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/type-conversions.h"
+#include "hphp/runtime/base/zend-functions.h"
 #include "hphp/runtime/base/zend-printf.h"
 #include "hphp/runtime/base/zend-string.h"
 #include "hphp/runtime/base/zend-strtod.h"
-#include "hphp/runtime/base/complex-types.h"
-#include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/base/runtime-error.h"
-#include "hphp/runtime/base/type-conversions.h"
-#include "hphp/runtime/base/builtin-functions.h"
-#include "hphp/runtime/vm/jit/target-cache.h"
-#include "tbb/concurrent_hash_map.h"
-#include "hphp/util/stacktrace-profiler.h"
 
 namespace HPHP {
 
@@ -38,296 +41,156 @@ namespace HPHP {
 
 namespace {
 
-//////////////////////////////////////////////////////////////////////
+// how many bytes are not included in capacity()'s return value.
+auto const kCapOverhead = 1 + sizeof(StringData);
 
-// Pointer to StringData, or pointer to StringSlice.
-typedef intptr_t StrInternKey;
-
-constexpr intptr_t kAhmMagicThreshold = -3;
-
-StrInternKey make_intern_key(const StringData* sd) {
-  auto const ret = reinterpret_cast<StrInternKey>(sd);
-  assert(ret > 0);
-  return ret;
+NEVER_INLINE void throw_string_too_large(size_t len);
+NEVER_INLINE void throw_string_too_large(size_t len) {
+  raise_error("String length exceeded 2^31-2: %zu", len);
 }
 
-StrInternKey make_intern_key(const StringSlice* sl) {
-  auto const ret = -reinterpret_cast<StrInternKey>(sl);
-  assert(ret < 0 && ret < kAhmMagicThreshold);
-  return ret;
-}
-
-const StringData* to_sdata(StrInternKey key) {
-  assert(key > 0);
-  return reinterpret_cast<const StringData*>(key);
-}
-
-const StringSlice* to_sslice(StrInternKey key) {
-  assert(key < 0 && key < kAhmMagicThreshold);
-  return reinterpret_cast<const StringSlice*>(-key);
-}
-
-// To avoid extra instructions in strintern_eq, we currently are
-// making use of the fact that StringSlice and StringData have the
-// same initial layout.  See the static_asserts in checkSane.
-const StringSlice* to_sslice_punned(StrInternKey key) {
-  if (UNLIKELY(key < 0)) {
-    return reinterpret_cast<const StringSlice*>(-key);
-  }
-  // Actually a StringData*, but same layout.
-  return reinterpret_cast<const StringSlice*>(key);
-}
-
-struct strintern_eq {
-  bool operator()(StrInternKey k1, StrInternKey k2) const {
-    if (k1 < 0) {
-      // AHM only gives lookup keys on the rhs of the equal operator
-      assert(k1 >= kAhmMagicThreshold);
-      return false;
-    }
-    assert(k2 >= 0 || k2 < kAhmMagicThreshold);
-    auto const sd1 = to_sdata(k1);
-    auto const s2 = to_sslice_punned(k2);
-    return sd1->size() == s2->len &&
-           wordsame(sd1->data(), s2->ptr, s2->len);
-  }
-};
-
-struct strintern_hash {
-  size_t operator()(StrInternKey k) const {
-    assert(k > 0 || k < kAhmMagicThreshold);
-    if (LIKELY(k > 0)) {
-      return to_sdata(k)->hash();
-    }
-    auto const slice = *to_sslice(k);
-    return hash_string_inline(slice.ptr, slice.len);
-  }
-};
-
-// The uint32_t is used to hold TargetCache offsets for constants
-typedef folly::AtomicHashMap<StrInternKey,uint32_t,strintern_hash,strintern_eq>
-        StringDataMap;
-StringDataMap* s_stringDataMap;
-
-// If a string is static it better be the one in the table.
-DEBUG_ONLY bool checkStaticStr(const StringData* s) {
-  assert(s->isStatic());
-  auto DEBUG_ONLY const it = s_stringDataMap->find(make_intern_key(s));
-  assert(it != s_stringDataMap->end());
-  assert(to_sdata(it->first) == s);
-  return true;
-}
-
-void create_string_data_map() {
-  StringDataMap::Config config;
-  config.growthFactor = 1;
-  s_stringDataMap =
-    new StringDataMap(RuntimeOption::EvalInitialStaticStringTableSize,
-                      config);
-}
-
-//////////////////////////////////////////////////////////////////////
-
-NEVER_INLINE void throw_string_too_large(uint32_t len) ATTRIBUTE_COLD;
-NEVER_INLINE void throw_string_too_large(uint32_t len) {
-  throw InvalidArgumentException("len > 2^31-2", len);
-}
-
-NEVER_INLINE void throw_string_too_large2(size_t len) ATTRIBUTE_COLD;
-NEVER_INLINE void throw_string_too_large2(size_t len) {
-  throw FatalErrorException(0, "String length exceeded 2^31-2: %zu", len);
-}
-
+// Allocate memory for a string, return the pointer to uninitialized
+// memory, and the encoded capCode value to use.
 ALWAYS_INLINE
-std::pair<StringData*,uint32_t> allocFlatForLen(uint32_t len) {
-  auto const needed = static_cast<uint32_t>(sizeof(StringData) + len + 1);
-  if (LIKELY(needed <= MemoryManager::kMaxSmartSize)) {
-    auto const cap = MemoryManager::smartSizeClass(needed);
-    auto const sd  = static_cast<StringData*>(MM().smartMallocSize(cap));
-    return std::make_pair(sd, cap);
+std::pair<StringData*,uint32_t> allocFlatForLen(size_t len) {
+  static_assert(StringData::MaxSize + 1 < kMaxPackedCap, "");
+
+  if (len <= kPackedCapCodeThreshold - kCapOverhead) {
+    // fast path for most small strings
+    auto need = len + kCapOverhead;
+    auto cap = MemoryManager::smartSizeClass(need);
+    auto sd = static_cast<StringData*>(MM().smartMallocSizeLogged(cap));
+    assert(cap <= kPackedCapCodeThreshold);
+    return std::make_pair(sd, cap - kCapOverhead);
   }
 
-  if (UNLIKELY(needed > StringData::MaxSize + sizeof(StringData) + 1)) {
+  if (UNLIKELY(len > StringData::MaxSize)) {
     throw_string_too_large(len);
   }
 
-  auto const cap = needed;
-  auto const sd = static_cast<StringData*>(MM().smartMallocSizeBig(cap));
-  return std::make_pair(sd, cap);
+  auto const encodable = roundUpPackedCap(len);
+  auto const need = encodable + kCapOverhead;
+  if (LIKELY(need <= kMaxSmartSize)) {
+    auto cap = MemoryManager::smartSizeClass(need);
+    if (!isEncodableCap(cap - kCapOverhead)) {
+      cap -= (cap - kCapOverhead) & 0xFF;
+      assert(isEncodableCap(cap - kCapOverhead));
+    }
+    auto const sd = static_cast<StringData*>(MM().smartMallocSizeLogged(cap));
+    return std::make_pair(sd, packedCapToCode(cap - kCapOverhead));
+  }
+
+  auto const block = MM().smartMallocSizeBigLogged<true>(need);
+  auto cap = block.size;
+  if (!isEncodableCap(cap - kCapOverhead)) {
+    cap -= (cap - kCapOverhead) & 0xFF;
+    assert(isEncodableCap(cap - kCapOverhead));
+  }
+  return std::make_pair(static_cast<StringData*>(block.ptr),
+                        packedCapToCode(cap - kCapOverhead));
 }
 
 ALWAYS_INLINE
 void freeForSize(void* vp, uint32_t size) {
-  if (LIKELY(size <= MemoryManager::kMaxSmartSize)) {
-    return MM().smartFreeSize(vp, size);
+  if (LIKELY(size <= kMaxSmartSize)) {
+    return MM().smartFreeSizeLogged(vp, size);
   }
-  return MM().smartFreeSizeBig(vp, size);
+  return MM().smartFreeSizeBigLogged(vp, size);
+}
+
 }
 
 //////////////////////////////////////////////////////////////////////
 
-}
+std::aligned_storage<
+  sizeof(StringData) + 1,
+  alignof(StringData)
+>::type s_theEmptyString;
 
-size_t StringData::GetStaticStringCount() {
-  if (!s_stringDataMap) return 0;
-  return s_stringDataMap->size();
-}
+//////////////////////////////////////////////////////////////////////
 
-StringData* StringData::InsertStaticString(StringSlice slice) {
-  auto const sd = MakeLowMalloced(slice);
-  sd->setStatic();
-  auto pair = s_stringDataMap->insert(make_intern_key(sd), 0);
-  if (!pair.second) {
-    sd->destructLowMalloc();
-  }
-  assert(to_sdata(pair.first->first) != nullptr);
-  return const_cast<StringData*>(to_sdata(pair.first->first));
-}
-
-StringData* StringData::GetStaticString(const StringData* str) {
-  if (UNLIKELY(!s_stringDataMap)) {
-    create_string_data_map();
-  }
-  if (str->isStatic()) {
-    assert(checkStaticStr(str));
-    return const_cast<StringData*>(str);
-  }
-  auto const it = s_stringDataMap->find(make_intern_key(str));
-  if (it != s_stringDataMap->end()) {
-    return const_cast<StringData*>(to_sdata(it->first));
-  }
-  return InsertStaticString(str->slice());
-}
-
-StringData* StringData::GetStaticString(StringSlice slice) {
-  if (UNLIKELY(!s_stringDataMap)) {
-    create_string_data_map();
-  }
-  auto const it = s_stringDataMap->find(make_intern_key(&slice));
-  if (it != s_stringDataMap->end()) {
-    return const_cast<StringData*>(to_sdata(it->first));
-  }
-  return InsertStaticString(slice);
-}
-
-StringData* StringData::LookupStaticString(const StringData *str) {
-  if (UNLIKELY(!s_stringDataMap)) return nullptr;
-  if (str->isStatic()) {
-    assert(checkStaticStr(str));
-    return const_cast<StringData*>(str);
-  }
-  auto const it = s_stringDataMap->find(make_intern_key(str));
-  if (it != s_stringDataMap->end()) {
-    return const_cast<StringData*>(to_sdata(it->first));
-  }
-  return nullptr;
-}
-
-StringData* StringData::GetStaticString(const String& str) {
-  assert(!str.isNull());
-  return GetStaticString(str.get());
-}
-
-StringData* StringData::GetStaticString(const char* str, size_t len) {
-  assert(len <= MaxSize);
-  return GetStaticString(StringSlice{str, static_cast<uint32_t>(len)});
-}
-
-StringData* StringData::GetStaticString(const std::string& str) {
-  assert(str.size() <= MaxSize);
-  return GetStaticString(
-    StringSlice{str.c_str(), static_cast<uint32_t>(str.size())}
-  );
-}
-
-StringData* StringData::GetStaticString(const char* str) {
-  return GetStaticString(str, strlen(str));
-}
-
-uint32_t StringData::GetCnsHandle(const StringData* cnsName) {
-  assert(s_stringDataMap);
-  auto const it = s_stringDataMap->find(make_intern_key(cnsName));
-  if (it != s_stringDataMap->end()) {
-    return it->second;
-  }
-  return 0;
-}
-
-uint32_t StringData::DefCnsHandle(const StringData* cnsName, bool persistent) {
-  uint32_t val = GetCnsHandle(cnsName);
-  if (val) return val;
-  if (!cnsName->isStatic()) {
-    // Its a dynamic constant, that doesn't correspond to
-    // an already allocated handle. We'll allocate it in
-    // the request local TargetCache::s_constants instead.
-    return 0;
-  }
-  auto const it = s_stringDataMap->find(make_intern_key(cnsName));
-  assert(it != s_stringDataMap->end());
-  if (!it->second) {
-    Transl::TargetCache::allocConstant(&it->second, persistent);
-  }
-  return it->second;
-}
-
-Array StringData::GetConstants() {
-  // Return an array of all defined constants.
-  assert(s_stringDataMap);
-  Array a(Transl::TargetCache::s_constants);
-
-  for (StringDataMap::const_iterator it = s_stringDataMap->begin();
-       it != s_stringDataMap->end(); ++it) {
-    if (it->second) {
-      auto& tv =
-        Transl::TargetCache::handleToRef<TypedValue>(it->second);
-      if (tv.m_type != KindOfUninit) {
-        StrNR key(const_cast<StringData*>(to_sdata(it->first)));
-        a.set(key, tvAsVariant(&tv), true);
-      } else if (tv.m_data.pref) {
-        StrNR key(const_cast<StringData*>(to_sdata(it->first)));
-        ClassInfo::ConstantInfo* ci =
-          (ClassInfo::ConstantInfo*)(void*)tv.m_data.pref;
-        auto cns = ci->getDeferredValue();
-        if (cns.isInitialized()) {
-          a.set(key, cns, true);
-        }
-      }
-    }
-  }
-
-  return a;
-}
-
-StringData* StringData::MakeLowMalloced(StringSlice sl) {
-  if (UNLIKELY(sl.len > MaxSize)) {
+// create either a static or an uncounted string.
+// Diffrence between static and uncounted is in the lifetime
+// of the string. Static are alive for the lifetime of the process.
+// Uncounted are not ref counted but will be deleted at some point.
+StringData* StringData::MakeShared(StringSlice sl, bool trueStatic) {
+  if (UNLIKELY(sl.len > StringData::MaxSize)) {
     throw_string_too_large(sl.len);
   }
 
+  auto const encodable = roundUpPackedCap(sl.len);
+  auto const need = encodable + kCapOverhead;
   auto const sd = static_cast<StringData*>(
-    Util::low_malloc(sizeof(StringData) + sl.len + 1)
+    trueStatic ? low_malloc(need) : malloc(need)
   );
   auto const data = reinterpret_cast<char*>(sd + 1);
+  auto const capCode = packedCapToCode(encodable);
 
   sd->m_data        = data;
-  sd->m_lenAndCount = sl.len;
-  sd->m_capAndHash  = sl.len + 1;
+  sd->m_capAndCount = HeaderKind::String << 24 | capCode; // count=0
+  sd->m_lenAndHash  = sl.len; // hash=0
 
   data[sl.len] = 0;
   auto const mcret = memcpy(data, sl.ptr, sl.len);
   auto const ret   = reinterpret_cast<StringData*>(mcret) - 1;
+  // Recalculating ret from mcret avoids a spill.
 
-  assert(ret == sd);
   assert(ret->m_hash == 0);
   assert(ret->m_count == 0);
+  if (trueStatic) {
+    ret->setStatic();
+  } else {
+    ret->setUncounted();
+  }
+
+  assert(ret == sd);
   assert(ret->isFlat());
+  assert(trueStatic ? ret->isStatic() : ret->isUncounted());
   assert(ret->checkSane());
   return ret;
 }
 
-void StringData::destructLowMalloc() {
-  assert(checkSane());
+StringData* StringData::MakeStatic(StringSlice sl) {
+  return MakeShared(sl, true);
+}
+
+StringData* StringData::MakeUncounted(StringSlice sl) {
+  return MakeShared(sl, false);
+}
+
+StringData* StringData::MakeEmpty() {
+  void* vpEmpty = &s_theEmptyString;
+
+  auto const sd = static_cast<StringData*>(vpEmpty);
+  auto const data = reinterpret_cast<char*>(sd + 1);
+
+  sd->m_data        = data;
+  sd->m_capAndCount = HeaderKind::String << 24; // capCode=0 count=0
+  sd->m_lenAndHash  = 0; // len=0, hash=0
+  data[0] = 0;
+
+  assert(sd->m_len == 0);
+  assert(sd->m_hash == 0);
+  assert(sd->capacity() == 0);
+  assert(sd->m_kind == HeaderKind::String);
+  assert(sd->m_count == 0);
+  sd->setStatic();
+  assert(sd->isFlat());
+  assert(sd->isStatic());
+  assert(sd->checkSane());
+  return sd;
+}
+
+void StringData::destructStatic() {
+  assert(checkSane() && isStatic());
   assert(isFlat());
-  Util::low_free(this);
+  low_free(this);
+}
+
+void StringData::destructUncounted() {
+  assert(checkSane() && isUncounted());
+  assert(isFlat());
+  free(this);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -343,9 +206,11 @@ ALWAYS_INLINE void StringData::delist() {
   prev->next = next;
 }
 
-void StringData::sweepAll() {
-  auto& head = MemoryManager::TheMemoryManager()->m_strings;
-  for (SweepNode *next, *n = head.next; n != &head; n = next) {
+unsigned StringData::sweepAll() {
+  auto& head = MM().getStringList();
+  auto count = 0;
+  for (StringDataNode *next, *n = head.next; n != &head; n = next) {
+    count++;
     next = n->next;
     assert(next && uintptr_t(next) != kSmartFreeWord);
     assert(next && uintptr_t(next) != kMallocFreeWord);
@@ -354,81 +219,84 @@ void StringData::sweepAll() {
                    - sizeof(StringData)
     );
     assert(s->isShared());
-    s->sharedPayload()->shared->decRef();
+    s->sharedPayload()->shared->getHandle()->unreference();
   }
   head.next = head.prev = &head;
+  return count;
 }
 
 //////////////////////////////////////////////////////////////////////
 
-HOT_FUNC
 StringData* StringData::Make(StringSlice sl, CopyStringMode) {
   auto const allocRet = allocFlatForLen(sl.len);
   auto const sd       = allocRet.first;
-  auto const cap      = allocRet.second;
+  auto const capCode  = allocRet.second;
   auto const data     = reinterpret_cast<char*>(sd + 1);
 
   sd->m_data         = data;
-  sd->m_lenAndCount  = sl.len;
-  sd->m_capAndHash   = cap - sizeof(StringData);
+  sd->m_capAndCount  = HeaderKind::String << 24 | capCode; // count=0
+  sd->m_lenAndHash   = sl.len; // hash=0
 
   data[sl.len] = 0;
   auto const mcret = memcpy(data, sl.ptr, sl.len);
   auto const ret   = reinterpret_cast<StringData*>(mcret) - 1;
+  // Recalculating ret from mcret avoids a spill.
 
   assert(ret == sd);
   assert(ret->m_len == sl.len);
   assert(ret->m_count == 0);
-  assert(ret->m_cap == cap - sizeof(StringData));
   assert(ret->m_hash == 0);
   assert(ret->isFlat());
   assert(ret->checkSane());
   return ret;
 }
 
-HOT_FUNC
-StringData* StringData::Make(const char* data, CopyStringMode) {
-  return Make(StringSlice(data, strlen(data)), CopyString);
-}
-
-HOT_FUNC
-StringData* StringData::MakeMalloced(const char* data, int len) {
-  if (UNLIKELY(uint32_t(len) > MaxSize)) {
+StringData* StringData::Make(const char* data, size_t len, CopyStringMode) {
+  if (UNLIKELY(len > StringData::MaxSize)) {
     throw_string_too_large(len);
   }
 
-  auto const cap = static_cast<uint32_t>(len) + 1;
-  auto const sd = static_cast<StringData*>(
-    std::malloc(sizeof(StringData) + cap)
-  );
-
-  sd->m_lenAndCount = len;
-  sd->m_capAndHash  = cap;
-  sd->m_data        = reinterpret_cast<char*>(sd + 1);
-
-  sd->m_data[len] = 0;
-  auto const mcret = memcpy(sd->m_data, data, len);
-  auto const ret   = reinterpret_cast<StringData*>(mcret) - 1;
-
-  assert(ret == sd);
-  assert(ret->m_hash == 0);
-  assert(ret->m_count == 0);
-  assert(ret->isFlat());
-  assert(ret->checkSane());
-  return ret;
+  return Make(StringSlice(data, len), CopyString);
 }
 
-HOT_FUNC
+StringData* StringData::Make(size_t reserveLen) {
+  auto const allocRet = allocFlatForLen(reserveLen);
+  auto const sd       = allocRet.first;
+  auto const capCode  = allocRet.second;
+  auto const data     = reinterpret_cast<char*>(sd + 1);
+
+  data[0] = 0;
+  sd->m_data        = data;
+  sd->m_capAndCount = HeaderKind::String << 24 | capCode; // count=0
+  sd->m_lenAndHash  = 0; // len=hash=0
+
+  assert(sd->isFlat());
+  assert(sd->checkSane());
+  return sd;
+}
+
+//////////////////////////////////////////////////////////////////////
+
+StringData* StringData::Make(char* data, size_t len, AttachStringMode) {
+  if (UNLIKELY(len > StringData::MaxSize)) {
+    throw_string_too_large(len);
+  }
+  auto const sd = Make(StringSlice(data, len), CopyString);
+  free(data);
+  assert(sd->checkSane());
+  return sd;
+}
+
 StringData* StringData::Make(StringSlice r1, StringSlice r2) {
   auto const len      = r1.len + r2.len;
   auto const allocRet = allocFlatForLen(len);
   auto const sd       = allocRet.first;
-  auto const cap      = allocRet.second;
+  auto const capCode  = allocRet.second;
   auto const data     = reinterpret_cast<char*>(sd + 1);
 
   sd->m_data        = data;
-  sd->m_lenAndCount = len;
-  sd->m_capAndHash  = cap - sizeof(StringData);
+  sd->m_capAndCount = HeaderKind::String << 24 | capCode; // count=0
+  sd->m_lenAndHash  = len; // hash=0
 
   memcpy(data, r1.ptr, r1.len);
   memcpy(data + r1.len, r2.ptr, r2.len);
@@ -439,51 +307,166 @@ StringData* StringData::Make(StringSlice r1, StringSlice r2) {
   return sd;
 }
 
-HOT_FUNC
 StringData* StringData::Make(StringSlice s1, const char* lit2) {
   return Make(s1, StringSlice(lit2, strlen(lit2)));
 }
 
-HOT_FUNC NEVER_INLINE
-void StringData::releaseDataSlowPath() {
-  assert(!isFlat());
-  assert(isShared());
-  assert(checkSane());
-
-  sharedPayload()->shared->decRef();
-  delist();
-  freeForSize(this, sizeof(StringData) + sizeof(SharedPayload));
-}
-
-HOT_FUNC
-void StringData::release() {
-  assert(checkSane());
-
-  if (UNLIKELY(!isFlat())) {
-    return releaseDataSlowPath();
-  }
-  freeForSize(this, sizeof(StringData) + m_cap);
-}
-
-HOT_FUNC
-StringData* StringData::Make(int reserveLen) {
-  auto const allocRet = allocFlatForLen(reserveLen);
+StringData* StringData::Make(StringSlice r1, StringSlice r2,
+                             StringSlice r3) {
+  auto const len      = r1.len + r2.len + r3.len;
+  auto const allocRet = allocFlatForLen(len);
   auto const sd       = allocRet.first;
-  auto const cap      = allocRet.second;
+  auto const capCode  = allocRet.second;
   auto const data     = reinterpret_cast<char*>(sd + 1);
 
-  data[0] = 0;
   sd->m_data        = data;
-  sd->m_lenAndCount = 0;
-  sd->m_capAndHash  = cap - sizeof(StringData);
+  sd->m_capAndCount = HeaderKind::String << 24 | capCode; // count=0
+  sd->m_lenAndHash  = len; // hash=0
+
+  void* p;
+  p = memcpy(data,              r1.ptr, r1.len);
+  p = memcpy((char*)p + r1.len, r2.ptr, r2.len);
+      memcpy((char*)p + r2.len, r3.ptr, r3.len);
+  data[len] = 0;
 
   assert(sd->isFlat());
   assert(sd->checkSane());
   return sd;
 }
 
+StringData* StringData::Make(StringSlice r1, StringSlice r2,
+                             StringSlice r3, StringSlice r4) {
+  auto const len      = r1.len + r2.len + r3.len + r4.len;
+  auto const allocRet = allocFlatForLen(len);
+  auto const sd       = allocRet.first;
+  auto const capCode  = allocRet.second;
+  auto const data     = reinterpret_cast<char*>(sd + 1);
+
+  sd->m_data        = data;
+  sd->m_capAndCount = HeaderKind::String << 24 | capCode; // count=0
+  sd->m_lenAndHash  = len; // hash=0
+
+  void* p;
+  p = memcpy(data,              r1.ptr, r1.len);
+  p = memcpy((char*)p + r1.len, r2.ptr, r2.len);
+  p = memcpy((char*)p + r2.len, r3.ptr, r3.len);
+      memcpy((char*)p + r3.len, r4.ptr, r4.len);
+  data[len] = 0;
+
+  assert(sd->isFlat());
+  assert(sd->checkSane());
+  return sd;
+}
+
+//////////////////////////////////////////////////////////////////////
+
+ALWAYS_INLINE void StringData::enlist() {
+  assert(isShared());
+  auto& head = MM().getStringList();
+  // insert after head
+  auto const next = head.next;
+  auto& payload = *sharedPayload();
+  assert(uintptr_t(next) != kMallocFreeWord);
+  payload.node.next = next;
+  payload.node.prev = &head;
+  next->prev = head.next = &payload.node;
+}
+
+NEVER_INLINE
+StringData* StringData::MakeAPCSlowPath(const APCString* shared) {
+  auto const sd = static_cast<StringData*>(
+      MM().smartMallocSize(sizeof(StringData) + sizeof(SharedPayload))
+  );
+  auto const data = shared->getStringData();
+  sd->m_data = const_cast<char*>(data->m_data);
+  sd->m_capAndCount = data->m_capCode; // count=0, kind=data->kind
+  sd->m_lenAndHash = data->m_lenAndHash;
+  sd->sharedPayload()->shared = shared;
+  sd->enlist();
+  shared->getHandle()->reference();
+
+  assert(sd->m_len == data->size());
+  assert(sd->m_count == 0);
+  assert(sd->m_capCode == data->m_capCode);
+  assert(sd->m_hash == data->m_hash);
+  assert(sd->m_kind == HeaderKind::String);
+  assert(sd->isShared());
+  assert(sd->checkSane());
+  return sd;
+}
+
+StringData* StringData::Make(const APCString* shared) {
+  // No need to check if len > MaxSize, because if it were we'd never
+  // have made the StringData in the APCVariant without throwing.
+  assert(size_t(shared->getStringData()->size()) <= size_t(MaxSize));
+
+  auto const data = shared->getStringData();
+  auto const len = data->size();
+  if (UNLIKELY(len > SmallStringReserve)) {
+    return MakeAPCSlowPath(shared);
+  }
+
+  // small-string path
+  auto const psrc = data->data();
+  auto const hash = data->m_hash & STRHASH_MASK;
+  assert(hash != 0);
+
+  static_assert(SmallStringReserve + sizeof(StringData) + 1 <
+                kPackedCapCodeThreshold, "");
+  auto const need = sizeof(StringData) + len + 1;
+  auto const cap = MemoryManager::smartSizeClass(need);
+  auto const sd = static_cast<StringData*>(MM().smartMallocSize(cap));
+  auto const pdst = reinterpret_cast<char*>(sd + 1);
+  auto const capCode = cap - kCapOverhead;
+  assert(capCode == packedCapToCode(cap - kCapOverhead));
+
+  sd->m_data = pdst;
+  sd->m_capAndCount = HeaderKind::String << 24 | capCode; // count=0
+  sd->m_lenAndHash = len | int64_t{hash} << 32;
+
+  pdst[len] = 0;
+  auto const mcret = memcpy(pdst, psrc, len);
+  auto const ret = reinterpret_cast<StringData*>(mcret) - 1;
+  // Recalculating ret from mcret avoids a spill.
+
+  // Note: this return value thing is doing a dead lea into %rsi in
+  // the caller for some reason.
+
+  assert(ret == sd);
+  assert(ret->m_len == len);
+  assert(ret->m_count == 0);
+  assert(ret->m_hash == hash);
+  assert(ret->isFlat());
+  assert(ret->checkSane());
+  return ret;
+}
+
+NEVER_INLINE
+void StringData::releaseDataSlowPath() {
+  assert(!isFlat());
+  assert(isShared());
+  assert(checkSane());
+
+  sharedPayload()->shared->getHandle()->unreference();
+  delist();
+  freeForSize(this, sizeof(StringData) + sizeof(SharedPayload));
+}
+
+void StringData::release() {
+  assert(checkSane());
+  if (UNLIKELY(!isFlat())) return releaseDataSlowPath();
+  freeForSize(this, capacity() + kCapOverhead);
+}
+
+//////////////////////////////////////////////////////////////////////
+
+#define ALIASING_APPEND_ASSERT(ptr, len)                        \
+  assert(uintptr_t(ptr) <= uintptr_t(data()) ||                 \
+         uintptr_t(ptr) >= uintptr_t(data() + capacity() + 1)); \
+  assert(ptr != data() || len <= m_len);
+
 StringData* StringData::append(StringSlice range) {
-  assert(!isStatic() && getCount() <= 1);
+  assert(!hasMultipleRefs());
 
   auto s = range.ptr;
   auto const len = range.len;
@@ -493,7 +476,7 @@ StringData* StringData::append(StringSlice range) {
     throw_string_too_large(len);
   }
   if (UNLIKELY(size_t(m_len) + size_t(len) > MaxSize)) {
-    throw_string_too_large2(size_t(len) + size_t(m_len));
+    throw_string_too_large(size_t(len) + size_t(m_len));
   }
 
   auto const newLen = m_len + len;
@@ -503,13 +486,11 @@ StringData* StringData::append(StringSlice range) {
    * interior pointer, although we may be asked to append less than
    * the whole string in an aliasing situation.
    */
-  assert(uintptr_t(s) <= uintptr_t(rawdata()) ||
-         uintptr_t(s) >= uintptr_t(rawdata() + capacity()));
-  assert(s != rawdata() || len <= m_len);
+  ALIASING_APPEND_ASSERT(s, len);
 
   auto const target = UNLIKELY(isShared()) ? escalate(newLen)
                                            : reserve(newLen);
-  auto const mslice = target->mutableSlice();
+  auto const mslice = target->bufferSlice();
 
   /*
    * memcpy is safe even if it's a self append---the regions will be
@@ -524,35 +505,162 @@ StringData* StringData::append(StringSlice range) {
   return target;
 }
 
-StringData* StringData::reserve(int cap) {
-  assert(!isImmutable() && m_count <= 1 && cap >= 0);
+StringData* StringData::append(StringSlice r1, StringSlice r2) {
+  assert(!hasMultipleRefs());
+
+  auto const len = r1.len + r2.len;
+
+  if (len == 0) return this;
+  if (UNLIKELY(uint32_t(len) > MaxSize)) {
+    throw_string_too_large(len);
+  }
+  if (UNLIKELY(size_t(m_len) + size_t(len) > MaxSize)) {
+    throw_string_too_large(size_t(len) + size_t(m_len));
+  }
+
+  auto const newLen = m_len + len;
+
+  /*
+   * We may have an aliasing append.  We don't allow appending with an
+   * interior pointer, although we may be asked to append less than
+   * the whole string in an aliasing situation.
+   */
+  ALIASING_APPEND_ASSERT(r1.ptr, r1.len);
+  ALIASING_APPEND_ASSERT(r2.ptr, r2.len);
+
+  auto const target = UNLIKELY(isShared()) ? escalate(newLen)
+                                           : reserve(newLen);
+  auto const mslice = target->bufferSlice();
+
+  /*
+   * memcpy is safe even if it's a self append---the regions will be
+   * disjoint, since rN.ptr can't point past the start of our source
+   * pointer, and rN.len is smaller than the old length.
+   */
+  void* p = mslice.ptr;
+  p = memcpy((char*)p + m_len,  r1.ptr, r1.len);
+      memcpy((char*)p + r1.len, r2.ptr, r2.len);
+
+  target->setSize(newLen);
+  assert(target->checkSane());
+
+  return target;
+}
+
+StringData* StringData::append(StringSlice r1,
+                               StringSlice r2,
+                               StringSlice r3) {
+  assert(!hasMultipleRefs());
+
+  auto const len = r1.len + r2.len + r3.len;
+
+  if (len == 0) return this;
+  if (UNLIKELY(uint32_t(len) > MaxSize)) {
+    throw_string_too_large(len);
+  }
+  if (UNLIKELY(size_t(m_len) + size_t(len) > MaxSize)) {
+    throw_string_too_large(size_t(len) + size_t(m_len));
+  }
+
+  auto const newLen = m_len + len;
+
+  /*
+   * We may have an aliasing append.  We don't allow appending with an
+   * interior pointer, although we may be asked to append less than
+   * the whole string in an aliasing situation.
+   */
+  ALIASING_APPEND_ASSERT(r1.ptr, r1.len);
+  ALIASING_APPEND_ASSERT(r2.ptr, r2.len);
+  ALIASING_APPEND_ASSERT(r3.ptr, r3.len);
+
+  auto const target = UNLIKELY(isShared()) ? escalate(newLen)
+                                           : reserve(newLen);
+  auto const mslice = target->bufferSlice();
+
+  /*
+   * memcpy is safe even if it's a self append---the regions will be
+   * disjoint, since rN.ptr can't point past the start of our source
+   * pointer, and rN.len is smaller than the old length.
+   */
+  void* p = mslice.ptr;
+  p = memcpy((char*)p + m_len,  r1.ptr, r1.len);
+  p = memcpy((char*)p + r1.len, r2.ptr, r2.len);
+      memcpy((char*)p + r2.len, r3.ptr, r3.len);
+
+  target->setSize(newLen);
+  assert(target->checkSane());
+
+  return target;
+}
+
+#undef ALIASING_APPEND_ASSERT
+
+//////////////////////////////////////////////////////////////////////
+
+StringData* StringData::reserve(size_t cap) {
+  assert(!isImmutable() && !hasMultipleRefs());
   assert(isFlat());
 
-  if (cap + 1 <= capacity()) return this;
+  if (cap <= capacity()) return this;
+  cap = std::min(cap + cap/4, size_t(MaxSize) + 1);
 
-  cap += cap >> 2;
-  if (cap > MaxCap) cap = MaxCap;
   auto const sd = Make(cap);
   auto const src = slice();
   auto const dst = sd->mutableData();
   sd->setSize(src.len);
+
   auto const mcret = memcpy(dst, src.ptr, src.len);
   auto const ret = static_cast<StringData*>(mcret) - 1;
+  // Recalculating ret from mcret avoids a spill.
+
   assert(ret == sd);
   assert(ret->checkSane());
   return ret;
 }
 
+StringData* StringData::shrinkImpl(size_t len) {
+  assert(!isImmutable() && !hasMultipleRefs());
+  assert(isFlat());
+  assert(len <= m_len);
+  assert(len <= capacity());
+
+  auto const sd = Make(len);
+  auto const src = slice();
+  auto const dst = sd->mutableData();
+  assert(len <= src.len);
+  sd->setSize(len);
+
+  auto const mcret = memcpy(dst, src.ptr, len);
+  auto const ret = static_cast<StringData*>(mcret) - 1;
+  // Recalculating ret from mcret avoids a spill.
+
+  assert(ret == sd);
+  assert(ret->checkSane());
+  return ret;
+}
+
+StringData* StringData::shrink(size_t len) {
+  if (len < size() && size() - len > kMinShrinkThreshold) {
+    return shrinkImpl(len);
+  }
+  assert(len < MaxSize);
+  setSize(len);
+  return this;
+}
+
 // State transition from Mode::Shared to Mode::Flat.
-StringData* StringData::escalate(uint32_t cap) {
+StringData* StringData::escalate(size_t cap) {
   assert(isShared() && !isStatic() && cap >= m_len);
 
   auto const sd = Make(cap);
   auto const src = slice();
   auto const dst = sd->mutableData();
   sd->setSize(src.len);
+
   auto const mcret = memcpy(dst, src.ptr, src.len);
   auto const ret = static_cast<StringData*>(mcret) - 1;
+  // Recalculating ret from mcret avoids a spill.
+
   assert(ret == sd);
   assert(ret->checkSane());
   return ret;
@@ -568,7 +676,7 @@ void StringData::dump() const {
   for (uint32_t i = 0; i < s.len; i++) {
     char ch = s.ptr[i];
     if (isprint(ch)) {
-      std::cout << ch;
+      printf("%c", ch);
     } else {
       printf("\\x%02x", ch);
     }
@@ -576,30 +684,12 @@ void StringData::dump() const {
   printf("]\n");
 }
 
-static StringData** precompute_chars() ATTRIBUTE_COLD;
-static StringData** precompute_chars() {
-  StringData** raw = new StringData*[256];
-  for (int i = 0; i < 256; i++) {
-    char s[2] = { (char)i, 0 };
-    raw[i] = StringData::GetStaticString(&s[0], 1);
-  }
-  return raw;
-}
-
-static StringData** precomputed_chars = precompute_chars();
-
-HOT_FUNC
-StringData* StringData::GetStaticString(char c) {
-  return precomputed_chars[(uint8_t)c];
-}
-
-HOT_FUNC
 StringData *StringData::getChar(int offset) const {
   if (offset >= 0 && offset < size()) {
-    return GetStaticString(m_data[offset]);
+    return makeStaticString(m_data[offset]);
   }
   raise_notice("Uninitialized string offset: %d", offset);
-  return GetStaticString("");
+  return makeStaticString("");
 }
 
 StringData* StringData::increment() {
@@ -674,7 +764,7 @@ void StringData::incrementHelper() {
       throw_string_too_large(len);
     }
 
-    assert(len + 2 <= capacity());
+    assert(len + 1 <= capacity());
     memmove(s + 1, s, len);
     s[len + 1] = '\0';
     m_len = len + 1;
@@ -696,7 +786,6 @@ void StringData::incrementHelper() {
 }
 
 void StringData::preCompute() const {
-  assert(!isShared()); // because we are gonna reuse the space!
   StringSlice s = slice();
   m_hash = hash_string(s.ptr, s.len);
   assert(m_hash >= 0);
@@ -707,7 +796,12 @@ void StringData::preCompute() const {
 }
 
 void StringData::setStatic() const {
-  m_count = RefCountStaticValue;
+  m_count = StaticValue;
+  preCompute();
+}
+
+void StringData::setUncounted() const {
+  m_count = UncountedValue;
   preCompute();
 }
 
@@ -715,12 +809,12 @@ void StringData::setStatic() const {
 // type conversions
 
 DataType StringData::isNumericWithVal(int64_t &lval, double &dval,
-                                      int allow_errors) const {
+                                      int allow_errors, int* overflow) const {
   if (m_hash < 0) return KindOfNull;
   DataType ret = KindOfNull;
   StringSlice s = slice();
   if (s.len) {
-    ret = is_numeric_string(s.ptr, s.len, &lval, &dval, allow_errors);
+    ret = is_numeric_string(s.ptr, s.len, &lval, &dval, allow_errors, overflow);
     if (ret == KindOfNull && !isShared() && allow_errors) {
       m_hash |= STRHASH_MSB;
     }
@@ -733,14 +827,23 @@ bool StringData::isNumeric() const {
   int64_t lval; double dval;
   DataType ret = isNumericWithVal(lval, dval, 0);
   switch (ret) {
-  case KindOfNull:   return false;
-  case KindOfInt64:
-  case KindOfDouble: return true;
-  default:
-    assert(false);
-    break;
+    case KindOfNull:
+      return false;
+    case KindOfInt64:
+    case KindOfDouble:
+      return true;
+    case KindOfUninit:
+    case KindOfBoolean:
+    case KindOfStaticString:
+    case KindOfString:
+    case KindOfArray:
+    case KindOfObject:
+    case KindOfResource:
+    case KindOfRef:
+    case KindOfClass:
+      break;
   }
-  return false;
+  not_reached();
 }
 
 bool StringData::isInteger() const {
@@ -748,14 +851,23 @@ bool StringData::isInteger() const {
   int64_t lval; double dval;
   DataType ret = isNumericWithVal(lval, dval, 0);
   switch (ret) {
-  case KindOfNull:   return false;
-  case KindOfInt64:  return true;
-  case KindOfDouble: return false;
-  default:
-    assert(false);
-    break;
+    case KindOfNull:
+    case KindOfDouble:
+      return false;
+    case KindOfInt64:
+      return true;
+    case KindOfUninit:
+    case KindOfBoolean:
+    case KindOfStaticString:
+    case KindOfString:
+    case KindOfArray:
+    case KindOfObject:
+    case KindOfResource:
+    case KindOfRef:
+    case KindOfClass:
+      break;
   }
-  return false;
+  not_reached();
 }
 
 bool StringData::toBoolean() const {
@@ -763,7 +875,7 @@ bool StringData::toBoolean() const {
 }
 
 int64_t StringData::toInt64(int base /* = 10 */) const {
-  return strtoll(rawdata(), nullptr, base);
+  return strtoll(data(), nullptr, base);
 }
 
 double StringData::toDouble() const {
@@ -782,7 +894,6 @@ DataType StringData::toNumeric(int64_t &lval, double &dval) const {
 ///////////////////////////////////////////////////////////////////////////////
 // comparisons
 
-HOT_FUNC
 bool StringData::equal(const StringData *s) const {
   assert(s);
   if (s == this) return true;
@@ -797,18 +908,21 @@ bool StringData::equal(const StringData *s) const {
   return same(s);
 }
 
-HOT_FUNC
 int StringData::numericCompare(const StringData *v2) const {
   assert(v2);
 
+  int oflow1, oflow2;
   int64_t lval1, lval2;
   double dval1, dval2;
   DataType ret1, ret2;
-  if ((ret1 = isNumericWithVal(lval1, dval1, 0)) == KindOfNull ||
+  if ((ret1 = isNumericWithVal(lval1, dval1, 0, &oflow1)) == KindOfNull ||
       (ret1 == KindOfDouble && !finite(dval1)) ||
-      (ret2 = v2->isNumericWithVal(lval2, dval2, 0)) == KindOfNull ||
+      (ret2 = v2->isNumericWithVal(lval2, dval2, 0, &oflow2)) == KindOfNull ||
       (ret2 == KindOfDouble && !finite(dval2))) {
     return -2;
+  }
+  if (oflow1 && oflow1 == oflow2 && dval1 == dval2) {
+    return -2; // overflow in same direction, comparison will be inaccurate
   }
   if (ret1 == KindOfInt64 && ret2 == KindOfInt64) {
     if (lval1 > lval2) return 1;
@@ -822,10 +936,16 @@ int StringData::numericCompare(const StringData *v2) const {
   }
   if (ret1 == KindOfDouble) {
     assert(ret2 == KindOfInt64);
+    if (oflow1) {
+      return oflow1;
+    }
     dval2 = (double)lval2;
   } else {
     assert(ret1 == KindOfInt64);
     assert(ret2 == KindOfDouble);
+    if (oflow2) {
+      return -oflow2;
+    }
     dval1 = (double)lval1;
   }
 
@@ -834,7 +954,6 @@ int StringData::numericCompare(const StringData *v2) const {
   return -1;
 }
 
-HOT_FUNC
 int StringData::compare(const StringData *v2) const {
   assert(v2);
 
@@ -845,7 +964,7 @@ int StringData::compare(const StringData *v2) const {
     int len1 = size();
     int len2 = v2->size();
     int len = len1 < len2 ? len1 : len2;
-    ret = memcmp(rawdata(), v2->rawdata(), len);
+    ret = memcmp(data(), v2->data(), len);
     if (ret) return ret;
     if (len1 == len2) return 0;
     return len < len1 ? 1 : -1;
@@ -853,10 +972,9 @@ int StringData::compare(const StringData *v2) const {
   return ret;
 }
 
-HOT_FUNC
 strhash_t StringData::hashHelper() const {
-  strhash_t h = isShared() ? sharedPayload()->shared->stringHash()
-                           : hash_string_inline(m_data, m_len);
+  assert(!isShared());
+  strhash_t h = hash_string_inline(m_data, m_len);
   assert(h >= 0);
   m_hash |= h;
   return h;
@@ -865,7 +983,7 @@ strhash_t StringData::hashHelper() const {
 ///////////////////////////////////////////////////////////////////////////////
 // Debug
 
-std::string StringData::toCPPString() const {
+std::string StringData::toCppString() const {
   StringSlice s = slice();
   return std::string(s.ptr, s.len);
 }
@@ -874,29 +992,16 @@ bool StringData::checkSane() const {
   static_assert(sizeof(StringData) == 24,
                 "StringData size changed---update assertion if you mean it");
   static_assert(size_t(MaxSize) <= size_t(INT_MAX), "Beware int wraparound");
+  static_assert(offsetof(StringData, m_kind) == HeaderKindOffset, "");
   static_assert(offsetof(StringData, m_count) == FAST_REFCOUNT_OFFSET,
                 "m_count at wrong offset");
-  static_assert(offsetof(StringSlice, ptr) == offsetof(StringData, m_data) &&
-                offsetof(StringSlice, len) == offsetof(StringData, m_len),
-                "StringSlice and StringData must have same pointer and size "
-                "layout for the StaticString map");
 
   assert(uint32_t(size()) <= MaxSize);
-  assert(uint32_t(capacity()) <= MaxCap);
+  assert(capacity() <= MaxSize);
   assert(size() >= 0);
-
-  if (!isShared()) {
-    assert(size() < capacity());
-  } else {
-    assert(capacity() == 0);
-  }
-
-  if (isFlat()) {
-    assert(m_data == voidPayload());
-  } else {
-    assert(m_data && m_data != voidPayload());
-  }
-
+  assert(size() <= capacity());
+  // isFlat() and isShared() both check whether m_data == voidPayload,
+  // which guarantees by definition that isFlat() != isShared()
   return true;
 }
 

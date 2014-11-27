@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,57 +24,51 @@
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/execution-context.h"
 #include "hphp/runtime/base/strings.h"
-#include "hphp/runtime/base/file-repository.h"
+#include "hphp/runtime/base/unit-cache.h"
 #include "hphp/runtime/debugger/debugger.h"
-#include "hphp/runtime/ext/ext_process.h"
-#include "hphp/runtime/ext/ext_class.h"
-#include "hphp/runtime/ext/ext_function.h"
-#include "hphp/runtime/ext/ext_file.h"
+#include "hphp/runtime/ext/process/ext_process.h"
+#include "hphp/runtime/ext/std/ext_std_function.h"
 #include "hphp/runtime/ext/ext_collections.h"
-#include "hphp/runtime/ext/ext_string.h"
+#include "hphp/runtime/ext/string/ext_string.h"
 #include "hphp/util/logger.h"
-#include "hphp/util/util.h"
 #include "hphp/util/process.h"
 #include "hphp/runtime/vm/repo.h"
 #include "hphp/runtime/vm/jit/translator.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/unit.h"
+#include "hphp/runtime/vm/unit-util.h"
 #include "hphp/runtime/vm/event-hook.h"
 #include "hphp/system/systemlib.h"
-#include "folly/Format.h"
+#include <folly/Format.h>
+#include "hphp/util/text-util.h"
+#include "hphp/util/string-vsnprintf.h"
+#include "hphp/runtime/base/file-util.h"
+#include "hphp/runtime/base/container-functions.h"
+#include "hphp/runtime/base/request-injection-data.h"
+#include "hphp/runtime/base/backtrace.h"
 
 #include <limits>
-
-using namespace HPHP::MethodLookup;
+#include <algorithm>
 
 namespace HPHP {
+
+using std::string;
+
 ///////////////////////////////////////////////////////////////////////////////
 // static strings
 
 const StaticString
   s_offsetExists("offsetExists"),
-  s___autoload("__autoload"),
   s___call("__call"),
   s___callStatic("__callStatic"),
   s___invoke("__invoke"),
-  s_exception("exception"),
-  s_previous("previous"),
   s_self("self"),
   s_parent("parent"),
-  s_static("static"),
-  s_class("class"),
-  s_function("function"),
-  s_constant("constant"),
-  s_type("type"),
-  s_failure("failure"),
-  s_Traversable("Traversable"),
-  s_KeyedTraversable("KeyedTraversable"),
-  s_Indexish("Indexish"),
-  s_XHPChild("XHPChild");
+  s_static("static");
 
 ///////////////////////////////////////////////////////////////////////////////
 
-bool array_is_valid_callback(CArrRef arr) {
+bool array_is_valid_callback(const Array& arr) {
   if (arr.size() != 2 || !arr.exists(int64_t(0)) || !arr.exists(int64_t(1))) {
     return false;
   }
@@ -90,7 +84,7 @@ bool array_is_valid_callback(CArrRef arr) {
 }
 
 const HPHP::Func*
-vm_decode_function(CVarRef function,
+vm_decode_function(const Variant& function,
                    ActRec* ar,
                    bool forwarding,
                    ObjectData*& this_,
@@ -136,21 +130,21 @@ vm_decode_function(CVarRef function,
       Variant elem0 = arr.rvalAt(int64_t(0));
       if (elem0.isString()) {
         String sclass = elem0.toString();
-        if (sclass->isame(s_self.get())) {
+        if (sclass.get()->isame(s_self.get())) {
           if (ctx) {
             cls = ctx;
           }
           if (!nameContainsClass) {
             forwarding = true;
           }
-        } else if (sclass->isame(s_parent.get())) {
+        } else if (sclass.get()->isame(s_parent.get())) {
           if (ctx && ctx->parent()) {
             cls = ctx->parent();
           }
           if (!nameContainsClass) {
             forwarding = true;
           }
-        } else if (sclass->isame(s_static.get())) {
+        } else if (sclass.get()->isame(s_static.get())) {
           if (ar) {
             if (ar->hasThis()) {
               cls = ar->getThis()->getVMClass();
@@ -161,11 +155,10 @@ vm_decode_function(CVarRef function,
         } else {
           if (warn && nameContainsClass) {
             String nameClass = name.substr(0, pos);
-            if (nameClass->isame(s_self.get())   ||
-                nameClass->isame(s_parent.get()) ||
-                nameClass->isame(s_static.get())) {
+            if (nameClass.get()->isame(s_self.get())   ||
+                nameClass.get()->isame(s_static.get())) {
               raise_warning("behavior of call_user_func(array('%s', '%s')) "
-                            "is undefined", sclass->data(), name->data());
+                            "is undefined", sclass.data(), name.data());
             }
           }
           cls = Unit::loadClass(sclass.get());
@@ -187,7 +180,7 @@ vm_decode_function(CVarRef function,
     if (nameContainsClass) {
       String c = name.substr(0, pos);
       name = name.substr(pos + 2);
-      if (c->isame(s_self.get())) {
+      if (c.get()->isame(s_self.get())) {
         if (cls) {
           cc = cls;
         } else if (ctx) {
@@ -196,7 +189,7 @@ vm_decode_function(CVarRef function,
         if (!this_) {
           forwarding = true;
         }
-      } else if (c->isame(s_parent.get())) {
+      } else if (c.get()->isame(s_parent.get())) {
         if (cls) {
           cc = cls->parent();
         } else if (ctx && ctx->parent()) {
@@ -205,7 +198,7 @@ vm_decode_function(CVarRef function,
         if (!this_) {
           forwarding = true;
         }
-      } else if (c->isame(s_static.get())) {
+      } else if (c.get()->isame(s_static.get())) {
         if (ar) {
           if (ar->hasThis()) {
             cc = ar->getThis()->getVMClass();
@@ -243,7 +236,7 @@ vm_decode_function(CVarRef function,
       if (!f) {
         if (warn) {
           throw_invalid_argument("function: method '%s' not found",
-                                 name->data());
+                                 name.data());
         }
         return nullptr;
       }
@@ -253,7 +246,7 @@ vm_decode_function(CVarRef function,
     assert(cls);
     CallType lookupType = this_ ? CallType::ObjMethod : CallType::ClsMethod;
     const HPHP::Func* f =
-      g_vmContext->lookupMethodCtx(cc, name.get(), ctx, lookupType);
+      g_context->lookupMethodCtx(cc, name.get(), ctx, lookupType);
     if (f && (f->attrs() & AttrStatic)) {
       // If we found a method and its static, null out this_
       this_ = nullptr;
@@ -279,7 +272,7 @@ vm_decode_function(CVarRef function,
           assert(!f || (f->attrs() & AttrStatic));
           this_ = nullptr;
         }
-        if (f) {
+        if (f && (cc == cls || cc->lookupMethod(f->name()))) {
           // We found __call or __callStatic!
           // Stash the original name into invName.
           invName = name.get();
@@ -288,12 +281,20 @@ vm_decode_function(CVarRef function,
           // Bail out if we couldn't find the method or __call
           if (warn) {
             throw_invalid_argument("function: method '%s' not found",
-                                   name->data());
+                                   name.data());
           }
           return nullptr;
         }
       }
     }
+
+    if (f->isClosureBody() && !this_) {
+      if (warn) {
+        raise_warning("cannot invoke closure body without closure object");
+      }
+      return nullptr;
+    }
+
     assert(f && f->preClass());
     // If this_ is non-NULL, then this_ is the current instance and cls is
     // the class of the current instance.
@@ -326,6 +327,11 @@ vm_decode_function(CVarRef function,
       cls = this_->getVMClass();
       this_ = nullptr;
     }
+    if (warn && f == nullptr) {
+      raise_warning("call_user_func() expects parameter 1 to be a valid "
+                    "callback, object of class %s given (no __invoke "
+                    "method found)", this_->getVMClass()->name()->data());
+    }
     return f;
   }
   if (warn) {
@@ -334,76 +340,72 @@ vm_decode_function(CVarRef function,
   return nullptr;
 }
 
-Variant vm_call_user_func(CVarRef function, CArrRef params,
+Variant vm_call_user_func(const Variant& function, const Variant& params,
                           bool forwarding /* = false */) {
   ObjectData* obj = nullptr;
-  HPHP::Class* cls = nullptr;
-  HPHP::Transl::CallerFrame cf;
+  Class* cls = nullptr;
+  CallerFrame cf;
   StringData* invName = nullptr;
-  const HPHP::Func* f = vm_decode_function(function, cf(), forwarding,
-                                           obj, cls, invName);
-  if (f == nullptr) {
+  const Func* f = vm_decode_function(function, cf(), forwarding,
+                                     obj, cls, invName);
+  if (f == nullptr || (!isContainer(params) && !params.isNull())) {
     return uninit_null();
   }
   Variant ret;
-  g_vmContext->invokeFunc((TypedValue*)&ret, f, params, obj, cls,
+  g_context->invokeFunc((TypedValue*)&ret, f, params, obj, cls,
                           nullptr, invName, ExecutionContext::InvokeCuf);
   return ret;
 }
 
-Variant invoke(CStrRef function, CArrRef params, strhash_t hash /* = -1 */,
-               bool tryInterp /* = true */, bool fatal /* = true */) {
-  Func* func = Unit::loadFunc(function.get());
-  if (func) {
-    Variant ret;
-    g_vmContext->invokeFunc(ret.asTypedValue(), func, params);
-    return ret;
+static Variant invoke_failed(const char *func,
+                             bool fatal /* = true */) {
+  if (fatal) {
+    throw ExtendedException("(1) call the function without enough arguments OR "
+                            "(2) Unable to find function \"%s\" OR "
+                            "(3) function was not in invoke table OR "
+                            "(4) function was renamed to something else.",
+                            func);
   }
-  return invoke_failed(function.c_str(), params, fatal);
+  raise_warning("call_user_func to non-existent function %s", func);
+  return false;
 }
 
-Variant invoke(const char *function, CArrRef params, strhash_t hash /* = -1*/,
+static Variant invoke(const String& function, const Variant& params,
+                      strhash_t hash, bool tryInterp,
+                      bool fatal) {
+  Func* func = Unit::loadFunc(function.get());
+  if (func && (isContainer(params) || params.isNull())) {
+    Variant ret;
+    g_context->invokeFunc(ret.asTypedValue(), func, params);
+    return ret;
+  }
+  return invoke_failed(function.c_str(), fatal);
+}
+
+// Declared in externals.h.  If you're considering calling this
+// function for some new code, please reconsider.
+Variant invoke(const char *function, const Variant& params, strhash_t hash /* = -1 */,
                bool tryInterp /* = true */, bool fatal /* = true */) {
   String funcName(function, CopyString);
   return invoke(funcName, params, hash, tryInterp, fatal);
 }
 
-Variant invoke_static_method(CStrRef s, CStrRef method, CArrRef params,
-                             bool fatal /* = true */) {
+Variant invoke_static_method(const String& s, const String& method,
+                             const Variant& params, bool fatal /* = true */) {
   HPHP::Class* class_ = Unit::lookupClass(s.get());
   if (class_ == nullptr) {
     o_invoke_failed(s.data(), method.data(), fatal);
     return uninit_null();
   }
   const HPHP::Func* f = class_->lookupMethod(method.get());
-  if (f == nullptr || !(f->attrs() & AttrStatic)) {
+  if (f == nullptr || !(f->attrs() & AttrStatic) ||
+    (!isContainer(params) && !params.isNull())) {
     o_invoke_failed(s.data(), method.data(), fatal);
     return uninit_null();
   }
   Variant ret;
-  g_vmContext->invokeFunc((TypedValue*)&ret, f, params, nullptr, class_);
+  g_context->invokeFunc((TypedValue*)&ret, f, params, nullptr, class_);
   return ret;
-}
-
-Variant invoke_failed(CVarRef func, CArrRef params,
-                      bool fatal /* = true */) {
-  if (func.isObject()) {
-    return o_invoke_failed(
-        func.objectForCall()->o_getClassName().c_str(),
-        "__invoke", fatal);
-  } else {
-    return invoke_failed(func.toString().c_str(), params, fatal);
-  }
-}
-
-Variant invoke_failed(const char *func, CArrRef params,
-                      bool fatal /* = true */) {
-  if (fatal) {
-    throw InvalidFunctionCallException(func);
-  } else {
-    raise_warning("call_user_func to non-existent function %s", func);
-    return false;
-  }
 }
 
 Variant o_invoke_failed(const char *cls, const char *meth,
@@ -428,16 +430,11 @@ void NEVER_INLINE throw_null_get_object_prop() {
   raise_error("Trying to get property of non-object");
 }
 
-void NEVER_INLINE throw_null_object_prop() {
-  raise_error("Trying to set property of non-object");
-}
-
-void NEVER_INLINE throw_invalid_property_name(CStrRef name) {
+void NEVER_INLINE throw_invalid_property_name(const String& name) {
   if (!name.size()) {
-    throw EmptyObjectPropertyException();
-  } else {
-    throw NullStartObjectPropertyException();
+    raise_error("Cannot access empty property");
   }
+  raise_error("Cannot access property started with '\\0'");
 }
 
 void throw_instance_method_fatal(const char *name) {
@@ -468,11 +465,25 @@ void throw_collection_compare_exception() {
   static const string msg(
     "Cannot use relational comparison operators (<, <=, >, >=) to compare "
     "a collection with an integer, double, string, array, or object");
-  Object e(SystemLib::AllocRuntimeExceptionObject(msg));
+  Object e(SystemLib::AllocInvalidOperationExceptionObject(msg));
   throw e;
 }
 
-// TODO
+void throw_param_is_not_container() {
+  static const string msg("Parameter must be an array or collection");
+  Object e(SystemLib::AllocInvalidArgumentExceptionObject(msg));
+  throw e;
+}
+
+void throw_cannot_modify_immutable_object(const char* className) {
+  auto msg = folly::format(
+    "Cannot modify immutable object of type {}",
+    className
+  ).str();
+  Object e(SystemLib::AllocInvalidOperationExceptionObject(msg));
+  throw e;
+}
+
 void check_collection_compare(ObjectData* obj) {
   if (obj && obj->isCollection()) throw_collection_compare_exception();
 }
@@ -492,12 +503,12 @@ void check_collection_cast_to_array() {
   }
 }
 
-Object create_object_only(CStrRef s) {
-  return g_vmContext->createObjectOnly(s.get());
+Object create_object_only(const String& s) {
+  return g_context->createObjectOnly(s.get());
 }
 
-Object create_object(CStrRef s, CArrRef params, bool init /* = true */) {
-  return g_vmContext->createObject(s.get(), params, init);
+Object create_object(const String& s, const Array& params, bool init /* = true */) {
+  return g_context->createObject(s.get(), params, init);
 }
 
 /*
@@ -509,68 +520,63 @@ void pause_forever() {
   for (;;) sleep(300);
 }
 
-ssize_t check_request_surprise(ThreadInfo *info) {
-  RequestInjectionData &p = info->m_reqInjectionData;
-  bool do_timedout, do_memExceeded, do_signaled;
-
-  ssize_t flags = p.fetchAndClearFlags();
-  do_timedout = (flags & RequestInjectionData::TimedOutFlag) &&
-    !p.getDebugger();
-  do_memExceeded = (flags & RequestInjectionData::MemExceededFlag);
-  do_signaled = (flags & RequestInjectionData::SignaledFlag);
-
-  // Start with any pending exception that might be on the thread.
-  Exception* pendingException = info->m_pendingException;
-  info->m_pendingException = nullptr;
-
-  if (do_timedout && !pendingException) {
-    pendingException = generate_request_timeout_exception();
+void throw_wrong_argument_count_nr(const char *fn, int expected, int got,
+                                   const char *expectDesc,
+                                   int level /* = 0 */,
+                                   TypedValue *rv /* = nullptr */) {
+  if (rv != nullptr) {
+    rv->m_data.num = 0LL;
+    rv->m_type = KindOfNull;
   }
-  if (do_memExceeded && !pendingException) {
-    pendingException = generate_memory_exceeded_exception();
-  }
-  if (do_signaled) f_pcntl_signal_dispatch();
-
-  if (pendingException) {
-    pendingException->throwException();
-  }
-  return flags;
-}
-
-void throw_missing_arguments_nr(const char *fn, int expected, int got,
-                                int level /* = 0 */) {
-  if (level == 2 || RuntimeOption::ThrowMissingArguments) {
+  if (level == 2) {
     if (expected == 1) {
-      raise_error(Strings::MISSING_ARGUMENT, fn, got);
+      raise_error(Strings::MISSING_ARGUMENT, fn, expectDesc, got);
     } else {
-      raise_error(Strings::MISSING_ARGUMENTS, fn, expected, got);
+      raise_error(Strings::MISSING_ARGUMENTS, fn, expectDesc, expected, got);
     }
   } else {
     if (expected == 1) {
-      raise_warning(Strings::MISSING_ARGUMENT, fn, got);
+      raise_warning(Strings::MISSING_ARGUMENT, fn, expectDesc, got);
     } else {
-      raise_warning(Strings::MISSING_ARGUMENTS, fn, expected, got);
+      raise_warning(Strings::MISSING_ARGUMENTS, fn, expectDesc, expected, got);
     }
   }
 }
 
-void throw_toomany_arguments_nr(const char *fn, int num, int level /* = 0 */) {
-  if (level == 2 || RuntimeOption::ThrowTooManyArguments) {
-    raise_error("Too many arguments for %s(), expected %d", fn, num);
-  } else if (level == 1 || RuntimeOption::WarnTooManyArguments) {
-    raise_warning("Too many arguments for %s(), expected %d", fn, num);
-  }
+void throw_missing_arguments_nr(const char *fn, int expected, int got,
+                                int level /* = 0 */,
+                                TypedValue *rv /* = nullptr */) {
+  throw_wrong_argument_count_nr(fn, expected, got, "exactly", level, rv);
+}
+
+void throw_toomany_arguments_nr(const char *fn, int expected, int got,
+                                int level /* = 0 */,
+                                TypedValue *rv /* = nullptr */) {
+  throw_wrong_argument_count_nr(fn, expected, got, "exactly", level, rv);
 }
 
 void throw_wrong_arguments_nr(const char *fn, int count, int cmin, int cmax,
-                              int level /* = 0 */) {
+                              int level /* = 0 */,
+                              TypedValue *rv /* = nullptr */) {
   if (cmin >= 0 && count < cmin) {
-    throw_missing_arguments_nr(fn, cmin, count, level);
+    if (cmin != cmax) {
+      throw_wrong_argument_count_nr(fn, cmin, count, "at least", level, rv);
+    } else {
+      throw_wrong_argument_count_nr(fn, cmin, count, "exactly", level, rv);
+    }
     return;
   }
   if (cmax >= 0 && count > cmax) {
-    throw_toomany_arguments_nr(fn, cmax, level);
+    if (cmin != cmax) {
+      throw_wrong_argument_count_nr(fn, cmax, count, "at most", level, rv);
+    } else {
+      throw_wrong_argument_count_nr(fn, cmax, count, "exactly", level, rv);
+    }
     return;
+  }
+  if (rv != nullptr) {
+    rv->m_data.num = 0LL;
+    rv->m_type = KindOfNull;
   }
   assert(false);
 }
@@ -578,52 +584,43 @@ void throw_wrong_arguments_nr(const char *fn, int count, int cmin, int cmax,
 void throw_bad_type_exception(const char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
-  string msg;
-  Util::string_vsnprintf(msg, fmt, ap);
+  std::string msg;
+  string_vsnprintf(msg, fmt, ap);
   va_end(ap);
-
-  if (RuntimeOption::ThrowBadTypeExceptions) {
-    throw InvalidOperandException(msg.c_str());
-  }
 
   raise_warning("Invalid operand type was used: %s", msg.c_str());
 }
 
-void throw_bad_array_exception() {
+void throw_expected_array_exception() {
   const char* fn = "(unknown)";
-  ActRec *ar = g_vmContext->getStackFrame();
+  ActRec *ar = g_context->getStackFrame();
   if (ar) {
     fn = ar->m_func->name()->data();
   }
   throw_bad_type_exception("%s expects array(s)", fn);
 }
 
+void throw_expected_array_or_collection_exception() {
+  const char* fn = "(unknown)";
+  ActRec *ar = g_context->getStackFrame();
+  if (ar) {
+    fn = ar->m_func->name()->data();
+  }
+  throw_bad_type_exception("%s expects array(s) or collection(s)", fn);
+}
+
 void throw_invalid_argument(const char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
   string msg;
-  Util::string_vsnprintf(msg, fmt, ap);
+  string_vsnprintf(msg, fmt, ap);
   va_end(ap);
-
-  if (RuntimeOption::ThrowInvalidArguments) {
-    throw InvalidArgumentException(msg.c_str());
-  }
-
   raise_warning("Invalid argument: %s", msg.c_str());
 }
 
 Variant throw_fatal_unset_static_property(const char *s, const char *prop) {
   raise_error("Attempt to unset static property %s::$%s", s, prop);
   return uninit_null();
-}
-
-void throw_infinite_recursion_exception() {
-  if (!RuntimeOption::NoInfiniteRecursionDetection) {
-    // Reset profiler otherwise it might recurse further causing segfault
-    DECLARE_THREAD_INFO
-    info->m_profiler = nullptr;
-    throw UncatchableException("infinite recursion detected");
-  }
 }
 
 Exception* generate_request_timeout_exception() {
@@ -637,98 +634,29 @@ Exception* generate_request_timeout_exception() {
     "entire web request took longer than ";
   exceptionMsg += folly::to<std::string>(data.getTimeout());
   exceptionMsg += cli ? " seconds exceeded" : " seconds and timed out";
-  ArrayHolder exceptionStack;
-  if (RuntimeOption::InjectedStackTrace) {
-    exceptionStack = g_vmContext->debugBacktrace(false, true, true).get();
-  }
-  ret = new RequestTimeoutException(exceptionMsg, exceptionStack.get());
-
+  Array exceptionStack = createBacktrace(BacktraceArgs()
+                                         .withSelf()
+                                         .withThis());
+  ret = new RequestTimeoutException(exceptionMsg, exceptionStack);
   return ret;
 }
 
 Exception* generate_memory_exceeded_exception() {
-  ArrayHolder exceptionStack;
-  if (RuntimeOption::InjectedStackTrace) {
-    exceptionStack = g_vmContext->debugBacktrace(false, true, true).get();
-  }
+  Array exceptionStack = createBacktrace(BacktraceArgs()
+                                         .withSelf()
+                                         .withThis());
   return new RequestMemoryExceededException(
-    "request has exceeded memory limit", exceptionStack.get());
-}
-
-void throw_call_non_object() {
-  throw_call_non_object(nullptr);
-}
-
-void throw_call_non_object(const char *methodName) {
-  std::string msg;
-
-  if (methodName == nullptr) {
-    msg = "Call to a member function on a non-object";
-  } else {
-    Util::string_printf(msg,
-                        "Call to a member function %s() on a non-object",
-                        methodName);
-  }
-
-  if (RuntimeOption::ThrowExceptionOnBadMethodCall) {
-    Object e(SystemLib::AllocBadMethodCallExceptionObject(String(msg)));
-    throw e;
-  }
-
-  throw FatalErrorException(msg.c_str());
-}
-
-String f_serialize(CVarRef value) {
-  switch (value.getType()) {
-  case KindOfUninit:
-  case KindOfNull:
-    return "N;";
-  case KindOfBoolean:
-    return value.getBoolean() ? "b:1;" : "b:0;";
-  case KindOfInt64: {
-    StringBuffer sb;
-    sb.append("i:");
-    sb.append(value.getInt64());
-    sb.append(';');
-    return sb.detach();
-  }
-  case KindOfStaticString:
-  case KindOfString: {
-    StringData *str = value.getStringData();
-    StringBuffer sb;
-    sb.append("s:");
-    sb.append(str->size());
-    sb.append(":\"");
-    sb.append(str->data(), str->size());
-    sb.append("\";");
-    return sb.detach();
-  }
-  case KindOfArray: {
-    ArrayData *arr = value.getArrayData();
-    if (arr->empty()) return "a:0:{}";
-    // fall-through
-  }
-  case KindOfObject:
-  case KindOfResource:
-  case KindOfDouble: {
-    VariableSerializer vs(VariableSerializer::Type::Serialize);
-    return vs.serialize(value, true);
-  }
-  default:
-    assert(false);
-    break;
-  }
-  return "";
+    "request has exceeded memory limit", exceptionStack);
 }
 
 Variant unserialize_ex(const char* str, int len,
                        VariableUnserializer::Type type,
-                       CArrRef class_whitelist /* = null_array */) {
+                       const Array& class_whitelist /* = null_array */) {
   if (str == nullptr || len <= 0) {
     return false;
   }
 
-  VariableUnserializer vu(str, len, type, false, class_whitelist);
+  VariableUnserializer vu(str, len, type, true, class_whitelist);
   Variant v;
   try {
     v = vu.unserialize();
@@ -742,19 +670,19 @@ Variant unserialize_ex(const char* str, int len,
   return v;
 }
 
-Variant unserialize_ex(CStrRef str,
+Variant unserialize_ex(const String& str,
                        VariableUnserializer::Type type,
-                       CArrRef class_whitelist /* = null_array */) {
+                       const Array& class_whitelist /* = null_array */) {
   return unserialize_ex(str.data(), str.size(), type, class_whitelist);
 }
 
-String concat3(CStrRef s1, CStrRef s2, CStrRef s3) {
+String concat3(const String& s1, const String& s2, const String& s3) {
   StringSlice r1 = s1.slice();
   StringSlice r2 = s2.slice();
   StringSlice r3 = s3.slice();
   int len = r1.len + r2.len + r3.len;
   StringData* str = StringData::Make(len);
-  MutableSlice r = str->mutableSlice();
+  auto const r = str->bufferSlice();
   memcpy(r.ptr,                   r1.ptr, r1.len);
   memcpy(r.ptr + r1.len,          r2.ptr, r2.len);
   memcpy(r.ptr + r1.len + r2.len, r3.ptr, r3.len);
@@ -762,14 +690,15 @@ String concat3(CStrRef s1, CStrRef s2, CStrRef s3) {
   return str;
 }
 
-String concat4(CStrRef s1, CStrRef s2, CStrRef s3, CStrRef s4) {
+String concat4(const String& s1, const String& s2, const String& s3,
+               const String& s4) {
   StringSlice r1 = s1.slice();
   StringSlice r2 = s2.slice();
   StringSlice r3 = s3.slice();
   StringSlice r4 = s4.slice();
   int len = r1.len + r2.len + r3.len + r4.len;
   StringData* str = StringData::Make(len);
-  MutableSlice r = str->mutableSlice();
+  auto const r = str->bufferSlice();
   memcpy(r.ptr,                            r1.ptr, r1.len);
   memcpy(r.ptr + r1.len,                   r2.ptr, r2.len);
   memcpy(r.ptr + r1.len + r2.len,          r3.ptr, r3.len);
@@ -778,68 +707,24 @@ String concat4(CStrRef s1, CStrRef s2, CStrRef s3, CStrRef s4) {
   return str;
 }
 
-bool interface_supports_array(const StringData* s) {
-  return (s->isame(s_Traversable.get()) ||
-          s->isame(s_KeyedTraversable.get()) ||
-          s->isame(s_Indexish.get()) ||
-          s->isame(s_XHPChild.get()));
-}
-
-bool interface_supports_array(const std::string& n) {
-  const char* s = n.c_str();
-  return ((n.size() == 11 && !strcasecmp(s, "Traversable")) ||
-          (n.size() == 16 && !strcasecmp(s, "KeyedTraversable")) ||
-          (n.size() == 8 && !strcasecmp(s, "Indexish")) ||
-          (n.size() == 8 && !strcasecmp(s, "XHPChild")));
-}
-
-bool interface_supports_string(const StringData* s) {
-  return (s->isame(s_XHPChild.get()));
-}
-
-bool interface_supports_string(const std::string& n) {
-  const char *s = n.c_str();
-  return (n.size() == 8 && !strcasecmp(s, "XHPChild"));
-}
-
-bool interface_supports_int(const StringData* s) {
-  return (s->isame(s_XHPChild.get()));
-}
-
-bool interface_supports_int(const std::string& n) {
-  const char *s = n.c_str();
-  return (n.size() == 8 && !strcasecmp(s, "XHPChild"));
-}
-
-bool interface_supports_double(const StringData* s) {
-  return (s->isame(s_XHPChild.get()));
-}
-
-bool interface_supports_double(const std::string& n) {
-  const char *s = n.c_str();
-  return (n.size() == 8 && !strcasecmp(s, "XHPChild"));
-}
-
-Variant include_impl_invoke(CStrRef file, bool once, const char *currentDir) {
-  if (file[0] == '/') {
-    if (RuntimeOption::SandboxMode || !RuntimeOption::AlwaysUseRelativePath) {
-      try {
-        return invoke_file(file, once, currentDir);
-      } catch(PhpFileDoesNotExistException &e) {}
-    }
-
-    String rel_path(Util::relativePath(RuntimeOption::SourceRoot,
-                                       string(file.data())));
-
-    // Don't try/catch - We want the exception to be passed along
-    return invoke_file(rel_path, once, currentDir);
-  } else {
-    // Don't try/catch - We want the exception to be passed along
-    return invoke_file(file, once, currentDir);
+static bool invoke_file_impl(Variant& res, const String& path, bool once,
+                             const char *currentDir) {
+  bool initial;
+  auto const u = lookupUnit(path.get(), currentDir, &initial);
+  if (u == nullptr) return false;
+  if (!once || initial) {
+    g_context->invokeUnit(res.asTypedValue(), u);
   }
+  return true;
 }
 
-Variant invoke_file(CStrRef s, bool once, const char *currentDir) {
+static NEVER_INLINE Variant throw_missing_file(const char* file) {
+  throw PhpFileDoesNotExistException(file);
+}
+
+static Variant invoke_file(const String& s,
+                           bool once,
+                           const char *currentDir) {
   Variant r;
   if (invoke_file_impl(r, s, once, currentDir)) {
     return r;
@@ -847,20 +732,24 @@ Variant invoke_file(CStrRef s, bool once, const char *currentDir) {
   return throw_missing_file(s.c_str());
 }
 
-bool invoke_file_impl(Variant &res, CStrRef path, bool once,
-                      const char *currentDir) {
-  bool initial;
-  HPHP::Eval::PhpFile* efile =
-    g_vmContext->lookupPhpFile(path.get(), currentDir, &initial);
-  HPHP::Unit* u = nullptr;
-  if (efile) u = efile->unit();
-  if (u == nullptr) {
-    return false;
+Variant include_impl_invoke(const String& file, bool once,
+                            const char *currentDir) {
+  if (file[0] == '/') {
+    if (RuntimeOption::SandboxMode || !RuntimeOption::AlwaysUseRelativePath) {
+      try {
+        return invoke_file(file, once, currentDir);
+      } catch(PhpFileDoesNotExistException &e) {}
+    }
+
+    String rel_path(FileUtil::relativePath(RuntimeOption::SourceRoot,
+                                           string(file.data())));
+
+    // Don't try/catch - We want the exception to be passed along
+    return invoke_file(rel_path, once, currentDir);
+  } else {
+    // Don't try/catch - We want the exception to be passed along
+    return invoke_file(file, once, currentDir);
   }
-  if (!once || initial) {
-    g_vmContext->invokeUnit((TypedValue*)(&res), u);
-  }
-  return true;
 }
 
 /**
@@ -876,7 +765,7 @@ struct IncludeImplInvokeContext {
   Variant returnValue;
 };
 
-static bool include_impl_invoke_context(CStrRef file, void* ctx) {
+static bool include_impl_invoke_context(const String& file, void* ctx) {
   struct IncludeImplInvokeContext* context = (IncludeImplInvokeContext*)ctx;
   bool invoked_file = false;
   try {
@@ -894,9 +783,9 @@ static bool include_impl_invoke_context(CStrRef file, void* ctx) {
  * determine if a path references a real file.  ctx is a pointer to some context
  * information that will be passed through to tryFile.  (It's a hacky closure)
  */
-String resolve_include(CStrRef file, const char* currentDir,
-                       bool (*tryFile)(CStrRef file, void*), void* ctx) {
-  const char* c_file = file->data();
+String resolve_include(const String& file, const char* currentDir,
+                       bool (*tryFile)(const String& file, void*), void* ctx) {
+  const char* c_file = file.data();
 
   if (!File::IsPlainFilePath(file)) {
     // URIs don't have an include path
@@ -905,8 +794,7 @@ String resolve_include(CStrRef file, const char* currentDir,
     }
 
   } else if (c_file[0] == '/') {
-    String can_path(Util::canonicalize(file.c_str(), file.size()),
-                    AttachString);
+    String can_path = FileUtil::canonicalize(file);
 
     if (tryFile(can_path, ctx)) {
       return can_path;
@@ -916,22 +804,23 @@ String resolve_include(CStrRef file, const char* currentDir,
     c_file[1] == '.' && c_file[2] == '/')))) {
 
     String path(String(g_context->getCwd() + "/" + file));
-    String can_path(Util::canonicalize(path.c_str(), path.size()),
-                    AttachString);
+    String can_path = FileUtil::canonicalize(path);
 
     if (tryFile(can_path, ctx)) {
       return can_path;
     }
 
   } else {
-    Array includePaths = g_context->getIncludePathArray();
+    auto includePaths = ThreadInfo::s_threadInfo.getNoCheck()->
+      m_reqInjectionData.getIncludePaths();
     unsigned int path_count = includePaths.size();
 
     for (int i = 0; i < (int)path_count; i++) {
       String path("");
-      String includePath = includePaths[i].toString();
+      String includePath(includePaths[i]);
+      bool is_stream_wrapper = (includePath.find("://") > 0);
 
-      if (includePath[0] != '/') {
+      if (!is_stream_wrapper && includePath[0] != '/') {
         path += (g_context->getCwd() + "/");
       }
 
@@ -942,8 +831,13 @@ String resolve_include(CStrRef file, const char* currentDir,
       }
 
       path += file;
-      String can_path(Util::canonicalize(path.c_str(), path.size()),
-                      AttachString);
+
+      String can_path;
+      if (!is_stream_wrapper) {
+        can_path = FileUtil::canonicalize(path);
+      } else {
+        can_path = String(path.c_str());
+      }
 
       if (tryFile(can_path, ctx)) {
         return can_path;
@@ -954,16 +848,14 @@ String resolve_include(CStrRef file, const char* currentDir,
       String path(currentDir);
       path += "/";
       path += file;
-      String can_path(Util::canonicalize(path.c_str(), path.size()),
-                      AttachString);
+      String can_path = FileUtil::canonicalize(path);
 
       if (tryFile(can_path, ctx)) {
         return can_path;
       }
     } else {
       String path(g_context->getCwd() + "/" + currentDir + file);
-      String can_path(Util::canonicalize(path.c_str(), path.size()),
-                      AttachString);
+      String can_path = FileUtil::canonicalize(path);
 
       if (tryFile(can_path, ctx)) {
         return can_path;
@@ -974,7 +866,7 @@ String resolve_include(CStrRef file, const char* currentDir,
   return String();
 }
 
-static Variant include_impl(CStrRef file, bool once,
+static Variant include_impl(const String& file, bool once,
                             const char *currentDir, bool required,
                             bool raiseNotice) {
   struct IncludeImplInvokeContext ctx = {once, currentDir};
@@ -984,7 +876,7 @@ static Variant include_impl(CStrRef file, bool once,
   if (can_path.isNull()) {
     // Failure
     if (raiseNotice) {
-      raise_notice("Tried to invoke %s but file not found.", file->data());
+      raise_notice("Tried to invoke %s but file not found.", file.data());
     }
     if (required) {
       String ms = "Required file that does not exist: ";
@@ -997,257 +889,23 @@ static Variant include_impl(CStrRef file, bool once,
   return ctx.returnValue;
 }
 
-Variant include(CStrRef file, bool once /* = false */,
-                const char *currentDir /* = NULL */,
-                bool raiseNotice /*= true*/) {
-  return include_impl(file, once, currentDir, false, raiseNotice);
-}
-
-Variant require(CStrRef file, bool once /* = false */,
-                const char *currentDir /* = NULL */,
-                bool raiseNotice /*= true*/) {
+Variant require(const String& file,
+                bool once,
+                const char* currentDir,
+                bool raiseNotice) {
   return include_impl(file, once, currentDir, true, raiseNotice);
 }
 
-///////////////////////////////////////////////////////////////////////////////
-// class Limits
-
-IMPLEMENT_REQUEST_LOCAL(AutoloadHandler, AutoloadHandler::s_instance);
-
-void AutoloadHandler::requestInit() {
-  m_running = false;
-  m_handlers.reset();
-  m_map.reset();
-  m_map_root.reset();
-}
-
-void AutoloadHandler::requestShutdown() {
-  m_handlers.reset();
-  m_map.reset();
-  m_map_root.reset();
-}
-
-bool AutoloadHandler::setMap(CArrRef map, CStrRef root) {
-  this->m_map = map;
-  this->m_map_root = root;
-  return true;
-}
-
-class ClassExistsChecker {
- public:
-  ClassExistsChecker() {}
-  bool operator()(CStrRef name) const {
-    return Unit::lookupClass(name.get()) != nullptr;
-  }
-};
-
-class ConstantExistsChecker {
- public:
-  bool operator()(CStrRef name) const {
-    return Unit::lookupCns(name.get()) != nullptr;
-  }
-};
-
-template <class T>
-AutoloadHandler::Result AutoloadHandler::loadFromMap(CStrRef name,
-                                                     CStrRef kind,
-                                                     bool toLower,
-                                                     const T &checkExists) {
-  assert(!m_map.isNull());
-  while (true) {
-    CVarRef &type_map = m_map.get()->get(kind);
-    auto const typeMapCell = type_map.asCell();
-    if (typeMapCell->m_type != KindOfArray) return Failure;
-    String canonicalName = toLower ? f_strtolower(name) : name;
-    CVarRef &file = typeMapCell->m_data.parr->get(canonicalName);
-    bool ok = false;
-    if (file.isString()) {
-      String fName = file.toCStrRef().get();
-      if (fName.get()->data()[0] != '/') {
-        if (!m_map_root.empty()) {
-          fName = m_map_root + fName;
-        }
-      }
-      try {
-        Transl::VMRegAnchor _;
-        bool initial;
-        VMExecutionContext* ec = g_vmContext;
-        Unit* u = ec->evalInclude(fName.get(), nullptr, &initial);
-        if (u) {
-          if (initial) {
-            TypedValue retval;
-            ec->invokeFunc(&retval, u->getMain(), null_array,
-                           nullptr, nullptr, nullptr, nullptr,
-                           ExecutionContext::InvokePseudoMain);
-            tvRefcountedDecRef(&retval);
-          }
-          ok = true;
-        }
-      } catch (...) {}
-    }
-    if (ok && checkExists(name)) {
-      return Success;
-    }
-    CVarRef &func = m_map.get()->get(s_failure);
-    if (func.isNull()) return Failure;
-    // can throw, otherwise
-    //  - true means the map was updated. try again
-    //  - false means we should stop applying autoloaders (only affects classes)
-    //  - anything else means keep going
-    Variant action = vm_call_user_func(func, CREATE_VECTOR2(kind, name));
-    auto const actionCell = action.asCell();
-    if (actionCell->m_type == KindOfBoolean) {
-      if (actionCell->m_data.num) continue;
-      return StopAutoloading;
-    }
-    return ContinueAutoloading;
-  }
-}
-
-bool AutoloadHandler::autoloadFunc(StringData* name) {
-  return !m_map.isNull() &&
-    loadFromMap(name, s_function, true, function_exists) != Failure;
-}
-
-bool AutoloadHandler::autoloadConstant(StringData* name) {
-  return !m_map.isNull() &&
-    loadFromMap(name, s_constant, false, ConstantExistsChecker()) != Failure;
-}
-
-bool AutoloadHandler::autoloadType(CStrRef name) {
-  return !m_map.isNull() &&
-    loadFromMap(name, s_type, true,
-      [] (CStrRef name) {
-        return Unit::GetNamedEntity(name.get())->getCachedTypedef() != nullptr;
-      }
-    ) != Failure;
-}
-
-/**
- * invokeHandler returns true if any autoload handlers were executed,
- * false otherwise. When this function returns true, it is the caller's
- * responsibility to check if the given class or interface exists.
- */
-bool AutoloadHandler::invokeHandler(CStrRef className,
-                                    bool forceSplStack /* = false */) {
-  if (!m_map.isNull()) {
-    ClassExistsChecker ce;
-    Result res = loadFromMap(className, s_class, true, ce);
-    if (res == ContinueAutoloading) {
-      if (ce(className)) return true;
-    } else {
-      if (res != Failure) return res == Success;
-    }
-  }
-  Array params = PackedArrayInit(1).add(className).toArray();
-  bool l_running = m_running;
-  m_running = true;
-  if (m_handlers.isNull() && !forceSplStack) {
-    if (function_exists(s___autoload)) {
-      invoke(s___autoload, params, -1, true, false);
-      m_running = l_running;
-      return true;
-    }
-    m_running = l_running;
-    return false;
-  }
-  if (m_handlers.isNull() || m_handlers->empty()) {
-    m_running = l_running;
-    return false;
-  }
-  Object autoloadException;
-  for (ArrayIter iter(m_handlers); iter; ++iter) {
-    try {
-      vm_call_user_func(iter.second(), params);
-    } catch (Object& ex) {
-      assert(ex.instanceof(SystemLib::s_ExceptionClass));
-      if (autoloadException.isNull()) {
-        autoloadException = ex;
-      } else {
-        Object cur = ex;
-        Variant next = cur->o_get(s_previous, false, s_exception);
-        while (next.isObject()) {
-          cur = next.toObject();
-          next = cur->o_get(s_previous, false, s_exception);
-        }
-        cur->o_set(s_previous, autoloadException, s_exception);
-        autoloadException = ex;
-      }
-    }
-    if (Unit::lookupClass(className.get()) != nullptr) {
-      break;
-    }
-  }
-  m_running = l_running;
-  if (!autoloadException.isNull()) {
-    throw autoloadException;
-  }
-  return true;
-}
-
-bool AutoloadHandler::addHandler(CVarRef handler, bool prepend) {
-  String name = getSignature(handler);
-  if (name.isNull()) return false;
-
-  if (m_handlers.isNull()) {
-    m_handlers = Array::Create();
-  }
-
-  if (!prepend) {
-    // The following ensures that the handler is added at the end
-    m_handlers.remove(name, true);
-    m_handlers.add(name, handler, true);
-  } else {
-    // This adds the handler at the beginning
-    m_handlers = CREATE_MAP1(name, handler) + m_handlers;
-  }
-  return true;
-}
-
-bool AutoloadHandler::isRunning() {
-  return m_running;
-}
-
-void AutoloadHandler::removeHandler(CVarRef handler) {
-  String name = getSignature(handler);
-  if (name.isNull()) return;
-  m_handlers.remove(name, true);
-}
-
-void AutoloadHandler::removeAllHandlers() {
-  m_handlers.reset();
-}
-
-String AutoloadHandler::getSignature(CVarRef handler) {
-  Variant name;
-  if (!f_is_callable(handler, false, ref(name))) {
-    return null_string;
-  }
-  String lName = f_strtolower(name.toString());
-  if (handler.isArray()) {
-    Variant first = handler.getArrayData()->get(int64_t(0));
-    if (first.isObject()) {
-      // Add the object address as part of the signature
-      int64_t data = (int64_t)first.getObjectData();
-      lName += String((const char *)&data, sizeof(data), CopyString);
-    }
-  } else if (handler.isObject()) {
-    // "lName" will just be "classname::__invoke",
-    // add object address to differentiate the signature
-    int64_t data = (int64_t)handler.getObjectData();
-    lName += String((const char*)&data, sizeof(data), CopyString);
-  }
-  return lName;
-}
-
-bool function_exists(CStrRef function_name) {
-  return HPHP::Unit::lookupFunc(function_name.get()) != nullptr;
+bool function_exists(const String& function_name) {
+  auto f = Unit::lookupFunc(function_name.get());
+  return (f != nullptr) &&
+         (f->builtinFuncPtr() != Native::unimplementedWrapper);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // debugger and code coverage instrumentation
 
-void throw_exception(CObjRef e) {
+void throw_exception(const Object& e) {
   if (!e.instanceof(SystemLib::s_ExceptionClass)) {
     raise_error("Exceptions must be valid objects derived from the "
                 "Exception base class");

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,9 +21,13 @@
 
 #include "hphp/util/bits.h"
 #include "hphp/util/lock.h"
-#include "hphp/runtime/base/macros.h"
 
-#include "tbb/concurrent_hash_map.h"
+#include <tbb/concurrent_hash_map.h>
+#include <list>
+#include <memory>
+#include <set>
+#include <utility>
+#include <vector>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -66,7 +70,7 @@ typedef SimpleMutex InferTypesMutex;
  * Base class of ClassScope and FunctionScope.
  */
 class BlockScope : private boost::noncopyable,
-                   public boost::enable_shared_from_this<BlockScope> {
+                   public std::enable_shared_from_this<BlockScope> {
 public:
   enum KindOf {
     ClassScope,
@@ -171,7 +175,7 @@ public:
   bool is(KindOf kind) const { return kind == m_kind;}
   const std::string &getName() const { return m_name;}
   void setName(const std::string name) { m_name = name;}
-  virtual std::string getId() const;
+  virtual bool isBuiltin() const { return false; }
   StatementPtr getStmt() const { return m_stmt;}
   VariableTableConstPtr getVariables() const { return m_variables;}
   ConstantTableConstPtr getConstants() const { return m_constants;}
@@ -210,11 +214,6 @@ public:
   }
   const std::string &getDocComment() const { return m_docComment;}
   void setDocComment(const std::string &doc) { m_docComment = doc;}
-
-  /**
-   * Triggers type inference of all statements inside this block.
-   */
-  void inferTypes(AnalysisResultPtr ar);
 
   /**
    * Code gen

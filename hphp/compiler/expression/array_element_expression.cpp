@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,6 +19,7 @@
 #include "hphp/compiler/expression/scalar_expression.h"
 #include "hphp/compiler/analysis/variable_table.h"
 #include "hphp/compiler/analysis/code_error.h"
+#include "hphp/compiler/code_model_enums.h"
 #include "hphp/compiler/option.h"
 #include "hphp/compiler/expression/static_member_expression.h"
 #include "hphp/compiler/analysis/function_scope.h"
@@ -245,37 +246,21 @@ ExpressionPtr ArrayElementExpression::preOptimize(AnalysisResultConstPtr ar) {
           return replaceValue(makeConstant(ar, "null"));
         }
         if (m_offset->isScalar() && m_offset->getScalarValue(o)) {
-          if (v.isString()) {
-            if (!o.isInteger() ||
-                o.toInt64Val() < 0 ||
-                o.toInt64Val() >= v.toCStrRef().size()) {
-              // warnings should be raised...
-              return ExpressionPtr();
+          if (v.isArray()) {
+            try {
+              g_context->setThrowAllErrors(true);
+              Variant res = v.toArrRef().rvalAt(
+                o, hasContext(ExistContext) ?
+                AccessFlags::None : AccessFlags::Error);
+              g_context->setThrowAllErrors(false);
+              return replaceValue(makeScalarExpression(ar, res));
+            } catch (...) {
+              g_context->setThrowAllErrors(false);
             }
-          }
-          try {
-            g_context->setThrowAllErrors(true);
-            Variant res = v.rvalAt(
-              o, hasContext(ExistContext) ?
-              AccessFlags::None : AccessFlags::Error);
-            g_context->setThrowAllErrors(false);
-            return replaceValue(makeScalarExpression(ar, res));
-          } catch (...) {
-            g_context->setThrowAllErrors(false);
           }
         }
       }
     }
-  }
-  return ExpressionPtr();
-}
-
-ExpressionPtr ArrayElementExpression::postOptimize(AnalysisResultConstPtr ar) {
-  if (!hasLocalEffect(AccessorEffect)) return ExpressionPtr();
-  TypePtr at(m_variable->getActualType());
-  if (at && (at->is(Type::KindOfString) || at->is(Type::KindOfArray))) {
-    clearLocalEffect(AccessorEffect);
-    return dynamic_pointer_cast<Expression>(shared_from_this());
   }
   return ExpressionPtr();
 }
@@ -288,104 +273,38 @@ ExpressionPtr ArrayElementExpression::postOptimize(AnalysisResultConstPtr ar) {
  * encaps T_VARIABLE[expr]
  * encaps ${T_STRING[expr]}
  */
-TypePtr ArrayElementExpression::inferTypes(AnalysisResultPtr ar,
-                                           TypePtr type, bool coerce) {
-  ConstructPtr self = shared_from_this();
-
-  if (m_offset &&
-      !(m_context & (UnsetContext | ExistContext |
-                     InvokeArgument | LValue | RefValue))) {
-    setLocalEffect(DiagnosticEffect);
-  }
-  if (m_context & (AssignmentLHS|OprLValue)) {
-    clearLocalEffect(AccessorEffect);
-  } else if (m_context & (LValue | RefValue)) {
-    setLocalEffect(CreateEffect);
-  }
-
-  // handling $GLOBALS[...]
-  if (m_variable->is(Expression::KindOfSimpleVariable)) {
-    SimpleVariablePtr var =
-      dynamic_pointer_cast<SimpleVariable>(m_variable);
-    if (var->getName() == "GLOBALS") {
-      clearLocalEffect(AccessorEffect);
-      m_global = true;
-      m_dynamicGlobal = true;
-      getScope()->getVariables()->
-        setAttribute(VariableTable::NeedGlobalPointer);
-      VariableTablePtr vars = ar->getVariables();
-
-      Lock l(ar->getMutex());
-      if (m_offset && m_offset->is(Expression::KindOfScalarExpression)) {
-        ScalarExpressionPtr offset =
-          dynamic_pointer_cast<ScalarExpression>(m_offset);
-
-        if (offset->isLiteralString()) {
-          m_globalName = offset->getIdentifier();
-          if (!m_globalName.empty()) {
-            m_dynamicGlobal = false;
-            clearLocalEffect(DiagnosticEffect);
-            getScope()->getVariables()->
-              setAttribute(VariableTable::NeedGlobalPointer);
-            TypePtr ret;
-            if (coerce) {
-              ret = vars->add(m_globalName, type, true, ar, self,
-                              ModifierExpressionPtr());
-            } else {
-              ret = vars->checkVariable(m_globalName, type, coerce, ar, self);
-            }
-            getScope()->getVariables()->addSuperGlobal(m_globalName);
-            return ret;
-          }
-        }
-      } else {
-        vars->setAttribute(VariableTable::ContainsDynamicVariable);
-      }
-
-      if (hasContext(LValue) || hasContext(RefValue)) {
-        vars->forceVariants(ar, VariableTable::AnyVars);
-        vars->setAttribute(VariableTable::ContainsLDynamicVariable);
-      }
-      if (m_offset) {
-        m_offset->inferAndCheck(ar, Type::Primitive, false);
-      }
-      return m_implementedType = Type::Variant; // so not to lose values
-    }
-  }
-  if ((hasContext(LValue) || hasContext(RefValue)) &&
-      !hasContext(UnsetContext)) {
-    m_variable->setContext(LValue);
-  }
-
-  TypePtr varType;
-  if (m_offset) {
-    varType = m_variable->inferAndCheck(ar, coerce ? Type::AutoSequence :
-                                        Type::Sequence, coerce);
-    m_offset->inferAndCheck(ar, Type::Some, false);
-  } else {
-    if (hasContext(ExistContext) || hasContext(UnsetContext)) {
-      if (getScope()->isFirstPass()) {
-        Compiler::Error(Compiler::InvalidArrayElement, self);
-      }
-    }
-    m_variable->inferAndCheck(ar, Type::Array, true);
-  }
-
-  if (varType && Type::SameType(varType, Type::String)) {
-    m_implementedType.reset();
-    return Type::String;
-  }
-
-  TypePtr ret = propagateTypes(ar, Type::Variant);
-  m_implementedType = Type::Variant;
-  return ret; // so not to lose values
-}
 
 ExpressionPtr ArrayElementExpression::unneeded() {
   if (m_global) {
     if (m_offset) return m_offset->unneeded();
   }
   return Expression::unneeded();
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void ArrayElementExpression::outputCodeModel(CodeGenerator &cg) {
+  if (m_offset) {
+    cg.printObjectHeader("BinaryOpExpression", 4);
+    cg.printPropertyHeader("expression1");
+    m_variable->outputCodeModel(cg);
+    cg.printPropertyHeader("expression2");
+    cg.printExpression(m_offset, false);
+    cg.printPropertyHeader("operation");
+    cg.printValue(PHP_ARRAY_ELEMENT);
+    cg.printPropertyHeader("sourceLocation");
+    cg.printLocation(this->getLocation());
+    cg.printObjectFooter();
+  } else {
+    cg.printObjectHeader("UnaryOpExpression", 3);
+    cg.printPropertyHeader("expression");
+    m_variable->outputCodeModel(cg);
+    cg.printPropertyHeader("operation");
+    cg.printValue(PHP_ARRAY_APPEND_POINT_OP);
+    cg.printPropertyHeader("sourceLocation");
+    cg.printLocation(this->getLocation());
+    cg.printObjectFooter();
+  }
 }
 
 ///////////////////////////////////////////////////////////////////////////////

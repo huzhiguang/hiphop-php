@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -40,6 +40,7 @@ BreakStatement::BreakStatement
 StatementPtr BreakStatement::clone() {
   BreakStatementPtr stmt(new BreakStatement(*this));
   stmt->m_depth = m_depth;
+  stmt->m_name = m_name;
   return stmt;
 }
 
@@ -72,7 +73,19 @@ StatementPtr BreakStatement::preOptimize(AnalysisResultConstPtr ar) {
   return StatementPtr();
 }
 
-void BreakStatement::inferTypes(AnalysisResultPtr ar) {
+///////////////////////////////////////////////////////////////////////////////
+
+void BreakStatement::outputCodeModel(CodeGenerator &cg) {
+  if (strncmp(m_name, "break", 5) == 0) {
+    cg.printObjectHeader("BreakStatement", 2);
+  } else {
+    cg.printObjectHeader("ContinueStatement", 2);
+  }
+  cg.printPropertyHeader("depth");
+  cg.printValue((int)m_depth);
+  cg.printPropertyHeader("sourceLocation");
+  cg.printLocation(this->getLocation());
+  cg.printObjectFooter();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

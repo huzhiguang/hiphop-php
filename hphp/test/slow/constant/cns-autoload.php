@@ -1,6 +1,6 @@
 <?php
 
-// Copyright 2004-2013 Facebook. All Rights Reserved.
+// Copyright 2004-2014 Facebook. All Rights Reserved.
 
 function def() {
  define('FOO', 1);
@@ -12,7 +12,7 @@ function test() {
   show(FOO, FOO);
 }
 
-fb_autoload_map(array('constant' => array(),
-                      'failure' => 'def'), "");
+HH\autoload_set_paths(array('constant' => array(),
+                               'failure' => 'def'), "");
 
 test();

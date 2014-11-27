@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -32,12 +32,11 @@ public:
   Pipe();
   virtual ~Pipe();
 
-  static StaticString s_class_name;
   // overriding ResourceData
-  CStrRef o_getClassNameHook() const { return s_class_name; }
+  const String& o_getClassNameHook() const { return classnameof(); }
 
   // implementing File
-  virtual bool open(CStrRef filename, CStrRef mode);
+  virtual bool open(const String& filename, const String& mode);
   virtual bool close();
 
 private:

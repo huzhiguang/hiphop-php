@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,8 +17,20 @@
 #ifndef incl_HPHP_PROCESS_H_
 #define incl_HPHP_PROCESS_H_
 
-#include "hphp/util/base.h"
+#include <string>
+#include <vector>
+#include <cstdio>
+
+#include <sys/types.h>
+#if defined(__CYGWIN__) || defined(__MINGW__)
+#include <pthread.h>
+#elif defined(_MSC_VER)
+#include <windows.h>
+#else
 #include <sys/syscall.h>
+#endif
+#include <unistd.h>
+#include <pthread.h>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -65,11 +77,6 @@ public:
   static std::string GetAppName();
 
   /**
-   * Current executable's version.
-   */
-  static std::string GetAppVersion();
-
-  /**
    * This machine'a name.
    */
   static std::string GetHostName();
@@ -106,7 +113,7 @@ public:
   /**
    * Get memory usage in MB by a process.
    */
-  static int GetProcessRSS(pid_t pid);
+  static int64_t GetProcessRSS(pid_t pid);
 
   /**
    * Current thread's identifier.
@@ -142,9 +149,20 @@ public:
     syscall(SYS_thr_self, &tid);
     return (pid_t) tid;
 # endif
+#elif defined(__CYGWIN__) || defined(__MINGW__)
+    return (long)pthread_self();
+#elif defined(_MSC_VER)
+  return GetCurrentThreadId();
 #else
     return syscall(SYS_gettid);
 #endif
+  }
+
+  /**
+   * Are we in the main thread still?
+   */
+  static bool IsInMainThread() {
+    return Process::GetThreadPid() == Process::GetProcessId();
   }
 
   /**

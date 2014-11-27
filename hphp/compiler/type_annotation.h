@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,8 +17,10 @@
 #ifndef incl_HPHP_TYPEANNOTATION_H_
 #define incl_HPHP_TYPEANNOTATION_H_
 
-#include "hphp/util/base.h"
+#include "hphp/util/deprecated/base.h"
+#include <vector>
 #include "hphp/runtime/base/datatype.h"
+#include "hphp/compiler/code_generator.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -92,9 +94,29 @@ public:
   }
 
   /*
-   * Return whether this TypeAnnotation is equal to the "mixed" type.
+   * Return a shallow copy of this TypeAnnotation, except with
+   * softness stripped.
    */
-  bool isMixed() const { return !m_name.compare("mixed"); }
+  TypeAnnotation stripSoft() const {
+    auto ret = *this;
+    ret.m_soft = false;
+    return ret;
+  }
+
+  bool isMixed() const { return !strcasecmp(m_name.c_str(), "HH\\mixed"); }
+
+  bool isVoid() const { return !strcasecmp(m_name.c_str(), "HH\\void"); }
+
+  bool isThis() const { return !strcasecmp(m_name.c_str(), "HH\\this"); }
+
+  bool isAwaitable() const {
+    return !strcasecmp(m_name.c_str(), "HH\\Awaitable");
+  }
+
+  bool isWaitHandle() const {
+    return !strcasecmp(m_name.c_str(), "WaitHandle") ||
+           !strcasecmp(m_name.c_str(), "HH\\WaitHandle");
+  }
 
   /*
    * Returns whether this TypeAnnotation is "simple"---as described
@@ -134,15 +156,20 @@ public:
   void appendToTypeList(TypeAnnotationPtr typeList);
 
   /*
-   * Root datatype, ignores inner types for generics
+   * Root datatype; ignores inner types for generics.
    *
-   * For nullable or soft types, KindOfUnknown will be returned
-   * since the annotation could represent more than one type.
-   *
-   * To get the expected type even with nullable/soft annotations
-   * pass TRUE for the optional argument.
+   * For nullable or soft types, folly::none will be returned since the
+   * annotation could represent more than one type.
    */
-  DataType dataType(bool expectedType = false) const;
+  MaybeDataType dataType() const;
+
+  /*
+   *  Serializes the type annotation using the given CodeGenerator.
+   */
+  void outputCodeModel(CodeGenerator& cg);
+
+  int numTypeArgs() const;
+  TypeAnnotationPtr getTypeArg(int n) const;
 
 private:
   void functionTypeName(std::string &name) const;

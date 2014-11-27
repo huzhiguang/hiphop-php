@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -34,8 +34,8 @@ enum class UnwindAction {
   Propagate,
 
   /*
-   * A catch or fault handler was identified and the VM state has been
-   * prepared for entry to it.
+   * The exception was either handled, or a catch or fault handler was
+   * identified and the VM state has been prepared for entry to it.
    */
   ResumeVM,
 };

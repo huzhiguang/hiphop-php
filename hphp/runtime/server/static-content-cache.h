@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -28,11 +28,9 @@ namespace HPHP {
 class StaticContentCache {
 public:
   static StaticContentCache TheCache;
-  static FileCachePtr TheFileCache;
+  static std::shared_ptr<FileCache> TheFileCache;
 
 public:
-  StaticContentCache();
-
   /**
    * Load all registered static files from RuntimeOption::DocumentRoot.
    */
@@ -49,10 +47,6 @@ private:
     std::shared_ptr<CstrBuffer> file;
     std::shared_ptr<CstrBuffer> compressed;
   };
-
-  int m_totalSize;
-  hphp_hash_map<std::string,std::shared_ptr<ResourceFile>,string_hash>
-    m_files;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

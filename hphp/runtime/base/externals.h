@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -26,27 +26,34 @@
  */
 
 #include "hphp/runtime/base/types.h"
-#include "hphp/runtime/vm/name-value-table-wrapper.h"
+#include "hphp/runtime/vm/globals-array.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
-// global declarations that have generated implementations
+
+/*
+ * This file is included from inside an extern "C" block in some places, but
+ * these functions have return types that are incompatible with C linkage.
+ */
+extern "C++" {
 
 /**
  * Invoking an arbitrary user-defined function.
  */
-Variant invoke(const char *function, CArrRef params, strhash_t hash = -1,
+Variant invoke(const char *function, const Variant& params, strhash_t hash = -1,
     bool tryInterp = true, bool fatal = true);
 
 /**
  * Getting a static property
  */
-extern Variant get_static_property(CStrRef s, const char *prop);
+extern Variant get_static_property(const String& s, const char *prop);
 
 /**
  * Getting the init value of a class variable
  */
-extern Variant get_class_var_init(CStrRef s, const char *var);
+extern Variant get_class_var_init(const String& s, const char *var);
+
+} // extern C++
 
 /**
  * Class/function meta info entirely encoded here as a const char * array.
@@ -56,7 +63,7 @@ extern const char *g_class_map[];
 /**
  * Returns a thread local global variable class pointer.
  */
-typedef GlobalNameValueTableWrapper GlobalVariables;
+typedef GlobalsArray GlobalVariables;
 extern GlobalVariables *get_global_variables();
 extern void free_global_variables();
 extern void free_global_variables_after_sweep();
@@ -72,9 +79,8 @@ extern void free_global_variables_after_sweep();
 struct EnvConstants {
   static void requestInit(EnvConstants* gt);
   static void requestExit();
-  Variant __lvalProxy;
+  Variant lvalProxy;
   Variant stgv_Variant[1];
-#define k_SID stgv_Variant[0]
 };
 extern EnvConstants* get_env_constants();
 extern String k_PHP_BINARY;

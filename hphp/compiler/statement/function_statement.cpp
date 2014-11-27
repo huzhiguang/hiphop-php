@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,7 +20,6 @@
 #include "hphp/compiler/analysis/file_scope.h"
 #include "hphp/compiler/analysis/function_scope.h"
 #include "hphp/compiler/statement/statement_list.h"
-#include "hphp/util/util.h"
 #include "hphp/compiler/expression/parameter_expression.h"
 #include "hphp/compiler/expression/modifier_expression.h"
 #include "hphp/compiler/option.h"
@@ -77,8 +76,13 @@ void FunctionStatement::onParse(AnalysisResultConstPtr ar, FileScopePtr scope) {
     return;
   }
 
-  if (Option::PersistenceHook) {
-    fs->setPersistent(Option::PersistenceHook(fs, scope));
+  fs->setPersistent(false);
+
+  if (m_name == "__autoload") {
+    if (m_params && m_params->getCount() != 1) {
+      parseTimeFatal(Compiler::InvalidMagicMethod,
+                     "__autoload() must take exactly 1 argument");
+    }
   }
 
   if (fs->isNative()) {
@@ -89,8 +93,10 @@ void FunctionStatement::onParse(AnalysisResultConstPtr ar, FileScopePtr scope) {
     if (m_params) {
       int nParams = m_params->getCount();
       for (int i = 0; i < nParams; ++i) {
+        // Variadic capture params don't need types
+        // since they'll be Arrays as far as HNI is concerned.
         auto param = dynamic_pointer_cast<ParameterExpression>((*m_params)[i]);
-        if (!param->hasUserType()) {
+        if (!param->hasUserType() && !param->isVariadic()) {
           parseTimeFatal(Compiler::InvalidAttribute,
                          "Native function calls must have type hints "
                          "on all args");
@@ -129,7 +135,10 @@ void FunctionStatement::analyzeProgram(AnalysisResultPtr ar) {
   MethodStatement::analyzeProgram(ar);
 }
 
-void FunctionStatement::inferTypes(AnalysisResultPtr ar) {
+///////////////////////////////////////////////////////////////////////////////
+
+void FunctionStatement::outputCodeModel(CodeGenerator &cg) {
+  MethodStatement::outputCodeModel(cg);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,7 +15,7 @@
 */
 
 #include "hphp/test/ext/test.h"
-#include "hphp/runtime/base/shared-store-base.h"
+#include "hphp/runtime/base/apc-file-storage.h"
 #include "hphp/compiler/option.h"
 
 using namespace HPHP;
@@ -97,7 +97,7 @@ bool Test::logTestResults(std::string name, std::string details, int pass,
     sprintf(summary, "FAILED (%d)", fail);
   }
 
-  ArrayInit data(8);
+  ArrayInit data(8, ArrayInit::Map{});
   data.set(String("type"),         "hphp");
   data.set(String("name"),         name);
   data.set(String("contacts"),     null_array);

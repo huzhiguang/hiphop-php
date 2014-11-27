@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -29,20 +29,20 @@ const char *CmdPrint::Formats[] = {
   "r", "v", "x", "hex", "oct", "dec", "unsigned", "time", nullptr
 };
 
-std::string CmdPrint::FormatResult(const char *format, CVarRef ret) {
+std::string CmdPrint::FormatResult(const char *format, const Variant& ret) {
   if (format == nullptr) {
     String sret = DebuggerClient::FormatVariable(ret, -1);
-    return string(sret.data(), sret.size());
+    return std::string(sret.data(), sret.size());
   }
 
   if (strcmp(format, "r") == 0) {
     String sret = DebuggerClient::FormatVariable(ret, -1, 'r');
-    return string(sret.data(), sret.size());
+    return std::string(sret.data(), sret.size());
   }
 
   if (strcmp(format, "v") == 0) {
     String sret = DebuggerClient::FormatVariable(ret, -1, 'v');
-    return string(sret.data(), sret.size());
+    return std::string(sret.data(), sret.size());
   }
 
   if (strcmp(format, "dec") == 0 ||
@@ -132,7 +132,7 @@ std::string CmdPrint::FormatResult(const char *format, CVarRef ret) {
 void CmdPrint::sendImpl(DebuggerThriftBuffer &thrift) {
   DebuggerCommand::sendImpl(thrift);
   if (m_printLevel > 0) {
-    g_context->setDebuggerPrintLevel(m_printLevel);
+    g_context->debuggerSettings.printLevel = m_printLevel;
   }
   {
     String sdata;
@@ -140,7 +140,7 @@ void CmdPrint::sendImpl(DebuggerThriftBuffer &thrift) {
     thrift.write(sdata);
   }
   if (m_printLevel > 0) {
-    g_context->setDebuggerPrintLevel(-1);
+    g_context->debuggerSettings.printLevel = -1;
   }
   thrift.write(m_output);
   thrift.write(m_frame);
@@ -251,7 +251,7 @@ void CmdPrint::processClear(DebuggerClient &client) {
     return;
   }
 
-  string snum = client.argValue(2);
+  std::string snum = client.argValue(2);
   if (!DebuggerClient::IsValidNumber(snum)) {
     client.error("'[p]rint [c]lear' needs an {index} argument.");
     client.tutorial(
@@ -277,7 +277,7 @@ Variant CmdPrint::processWatch(DebuggerClient &client, const char *format,
   m_body = php;
   m_frame = client.getFrame();
   m_noBreak = true;
-  CmdPrintPtr res = client.xend<CmdPrint>(this);
+  auto res = client.xend<CmdPrint>(this);
   if (!res->m_output.empty()) {
     client.output(res->m_output);
   }
@@ -333,7 +333,7 @@ void CmdPrint::onClient(DebuggerClient &client) {
   m_printLevel = client.getDebuggerClientPrintLevel();
   assert(m_printLevel <= 0 || m_printLevel >= DebuggerClient::MinPrintLevel);
   m_frame = client.getFrame();
-  CmdPrintPtr res = client.xendWithNestedExecution<CmdPrint>(this);
+  auto res = client.xendWithNestedExecution<CmdPrint>(this);
   m_output = res->m_output;
   m_ret = res->m_ret;
   if (!m_output.empty()) {
@@ -345,9 +345,10 @@ void CmdPrint::onClient(DebuggerClient &client) {
 // NB: unlike most other commands, the client expects that more interrupts
 // can occur while we're doing the server-side work for a print.
 bool CmdPrint::onServer(DebuggerProxy &proxy) {
-  PCFilter* locSave = g_vmContext->m_lastLocFilter;
-  g_vmContext->m_lastLocFilter = new PCFilter();
-  g_vmContext->setDebuggerBypassCheck(m_bypassAccessCheck);
+  PCFilter locSave;
+  RequestInjectionData &rid = ThreadInfo::s_threadInfo->m_reqInjectionData;
+  locSave.swap(rid.m_flowFilter);
+  g_context->debuggerSettings.bypassCheck = m_bypassAccessCheck;
   {
     EvalBreakControl eval(m_noBreak);
     bool failed;
@@ -358,9 +359,8 @@ bool CmdPrint::onServer(DebuggerProxy &proxy) {
                        (!proxy.isLocal() ? DebuggerProxy::ExecutePHPFlagsLog :
                         DebuggerProxy::ExecutePHPFlagsNone));
   }
-  g_vmContext->setDebuggerBypassCheck(false);
-  delete g_vmContext->m_lastLocFilter;
-  g_vmContext->m_lastLocFilter = locSave;
+  g_context->debuggerSettings.bypassCheck = false;
+  locSave.swap(rid.m_flowFilter);
   return proxy.sendToClient(this);
 }
 

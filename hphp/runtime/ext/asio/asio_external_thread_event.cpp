@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -17,8 +17,8 @@
 
 #include "hphp/runtime/ext/asio/asio_external_thread_event.h"
 #include <thread>
-#include "hphp/runtime/ext/ext_asio.h"
 #include "hphp/runtime/ext/asio/asio_session.h"
+#include "hphp/runtime/ext/asio/external_thread_event_wait_handle.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -31,7 +31,7 @@ AsioExternalThreadEvent::AsioExternalThreadEvent(ObjectData* priv_data)
 
 void AsioExternalThreadEvent::abandon() {
   assert(m_state.load() == Waiting);
-  assert(m_waitHandle->getCount() == 1);
+  assert(m_waitHandle->hasExactlyOneRef());
   m_state.store(Abandoned);
   m_waitHandle->abandon(false);
 }

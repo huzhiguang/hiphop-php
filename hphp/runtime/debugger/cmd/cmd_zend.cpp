@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -25,7 +25,7 @@ TRACE_SET_MOD(debugger);
 void CmdZend::help(DebuggerClient &client) {
   client.helpTitle("Zend Command");
   client.helpCmds(
-    "[z]end", "running the most recent code snippet in Zend PHP",
+    "[z]end", "running the most recent code snippet in PHP5",
     nullptr
   );
   client.helpBody(
@@ -46,7 +46,7 @@ void CmdZend::onClient(DebuggerClient &client) {
     if (!code.empty()) {
       const std::string zendExe = client.getZendExecutable();
       client.info("Executing last PHP block with \"%s\"...", zendExe.c_str());
-      string out;
+      std::string out;
       Process::Exec(zendExe.c_str(), nullptr, code.c_str(), out, &out, true);
       client.print(out);
       return;

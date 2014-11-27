@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,12 +14,16 @@
    +----------------------------------------------------------------------+
 */
 #include "hphp/runtime/vm/jit/fixup.h"
-#include "hphp/runtime/vm/jit/translator.h"
+
+#include "hphp/vixl/a64/simulator-a64.h"
+
+#include "hphp/runtime/vm/vm-regs.h"
+#include "hphp/runtime/vm/jit/abi-arm.h"
+#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/util/data-block.h"
 
-namespace HPHP {
-namespace Transl {
+namespace HPHP { namespace jit {
 
 bool
 FixupMap::getFrameRegs(const ActRec* ar, const ActRec* prevAr,
@@ -28,7 +32,7 @@ FixupMap::getFrameRegs(const ActRec* ar, const ActRec* prevAr,
   // Non-obvious off-by-one fun: if the *return address* points into the TC,
   // then the frame we were running on in the TC is actually the previous
   // frame.
-  ar = (const ActRec*)ar->m_savedRbp;
+  ar = ar->m_sfp;
   auto* ent = m_fixups.find(tca);
   if (!ent) return false;
   if (ent->isIndirect()) {
@@ -37,7 +41,7 @@ FixupMap::getFrameRegs(const ActRec* ar, const ActRec* prevAr,
     // stubs in a.code stop.
     assert(prevAr);
     auto pRealRip = ent->indirect.returnIpDisp +
-      uintptr_t(prevAr->m_savedRbp);
+      uintptr_t(prevAr->m_sfp);
     ent = m_fixups.find(*reinterpret_cast<CTCA*>(pRealRip));
     assert(ent && !ent->isIndirect());
   }
@@ -46,30 +50,30 @@ FixupMap::getFrameRegs(const ActRec* ar, const ActRec* prevAr,
 }
 
 void
-FixupMap::recordSyncPoint(CodeAddress frontier, Offset pcOff, Offset spOff) {
-  m_pendingFixups.push_back(PendingFixup(frontier, Fixup(pcOff, spOff)));
-}
-
-void
 FixupMap::recordIndirectFixup(CodeAddress frontier, int dwordsPushed) {
   recordIndirectFixup(frontier, IndirectFixup((2 + dwordsPushed) * 8));
 }
 
+namespace {
+
+// If this function asserts or crashes, it is usually because VMRegAnchor was
+// not used to force a sync prior to calling a runtime function.
+bool isVMFrame(const ExecutionContext* ec, const ActRec* ar) {
+  assert(ar);
+  // Determine whether the frame pointer is outside the native stack, cleverly
+  // using a single unsigned comparison to do both halves of the bounds check.
+  bool ret = uintptr_t(ar) - s_stackLimit >= s_stackSize;
+  assert(!ret || isValidVMStackAddress(ar) ||
+         (ar->m_func->validate(), ar->resumed()));
+  return ret;
+}
+}
+
 void
-FixupMap::fixupWork(VMExecutionContext* ec, ActRec* rbp) const {
+FixupMap::fixupWork(ExecutionContext* ec, ActRec* rbp) const {
   assert(RuntimeOption::EvalJit);
 
   TRACE(1, "fixup(begin):\n");
-
-  auto isVMFrame = [] (ActRec* ar) {
-    assert(ar);
-    bool ret = uintptr_t(ar) - Util::s_stackLimit >= Util::s_stackSize;
-    assert(!ret ||
-           (ar >= g_vmContext->m_stack.getStackLowAddress() &&
-            ar < g_vmContext->m_stack.getStackHighAddress()) ||
-           ar->m_func->isGenerator());
-    return ret;
-  };
 
   auto* nextRbp = rbp;
   rbp = 0;
@@ -77,20 +81,21 @@ FixupMap::fixupWork(VMExecutionContext* ec, ActRec* rbp) const {
     auto* prevRbp = rbp;
     rbp = nextRbp;
     assert(rbp && "Missing fixup for native call");
-    nextRbp = reinterpret_cast<ActRec*>(rbp->m_savedRbp);
+    nextRbp = rbp->m_sfp;
     TRACE(2, "considering frame %p, %p\n", rbp, (void*)rbp->m_savedRip);
 
-    if (isVMFrame(nextRbp)) {
+    if (isVMFrame(ec, nextRbp)) {
       TRACE(2, "fixup checking vm frame %s\n",
                nextRbp->m_func->name()->data());
       VMRegs regs;
       if (getFrameRegs(rbp, prevRbp, &regs)) {
         TRACE(2, "fixup(end): func %s fp %p sp %p pc %p\n",
-              regs.m_fp->m_func->name()->data(),
-              regs.m_fp, regs.m_sp, regs.m_pc);
-        ec->m_fp = const_cast<ActRec*>(regs.m_fp);
-        ec->m_pc = regs.m_pc;
-        vmsp() = regs.m_sp;
+              regs.fp->m_func->name()->data(),
+              regs.fp, regs.sp, regs.pc);
+        auto& vmRegs = vmRegsUnsafe();
+        vmRegs.fp = const_cast<ActRec*>(regs.fp);
+        vmRegs.pc = reinterpret_cast<PC>(regs.pc);
+        vmRegs.stack.top() = regs.sp;
         return;
       }
     }
@@ -99,25 +104,78 @@ FixupMap::fixupWork(VMExecutionContext* ec, ActRec* rbp) const {
   // OK, we've exhausted the entire actRec chain.  We are only
   // invoking ::fixup() from contexts that were known to be called out
   // of the TC, so this cannot happen.
-  NOT_REACHED();
+  always_assert(false);
 }
 
 void
-FixupMap::fixup(VMExecutionContext* ec) const {
-  // Start looking for fixup entries at the current (C++) frame.  This
-  // will walk the frames upward until we find a TC frame.
-  DECLARE_FRAME_POINTER(framePtr);
-  fixupWork(ec, framePtr);
-}
+FixupMap::fixupWorkSimulated(ExecutionContext* ec) const {
+  TRACE(1, "fixup(begin):\n");
 
-void
-FixupMap::processPendingFixups() {
-  for (uint i = 0; i < m_pendingFixups.size(); i++) {
-    TCA tca = m_pendingFixups[i].m_tca;
-    assert(Translator::Get()->isValidCodeAddress(tca));
-    recordFixup(tca, m_pendingFixups[i].m_fixup);
+  auto isVMFrame = [] (ActRec* ar, const vixl::Simulator* sim) {
+    // If this assert is failing, you may have forgotten a sync point somewhere
+    assert(ar);
+    bool ret =
+      uintptr_t(ar) - s_stackLimit >= s_stackSize &&
+      !sim->is_on_stack(ar);
+    assert(!ret || isValidVMStackAddress(ar) || ar->resumed());
+    return ret;
+  };
+
+  // For each nested simulator (corresponding to nested VM invocations), look at
+  // its PC to find a potential fixup key.
+  //
+  // Callstack walking is necessary, because we may get called from a
+  // uniqueStub.
+  for (int i = ec->m_activeSims.size() - 1; i >= 0; --i) {
+    auto const* sim = ec->m_activeSims[i];
+    auto* rbp = reinterpret_cast<ActRec*>(sim->xreg(jit::arm::rVmFp.code()));
+    auto tca = reinterpret_cast<TCA>(sim->pc());
+    TRACE(2, "considering frame %p, %p\n", rbp, tca);
+
+    while (rbp && !isVMFrame(rbp, sim)) {
+      tca = reinterpret_cast<TCA>(rbp->m_savedRip);
+      rbp = rbp->m_sfp;
+    }
+
+    if (!rbp) continue;
+
+    auto* ent = m_fixups.find(tca);
+    if (!ent) {
+      continue;
+    }
+
+    if (ent->isIndirect()) {
+      not_implemented();
+    }
+
+    VMRegs regs;
+    regsFromActRec(tca, rbp, ent->fixup, &regs);
+    TRACE(2, "fixup(end): func %s fp %p sp %p pc %p\b",
+          regs.fp->m_func->name()->data(),
+          regs.fp, regs.sp, regs.pc);
+    auto& vmRegs = vmRegsUnsafe();
+    vmRegs.fp = const_cast<ActRec*>(regs.fp);
+    vmRegs.pc = reinterpret_cast<PC>(regs.pc);
+    vmRegs.stack.top() = regs.sp;
+    return;
   }
-  m_pendingFixups.clear();
+
+  // This shouldn't be reached.
+  always_assert(false);
+}
+
+void
+FixupMap::fixup(ExecutionContext* ec) const {
+  if (RuntimeOption::EvalSimulateARM) {
+    // Walking the C++ stack doesn't work in simulation mode. Fortunately, the
+    // execution context has a stack of simulators, which we consult instead.
+    fixupWorkSimulated(ec);
+  } else {
+    // Start looking for fixup entries at the current (C++) frame.  This
+    // will walk the frames upward until we find a TC frame.
+    DECLARE_FRAME_POINTER(framePtr);
+    fixupWork(ec, framePtr);
+  }
 }
 
 /* This is somewhat hacky. It decides which helpers/builtins should
@@ -127,24 +185,22 @@ bool
 FixupMap::eagerRecord(const Func* func) {
   const char* list[] = {
     "func_get_args",
+    "__SystemLib\\func_get_args_sl",
     "get_called_class",
     "func_num_args",
+    "__SystemLib\\func_num_arg_",
     "array_filter",
     "array_map",
+    "__SystemLib\\func_slice_args",
   };
 
-  for (int i = 0; i < sizeof(list)/sizeof(list[0]); i++) {
-    if (!strcmp(func->name()->data(), list[i])) {
-      return true;
-    }
+  for (auto str : list) {
+    if (!strcmp(func->name()->data(), str)) return true;
   }
-  if (func->cls() && !strcmp(func->cls()->name()->data(), "WaitHandle")
-      && !strcmp(func->name()->data(), "join")) {
-    return true;
-  }
-  return false;
+
+  return func->cls() &&
+    !strcmp(func->cls()->name()->data(), "HH\\WaitHandle") &&
+    !strcmp(func->name()->data(), "join");
 }
 
-} // HPHP::Transl
-
-} // HPHP
+}}

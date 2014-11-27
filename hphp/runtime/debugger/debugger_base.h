@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,6 +17,10 @@
 #ifndef incl_HPHP_EVAL_DEBUGGER_BASE_H_
 #define incl_HPHP_EVAL_DEBUGGER_BASE_H_
 
+#include <memory>
+#include <vector>
+#include <string>
+
 #include "hphp/runtime/debugger/break_point.h"
 #include "hphp/runtime/base/string-buffer.h"
 #include "hphp/runtime/base/exceptions.h"
@@ -30,7 +34,7 @@ struct DebuggerClientOptions {
   std::string host;
   int port;
   std::string extension;
-  StringVec cmds;
+  std::vector<std::string> cmds;
   std::string sandbox;
   std::string user;
   std::string configFName;
@@ -84,7 +88,8 @@ class DebuggerClientExitException  : public DebuggerException {
 
 class DebuggerRestartException     : public DebuggerException {
 public:
-  explicit DebuggerRestartException(StringVecPtr args) : m_args(args) {}
+  explicit DebuggerRestartException(
+    std::shared_ptr<std::vector<std::string>> args) : m_args(args) {}
   ~DebuggerRestartException() throw() {}
 
   virtual const char *what() const throw() {
@@ -92,7 +97,7 @@ public:
   }
   EXCEPTION_COMMON_IMPL(DebuggerRestartException);
 
-  StringVecPtr m_args;
+  std::shared_ptr<std::vector<std::string>> m_args;
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -116,10 +121,10 @@ enum CodeColor {
  * "lineFocus", the line to highlight, with gray background.
  * highlight_code() doesn't need <?php and will treat source entirely PHP.
  */
-String highlight_php(CStrRef source, int line = 0, int lineFocus0 = 0,
+String highlight_php(const String& source, int line = 0, int lineFocus0 = 0,
                      int charFocus0 = 0, int lineFocus1 = 0,
                      int charFocus1 = 0);
-String highlight_code(CStrRef source, int line = 0, int lineFocus0 = 0,
+String highlight_code(const String& source, int line = 0, int lineFocus0 = 0,
                       int charFocus0 = 0, int lineFocus1 = 0,
                       int charFocus1 = 0);
 
@@ -127,8 +132,11 @@ extern const char *PHP_KEYWORDS[];
 
 ///////////////////////////////////////////////////////////////////////////////
 
-DECLARE_BOOST_TYPES(DSandboxInfo);
-DECLARE_BOOST_TYPES(DMachineInfo);
+struct DSandboxInfo;
+struct DMachineInfo;
+
+using DSandboxInfoPtr = std::shared_ptr<DSandboxInfo>;
+
 class DMachineInfo {
 public:
   DMachineInfo()
@@ -175,7 +183,6 @@ private:
 
 ///////////////////////////////////////////////////////////////////////////////
 
-DECLARE_BOOST_TYPES(DThreadInfo);
 class DThreadInfo {
 public:
   int64_t m_id;
@@ -189,10 +196,11 @@ public:
   void recvImpl(ThriftBuffer &thrift);
 };
 
+using DThreadInfoPtr = std::shared_ptr<DThreadInfo>;
+
 ///////////////////////////////////////////////////////////////////////////////
 
 class BreakPointInfo;
-DECLARE_BOOST_TYPES(DFunctionInfo);
 class DFunctionInfo {
 public:
   std::string m_namespace;
@@ -209,17 +217,16 @@ public:
 
 ///////////////////////////////////////////////////////////////////////////////
 
-DECLARE_BOOST_TYPES(Macro);
 class Macro {
 public:
   std::string m_name;
-  StringVec m_cmds;
+  std::vector<std::string> m_cmds;
 
   unsigned int m_index; // currently playing position
 
   std::string desc(const char *indent);
-  void load(Hdf node);
-  void save(Hdf node);
+  void load(const IniSetting::Map& ini, Hdf node);
+  void save(std::ostream &stream, int key);
 };
 
 ///////////////////////////////////////////////////////////////////////////////

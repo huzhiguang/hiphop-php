@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -29,17 +29,17 @@ class OutputFile : public File {
 public:
   DECLARE_RESOURCE_ALLOCATION(OutputFile);
 
-  explicit OutputFile(CStrRef filename);
+  explicit OutputFile(const String& filename);
   virtual ~OutputFile();
 
   bool valid() const { return !m_closed;}
 
-  static StaticString s_class_name;
+  CLASSNAME_IS("OutputFile");
   // overriding ResourceData
-  CStrRef o_getClassNameHook() const { return s_class_name; }
+  const String& o_getClassNameHook() const { return classnameof(); }
 
   // implementing File
-  virtual bool open(CStrRef filename, CStrRef mode);
+  virtual bool open(const String& filename, const String& mode);
   virtual bool close();
   virtual int64_t readImpl(char *buffer, int64_t length);
   virtual int getc();

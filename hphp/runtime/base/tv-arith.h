@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -45,6 +45,14 @@ TypedNum cellSub(Cell, Cell);
 TypedNum cellMul(Cell, Cell);
 
 /*
+ * Same as their corresponding non-O functions, but will cast their sources to
+ * doubles instead of doing integer overflow.
+ */
+Cell cellAddO(Cell, Cell);
+TypedNum cellSubO(Cell, Cell);
+TypedNum cellMulO(Cell, Cell);
+
+/*
  * PHP operators / and %.
  *
  * The operators return numbers unless the second argument converts to
@@ -54,14 +62,29 @@ Cell cellDiv(Cell, Cell);
 Cell cellMod(Cell, Cell);
 
 /*
+ * PHP Operator **.
+ *
+ * Always returns a TypedNum.
+ */
+Cell cellPow(Cell, Cell);
+
+/*
  * PHP operators &, |, and ^.
  *
- * These functions return a KindOfInt64, unless both arguments are
+ * These operators return a KindOfInt64, unless both arguments are
  * KindOfString, in which case they return a KindOfString.
  */
 Cell cellBitAnd(Cell, Cell);
 Cell cellBitOr(Cell, Cell);
 Cell cellBitXor(Cell, Cell);
+
+/*
+ * PHP operators << and >>.
+ *
+ * These operators always return a KindOfInt64.
+ */
+Cell cellShl(Cell, Cell);
+Cell cellShr(Cell, Cell);
 
 //////////////////////////////////////////////////////////////////////
 
@@ -88,6 +111,14 @@ void cellSubEq(Cell& c1, Cell);
 void cellMulEq(Cell& c1, Cell);
 
 /*
+ * Same as their corresponding non-O functions, but will cast their sources to
+ * doubles instead of doing integer overflow.
+ */
+void cellAddEqO(Cell& c1, Cell c2);
+void cellSubEqO(Cell& c1, Cell c2);
+void cellMulEqO(Cell& c1, Cell c2);
+
+/*
  * PHP operators /= and %=.
  *
  * Mutates the first argument in place, by combining the second
@@ -98,6 +129,14 @@ void cellMulEq(Cell& c1, Cell);
  */
 void cellDivEq(Cell& c1, Cell);
 void cellModEq(Cell& c1, Cell);
+
+/*
+ * PHP operator **=.
+ *
+ * Mutates the first argument in place, by combining the second
+ * argument with it in the of php operator **=.
+ */
+void cellPowEq(Cell& c1, Cell);
 
 /*
  * PHP operators &=, |=, and ^=.
@@ -111,6 +150,17 @@ void cellBitAndEq(Cell& c1, Cell);
 void cellBitOrEq(Cell& c1, Cell);
 void cellBitXorEq(Cell& c1, Cell);
 
+/*
+ * PHP operators <<= and >>=.
+ *
+ * Mutates the first argument in place, by combining the second argument
+ * with it in the sense of the appropriate operator.
+ *
+ * Post: c1.m_type == KindOfInt64
+ */
+void cellShlEq(Cell& c1, Cell);
+void cellShrEq(Cell& c1, Cell);
+
 //////////////////////////////////////////////////////////////////////
 
 /*
@@ -122,6 +172,8 @@ void cellBitXorEq(Cell& c1, Cell);
 void cellInc(Cell&);
 void cellDec(Cell&);
 
+void cellIncO(Cell&);
+void cellDecO(Cell&);
 
 /*
  * PHP unary operator ~.

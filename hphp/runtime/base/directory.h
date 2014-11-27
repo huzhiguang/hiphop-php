@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,26 +17,32 @@
 #ifndef incl_HPHP_DIRECTORY_H_
 #define incl_HPHP_DIRECTORY_H_
 
-#include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/base/array-iterator.h"
+#include "hphp/runtime/base/resource-data.h"
+#include "hphp/runtime/base/type-array.h"
+#include "hphp/runtime/base/type-string.h"
 
 #include <dirent.h>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
+class Variant;
+
 class Directory : public SweepableResourceData {
 public:
   virtual void close() = 0;
-  virtual String read() = 0;
+  virtual Variant read() = 0;
   virtual void rewind() = 0;
-  void sweep() {
-    close();
+  virtual Array getMetaData();
+  virtual bool isEof() const {
+    return false; // Most implementations can't tell if they've reached EOF
   }
+  void sweep() override { close(); }
 
-  static StaticString s_class_name;
+  CLASSNAME_IS("Directory")
   // overriding ResourceData
-  virtual CStrRef o_getClassNameHook() const { return s_class_name; }
+  virtual const String& o_getClassNameHook() const { return classnameof(); }
 
   String getLastError() {
     return String(folly::errnoStr(errno).toStdString());
@@ -47,31 +53,39 @@ class PlainDirectory : public Directory {
 public:
   DECLARE_RESOURCE_ALLOCATION(PlainDirectory);
 
-  explicit PlainDirectory(CStrRef path);
+  explicit PlainDirectory(const String& path);
   ~PlainDirectory();
 
   virtual void close();
-  virtual String read();
+  virtual Variant read();
   virtual void rewind();
   bool isValid() const;
 
 private:
-  DIR *m_dir;
+  DIR* m_dir;
 };
 
 class ArrayDirectory : public Directory {
 public:
-  DECLARE_RESOURCE_ALLOCATION(ArrayDirectory);
+  DECLARE_RESOURCE_ALLOCATION_NO_SWEEP(ArrayDirectory);
 
-  explicit ArrayDirectory(CArrRef a) : m_it(a) {}
+  explicit ArrayDirectory(const Array& a) : m_it(a) {}
 
   virtual void close() {}
-  virtual String read();
+  virtual Variant read();
   virtual void rewind();
+  virtual bool isEof() const;
+
+  void sweep() override {
+    // Leave m_it alone
+    Directory::sweep();
+  }
+
+  size_t size() const { return m_it.getArrayData()->size(); }
+  String path();
 
 private:
   ArrayIter m_it;
-
 };
 
 ///////////////////////////////////////////////////////////////////////////////

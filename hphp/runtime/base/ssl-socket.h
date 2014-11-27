@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,9 +20,9 @@
 #include "hphp/runtime/base/socket.h"
 #include "hphp/util/lock.h"
 #include "hphp/util/network.h"
-#include "openssl/ssl.h"
-#include "openssl/x509.h"
-#include "openssl/err.h"
+#include <openssl/ssl.h>
+#include <openssl/x509.h>
+#include <openssl/err.h>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -45,20 +45,22 @@ public:
   };
 
   static int GetSSLExDataIndex();
-  static SSLSocket *Create(const Util::HostURL &hosturl, double timeout);
+  static SSLSocket *Create(int fd, int domain, const HostURL &hosturl,
+                           double timeout);
 
 public:
   SSLSocket();
   SSLSocket(int sockfd, int type, const char *address = nullptr, int port = 0);
   virtual ~SSLSocket();
+  void sweep() override;
 
   // will setup and enable crypto
   bool onConnect();
   bool onAccept();
 
-  static StaticString s_class_name;
+  CLASSNAME_IS("SSLSocket")
   // overriding ResourceData
-  CStrRef o_getClassNameHook() const { return s_class_name; }
+  const String& o_getClassNameHook() const { return classnameof(); }
 
   // overriding Socket
   virtual bool close();
@@ -101,11 +103,21 @@ class Certificate : public SweepableResourceData {
 public:
   X509 *m_cert;
   explicit Certificate(X509 *cert) : m_cert(cert) { assert(m_cert);}
-  ~Certificate() { if (m_cert) X509_free(m_cert);}
+  ~Certificate() {
+    if (m_cert) X509_free(m_cert);
+  }
+  void sweep() override {
+    // calls delete this
+    SweepableResourceData::sweep();
+  }
 
-  static StaticString s_class_name;
+  X509* get() {
+    return m_cert;
+  }
+
+  CLASSNAME_IS("OpenSSL X.509")
   // overriding ResourceData
-  CStrRef o_getClassNameHook() const { return s_class_name; }
+  const String& o_getClassNameHook() const { return classnameof(); }
 
   /**
    * Given a variant, coerce it into an X509 object. It can be:
@@ -115,8 +127,8 @@ public:
    *    to that cert
    *  . it will be interpreted as the cert data
    */
-  static Resource Get(CVarRef var);
-  static BIO *ReadData(CVarRef var, bool *file = nullptr);
+  static Resource Get(const Variant& var);
+  static BIO *ReadData(const Variant& var, bool *file = nullptr);
 };
 
 ///////////////////////////////////////////////////////////////////////////////

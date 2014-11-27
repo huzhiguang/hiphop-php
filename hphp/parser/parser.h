@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,9 +17,16 @@
 #ifndef incl_HPHP_PARSER_PARSER_H_
 #define incl_HPHP_PARSER_PARSER_H_
 
+#include <map>
+#include <set>
+#include <vector>
+#include <string>
+#include <memory>
+
 #include "hphp/parser/scanner.h"
 #include "hphp/util/lock.h"
-#include "hphp/util/case-insensitive.h"
+#include "hphp/util/functional.h"
+#include "hphp/util/hash-map-typedefs.h"
 
 #define IMPLEMENT_XHP_ATTRIBUTES                \
   Token m_xhpAttributes;                        \
@@ -40,9 +47,35 @@
 #define NAMESPACE_SEP                  '\\'
 
 namespace HPHP {
-///////////////////////////////////////////////////////////////////////////////
 
-typedef void * TStatementPtr;
+//////////////////////////////////////////////////////////////////////
+
+/*
+ * HHVM supports multiple types of lambda expressions.
+ */
+enum class ClosureType {
+  /*
+   * Short = Lambda syntax. Automatically captures variables mentioned in the
+   * body.
+   */
+  Short,
+
+  /*
+   * Long = Traditional closure syntax. Only captures variables that are
+   * explicitly specified in the "use" list.
+   */
+  Long,
+};
+
+enum ObjPropType {
+  ObjPropNormal,
+  ObjPropXhpAttr
+};
+
+//////////////////////////////////////////////////////////////////////
+
+typedef void* TStatementPtr;
+
 class ParserBase {
 public:
   enum NameKind {
@@ -55,6 +88,7 @@ public:
 
   static bool IsClosureName                (const std::string &name);
   std::string newClosureName(
+      const std::string &namespaceName,
       const std::string &className,
       const std::string &funcName);
 
@@ -100,7 +134,8 @@ public:
   void setRuleLocation(Location *loc) {
     m_loc = *loc;
   }
-  virtual void fatal(Location *loc, const char *msg) {}
+  virtual void fatal(const Location* loc, const char* msg) {}
+  virtual void parseFatal(const Location* loc, const char* msg) {}
 
   void pushFuncLocation();
   LocationPtr popFuncLocation();
@@ -140,7 +175,7 @@ protected:
   const char *m_fileName;
 
   Location m_loc;
-  LocationPtrVec m_funcLocs;
+  std::vector<std::shared_ptr<Location>> m_funcLocs;
   std::vector<bool> m_classes; // used to determine if we are currently
                                // inside a regular class or an XHP class
 

@@ -29,7 +29,10 @@ typedef unsigned long zend_ulong;
 typedef unsigned short zend_ushort;
 
 #define HAVE_ZEND_LONG64
-#if SIZEOF_LONG_LONG_INT == 8
+#ifdef ZEND_WIN32
+typedef __int64 zend_long64;
+typedef unsigned __int64 zend_ulong64;
+#elif SIZEOF_LONG_LONG_INT == 8
 typedef long long int zend_long64;
 typedef unsigned long long int zend_ulong64;
 #elif SIZEOF_LONG_LONG == 8
@@ -39,12 +42,22 @@ typedef unsigned long long zend_ulong64;
 # undef HAVE_ZEND_LONG64
 #endif
 
+#ifdef _WIN64
+typedef __int64 zend_intptr_t;
+typedef unsigned __int64 zend_uintptr_t;
+#else
 typedef long zend_intptr_t;
 typedef unsigned long zend_uintptr_t;
+#endif
 
 typedef unsigned int zend_object_handle;
 typedef struct _zend_object_handlers zend_object_handlers;
-typedef struct HPHP::TypedValue zval;
+#ifdef HHVM
+#include "hphp/runtime/base/complex-types.h"
+typedef struct HPHP::RefData zval;
+#else
+typedef struct _zval_struct zval;
+#endif
 
 typedef struct _zend_object_value {
   zend_object_handle handle;
@@ -52,3 +65,11 @@ typedef struct _zend_object_value {
 } zend_object_value;
 
 #endif /* ZEND_TYPES_H */
+
+/*
+ * Local variables:
+ * tab-width: 4
+ * c-basic-offset: 4
+ * indent-tabs-mode: t
+ * End:
+ */

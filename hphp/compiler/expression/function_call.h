@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -43,7 +43,6 @@ public:
   virtual int getKidCount() const;
 
   virtual ExpressionPtr preOptimize(AnalysisResultConstPtr ar);
-  virtual ExpressionPtr postOptimize(AnalysisResultConstPtr ar);
 
   const std::string &getName() const { return m_name; }
   const std::string &getOriginalName() const { return m_origName; }
@@ -64,6 +63,7 @@ public:
   void setArrayParams() { m_arrayParams = true; }
   bool isValid() const { return m_valid; }
   bool hadBackslash() const { return m_hadBackslash; }
+  bool hasUnpack() const;
 
 private:
   void checkParamTypeCodeErrors(AnalysisResultPtr);
@@ -86,7 +86,7 @@ protected:
   int m_extraArg;
   unsigned m_variableArgument : 1;
   unsigned m_voidReturn : 1;  // no return type
-  unsigned m_voidWrapper : 1; // void wrapper is needed
+  unsigned m_voidUsed : 1; // void return is used
   unsigned m_redeclared : 1;
   unsigned m_noStatic : 1;
   unsigned m_noInline : 1;
@@ -101,6 +101,7 @@ protected:
   int m_argArrayIndex;
   void optimizeArgArray(AnalysisResultPtr ar);
 
+  void checkUnpackParams();
   void markRefParams(FunctionScopePtr func, const std::string &name,
                      bool canInvokeFewArgs);
 
@@ -109,10 +110,6 @@ protected:
    * a function call.
    */
   void reset();
-
-  TypePtr checkParamsAndReturn(AnalysisResultPtr ar, TypePtr type,
-                               bool coerce, FunctionScopePtr func,
-                               bool arrayParams);
 
   ExpressionPtr inliner(AnalysisResultConstPtr ar,
                         ExpressionPtr obj, std::string localThis);

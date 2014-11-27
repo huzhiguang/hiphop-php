@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,8 +17,9 @@
 #ifndef incl_HPHP_TEST_CPP_BASE_H_
 #define incl_HPHP_TEST_CPP_BASE_H_
 
+#include <string>
+
 #include "hphp/test/ext/test_base.h"
-#include "hphp/util/base.h"
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -38,7 +39,6 @@ class TestCppBase : public TestBase {
   virtual bool RunTests(const std::string &which);
 
   // building blocks
-  bool TestSmartAllocator();
   bool TestIpBlockMap();
 
   /**

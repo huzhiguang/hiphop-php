@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,9 +19,10 @@
 #ifndef incl_EXT_LIST_TEST_EXT_H_
 #define incl_EXT_LIST_TEST_EXT_H_
 
+#include "hphp/test/ext/test_ext_apc.h"
+#ifdef HAVE_CUSTOM_LIBEVENT
 #include "hphp/test/ext/test_ext_curl.h"
-#include "hphp/test/ext/test_ext_memcached.h"
-#include "hphp/test/ext/test_ext_mysql.h"
+#endif
 #include "hphp/test/ext/test_ext_server.h"
 
 #endif // incl_EXT_LIST_TEST_EXT_H_

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -25,18 +25,14 @@
 
 namespace HPHP {
 
-IMPLEMENT_OBJECT_ALLOCATION(DateInterval)
-///////////////////////////////////////////////////////////////////////////////
-
-StaticString DateInterval::s_class_name("DateInterval");
-
+IMPLEMENT_RESOURCE_ALLOCATION(DateInterval)
 ///////////////////////////////////////////////////////////////////////////////
 
 DateInterval::DateInterval() {
   m_di = DateIntervalPtr();
 }
 
-DateInterval::DateInterval(CStrRef date_interval,
+DateInterval::DateInterval(const String& date_interval,
                            bool date_string /*= false */) {
   if (date_string) {
     setDateString(date_interval);
@@ -49,7 +45,7 @@ DateInterval::DateInterval(timelib_rel_time *di) {
   m_di = DateIntervalPtr(di, dateinterval_deleter());
 }
 
-bool DateInterval::setDateString(CStrRef date_string) {
+bool DateInterval::setDateString(const String& date_string) {
   timelib_time *time;
   timelib_rel_time *di;
   timelib_error_container *errors = nullptr;
@@ -71,7 +67,7 @@ bool DateInterval::setDateString(CStrRef date_string) {
   }
 }
 
-bool DateInterval::setInterval(CStrRef date_interval) {
+bool DateInterval::setInterval(const String& date_interval) {
   timelib_rel_time *di = nullptr;
   timelib_error_container *errors = nullptr;
 
@@ -82,7 +78,7 @@ bool DateInterval::setInterval(CStrRef date_interval) {
   timelib_strtointerval((char*)date_interval.data(), date_interval.size(),
                         &start, &end, &di, &r, &errors);
 #else
-  throw NotImplementedException("timelib too old");
+  throw_not_implemented("timelib too old");
 #endif
 
   int error_count  = errors->error_count;
@@ -91,12 +87,19 @@ bool DateInterval::setInterval(CStrRef date_interval) {
     timelib_rel_time_dtor(di);
     return false;
   } else {
+#ifdef TIMELIB_HAVE_INTERVAL
+    if (UNLIKELY(!di && start && end)) {
+      timelib_update_ts(start, nullptr);
+      timelib_update_ts(end, nullptr);
+      di = timelib_diff(start, end);
+    }
+#endif
     m_di = DateIntervalPtr(di, dateinterval_deleter());
     return true;
   }
 }
 
-String DateInterval::format(CStrRef format_spec) {
+String DateInterval::format(const String& format_spec) {
   StringBuffer s;
   for(int i = 0; i < format_spec.length(); i++) {
     const int MAXLEN = 22; // 64bit signed int string length, plus terminating \0
@@ -163,8 +166,8 @@ String DateInterval::format(CStrRef format_spec) {
 }
 
 SmartResource<DateInterval> DateInterval::cloneDateInterval() const {
-  if (!m_di) return NEWOBJ(DateInterval)();
-  return NEWOBJ(DateInterval)(timelib_rel_time_clone(m_di.get()));
+  if (!m_di) return newres<DateInterval>();
+  return newres<DateInterval>(timelib_rel_time_clone(m_di.get()));
 }
 
 ///////////////////////////////////////////////////////////////////////////////

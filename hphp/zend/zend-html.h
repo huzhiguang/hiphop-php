@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1998-2010 Zend Technologies Ltd. (http://www.zend.com) |
    +----------------------------------------------------------------------+
    | This source file is subject to version 2.00 of the Zend license,     |
@@ -18,7 +18,12 @@
 #ifndef incl_HPHP_ZEND_HTML_H_
 #define incl_HPHP_ZEND_HTML_H_
 
-#include "hphp/util/base.h"
+#include <cstdint>
+
+// Avoid dragging in the icu namespace.
+#ifndef U_USING_ICU_NAMESPACE
+#define U_USING_ICU_NAMESPACE 0
+#endif
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -54,6 +59,16 @@ enum StringHtmlEncoding {
   STRING_HTML_ENCODE_NBSP = 2,
   STRING_HTML_ENCODE_HIGH = 4,
   STRING_HTML_ENCODE_UTF8IZE_REPLACE = 8
+};
+
+enum class EntBitmask {
+  ENT_BM_NOQUOTES = 0,   /* leave all quotes alone */
+  ENT_BM_SINGLE = 1,     /* escape single quotes only */
+  ENT_BM_DOUBLE = 2,     /* escape double quotes only */
+  ENT_BM_IGNORE = 4,     /* silently discard invalid chars */
+  ENT_BM_SUBSTITUTE = 8, /* replace invalid chars with U+FFFD */
+  ENT_BM_XML1 = 16,      /* XML1 mode*/
+  ENT_BM_XHTML = 32,     /* XHTML mode */
 };
 
 namespace entity_charset_enum {
@@ -92,8 +107,9 @@ const html_entity_map* html_get_entity_map();
  */
 entity_charset determine_charset(const char*);
 
-char *string_html_encode(const char *input, int &len, bool encode_double_quote,
-                         bool encode_single_quote, bool utf8, bool nbsp);
+char *string_html_encode(const char *input, int &len,
+                         const int64_t qsBitmask, bool utf8,
+                         bool dEncode, bool htmlEnt);
 char *string_html_encode_extra(const char *input, int &len,
                                StringHtmlEncoding flags,
                                const AsciiMap *asciiMap);

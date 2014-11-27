@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,34 +17,27 @@
 #ifndef incl_HPHP_TYPES_H_
 #define incl_HPHP_TYPES_H_
 
-#include "hphp/util/base.h"
-#include "hphp/runtime/base/datatype.h"
-#include "hphp/util/thread-local.h"
-#include "hphp/util/mutex.h"
-#include "hphp/util/case-insensitive.h"
-#include "hphp/runtime/base/macros.h"
-#include "hphp/runtime/base/memory-manager.h"
-
-#include <boost/static_assert.hpp>
-#include <boost/intrusive_ptr.hpp>
-
 #include <stdint.h>
 #include <atomic>
 #include <limits>
 #include <type_traits>
 #include <vector>
+#include <stack>
+#include <list>
+#include <map>
+
+#include "hphp/util/functional.h"
+#include "hphp/util/hash-map-typedefs.h"
+#include "hphp/util/low-ptr.h"
+#include "hphp/util/mutex.h"
+#include "hphp/util/thread-local.h"
+#include "hphp/runtime/base/attr.h"
+#include "hphp/runtime/base/datatype.h"
+#include "hphp/runtime/base/memory-manager.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
-// forward declarations of all data types
 
-/**
- * Complex data types. Note that Numeric, Primitive, PlusOperand and Sequence
- * are actually all Variant type in implementation, but we'd keep them using
- * their own names in different places, so not to lose their inferred types.
- * Should we need to take advantage of this extra type inference information
- * in the future, we will be able to.
- */
 class String;
 class StaticString;
 class Array;
@@ -56,10 +49,6 @@ class Variant;
 class VarNR;
 class RefData;
 
-/**
- * Macros related to Variant that are needed by StringData, ObjectData,
- * and ArrayData.
- */
 extern const Variant null_variant;      // uninitialized variant
 extern const Variant init_null_variant; // php null
 extern const VarNR null_varNR;
@@ -70,39 +59,42 @@ extern const VarNR NEGINF_varNR;
 extern const VarNR NAN_varNR;
 extern const String null_string;
 extern const Array null_array;
-extern const Array empty_array;
+extern const Array empty_array_ref;
+extern const StaticString array_string; // String("Array")
 
-/*
- * All Refcounted types have their m_count field at the same offset
- * in the object. This offset is chosen to allow a RefData's count
- * field to pack after a TypedValue.
- *
- * Other refcounted types (ArrayData, StringData, and ObjectData)
- * have small fields that are packed into the same space.
- */
-const size_t FAST_REFCOUNT_OFFSET = 12;
+// Use empty_string() if you're returning String
+// Use empty_string_variant() if you're returning Variant
+// Or use these if you need to pass by const reference:
+extern const StaticString empty_string_ref; // const StaticString&
+extern const Variant empty_string_variant_ref; // const Variant&
 
-/**
- * These are underlying data structures for the above complex data types. Since
- * we use reference counting to achieve copy-on-write and automatic object
- * lifetime, we need these data objects to store real data that's shared by
- * multiple wrapper objects.
- */
 class StringData;
 class ArrayData;
 class ObjectData;
 class ResourceData;
+class MArrayIter;
 
-/**
- * Miscellaneous objects to help arrays to construct or to iterate.
- */
-class ArrayIter;
-class MutableArrayIter;
-
-class FullPos;
+class Class;
+class Func;
 
 class VariableSerializer;
 class VariableUnserializer;
+
+///////////////////////////////////////////////////////////////////////////////
+
+#ifdef USE_LOWPTR
+constexpr bool use_lowptr = true;
+
+using LowClassPtr  = LowPtr<Class, uint32_t>;
+using LowFuncPtr   = LowPtr<Func, uint32_t>;
+using LowStringPtr = LowPtr<const StringData, uint32_t>;
+#else
+constexpr bool use_lowptr = false;
+
+using LowClassPtr  = LowPtr<Class, uintptr_t>;
+using LowFuncPtr   = LowPtr<Func, uintptr_t>;
+using LowStringPtr = LowPtr<const StringData, uintptr_t>;
+#endif
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -131,50 +123,86 @@ enum class Mode {
 }
 
 namespace Collection {
-enum Type {
+enum Type : uint8_t { // stored in ObjectData::o_subclassData
+  // values must be contiguous integers (for ArrayIter::initFuncTable)
   InvalidType = 0,
   VectorType = 1,
   MapType = 2,
-  StableMapType = 3,
-  SetType = 4,
-  PairType = 5,
-  MaxNumTypes = 6
+  SetType = 3,
+  PairType = 4,
+  ImmVectorType = 5,
+  ImmMapType = 6,
+  ImmSetType = 7,
 };
+constexpr size_t MaxNumTypes = 8;
+
+inline Type stringToType(const char* str, size_t len) {
+  switch (len) {
+    case 6:
+      if (!strcasecmp(str, "hh\\set")) return SetType;
+      if (!strcasecmp(str, "hh\\map")) return MapType;
+      break;
+    case 7:
+      if (!strcasecmp(str, "hh\\pair")) return PairType;
+      break;
+    case 9:
+      if (!strcasecmp(str, "hh\\vector")) return VectorType;
+      if (!strcasecmp(str, "hh\\immmap")) return ImmMapType;
+      if (!strcasecmp(str, "hh\\immset")) return ImmSetType;
+      break;
+    case 12:
+      if (!strcasecmp(str, "hh\\immvector")) return ImmVectorType;
+      break;
+    default:
+      break;
+  }
+  return InvalidType;
+}
+inline Type stringToType(const std::string& s) {
+  return stringToType(s.c_str(), s.size());
+}
+inline bool isVectorType(Collection::Type ctype) {
+  return (ctype == Collection::VectorType ||
+          ctype == Collection::ImmVectorType);
+}
+inline bool isMapType(Collection::Type ctype) {
+  return (ctype == Collection::MapType ||
+          ctype == Collection::ImmMapType);
+}
+inline bool isSetType(Collection::Type ctype) {
+  return (ctype == Collection::SetType ||
+          ctype == Collection::ImmSetType);
+}
+inline bool isInvalidType(Collection::Type ctype) {
+  return (ctype == Collection::InvalidType ||
+          static_cast<size_t>(ctype) >= Collection::MaxNumTypes);
+}
+inline bool isMutableType(Collection::Type ctype) {
+  return (ctype == Collection::VectorType ||
+          ctype == Collection::MapType ||
+          ctype == Collection::SetType);
+}
+inline bool isImmutableType(Collection::Type ctype) {
+  return !isMutableType(ctype);
 }
 
-/**
- * Some of these typedefs are for platform independency, including "int64".
- * Some of them are for clarity, for example, "litstr". Some of them are purely
- * for being able to vertically align type-specialized functions so they look
- * cleaner.
- */
+inline bool isTypeWithPossibleIntStringKeys(Collection::Type ctype) {
+  return Collection::isSetType(ctype) || Collection::isMapType(ctype);
+}
+
+}
+
+//////////////////////////////////////////////////////////////////////
+
 typedef const char * litstr; /* literal string */
-typedef const String & CStrRef;
-typedef const Array & CArrRef;
-typedef const Object & CObjRef;
-typedef const Resource & CResRef;
-typedef const Variant & CVarRef;
 
 typedef const class VRefParamValue    &VRefParam;
 typedef const class RefResultValue    &RefResult;
-typedef const class VariantStrongBind &CVarStrongBind;
-typedef const class VariantWithRefBind&CVarWithRefBind;
 
-inline CVarStrongBind
-strongBind(CVarRef v)     { return *(VariantStrongBind*)&v; }
-inline CVarStrongBind
-strongBind(RefResult v)   { return *(VariantStrongBind*)&v; }
-inline CVarWithRefBind
-withRefBind(CVarRef v)    { return *(VariantWithRefBind*)&v; }
-
-inline CVarRef
-variant(CVarStrongBind v) { return *(Variant*)&v; }
-inline CVarRef
-variant(CVarWithRefBind v){ return *(Variant*)&v; }
-inline CVarRef
+inline const Variant&
 variant(RefResult v)      { return *(Variant*)&v; }
-inline CVarRef
-variant(CVarRef v)        { return v; }
+inline const Variant&
+variant(const Variant& v)        { return v; }
 
 /**
  * ref() can be used to cause strong binding
@@ -183,7 +211,7 @@ variant(CVarRef v)        { return v; }
  *   a = b;      // weak binding: a will copy or copy-on-write
  *
  */
-inline RefResult ref(CVarRef v) {
+inline RefResult ref(const Variant& v) {
   return *(RefResultValue*)&v;
 }
 
@@ -191,227 +219,23 @@ inline RefResult ref(Variant& v) {
   return *(RefResultValue*)&v;
 }
 
-class Class;
-
 ///////////////////////////////////////////////////////////////////////////////
-// code injection classes
 
-class RequestInjectionData {
-public:
-  static const ssize_t MemExceededFlag      = 1 << 0;
-  static const ssize_t TimedOutFlag         = 1 << 1;
-  static const ssize_t SignaledFlag         = 1 << 2;
-  static const ssize_t EventHookFlag        = 1 << 3;
-  static const ssize_t PendingExceptionFlag = 1 << 4;
-  static const ssize_t InterceptFlag        = 1 << 5;
-  // Set by the debugger to break out of loops in translated code.
-  static const ssize_t DebuggerSignalFlag   = 1 << 6;
-  static const ssize_t LastFlag             = DebuggerSignalFlag;
-
-  RequestInjectionData()
-    : cflagsPtr(nullptr),
-      m_timeoutSeconds(-1), m_hasTimer(false), m_timerActive(false),
-      m_debugger(false), m_debuggerIntr(false), m_coverage(false),
-      m_jit(false) {
-  }
-
-  ~RequestInjectionData();
-
-  inline volatile ssize_t* getConditionFlags() {
-    assert(cflagsPtr);
-    return cflagsPtr;
-  }
-
-  ssize_t* cflagsPtr;  // this points to the real condition flags,
-                       // somewhere in the thread's targetcache
-
- private:
-#ifndef __APPLE__
-  timer_t m_timer_id;    // id of our timer
-#endif
-  int m_timeoutSeconds;  // how many seconds to timeout
-  bool m_hasTimer;       // Whether we've created our timer yet
-  std::atomic<bool> m_timerActive;
-                         // Set true when we activate a timer,
-                         // cleared when the signal handler runs
-  bool m_debugger;       // whether there is a DebuggerProxy attached to me
-  bool m_debuggerIntr;   // indicating we should force interrupt for debugger
-  bool m_coverage;       // is coverage being collected
-  bool m_jit;            // is the jit enabled
- public:
-  int getTimeout() const { return m_timeoutSeconds; }
-  void setTimeout(int seconds);
-  int getRemainingTime() const;
-  void resetTimer(int seconds = 0);
-  void onTimeout();
-  bool getJit() const { return m_jit; }
-  bool getDebugger() const { return m_debugger; }
-  void setDebugger(bool d) {
-    m_debugger = d;
-    updateJit();
-  }
-  static uint32_t debuggerReadOnlyOffset() {
-    return offsetof(RequestInjectionData, m_debugger);
-  }
-  bool getDebuggerIntr() const { return m_debuggerIntr; }
-  void setDebuggerIntr(bool d) {
-    m_debuggerIntr = d;
-    updateJit();
-  }
-  bool getCoverage() const { return m_coverage; }
-  void setCoverage(bool flag) {
-    m_coverage = flag;
-    updateJit();
-  }
-  void updateJit();
-
-  std::stack<void *> interrupts;   // CmdInterrupts this thread's handling
-
-  void reset();
-
-  void setMemExceededFlag();
-  void setTimedOutFlag();
-  void clearTimedOutFlag();
-  void setSignaledFlag();
-  void setEventHookFlag();
-  void clearEventHookFlag();
-  void setPendingExceptionFlag();
-  void clearPendingExceptionFlag();
-  void setInterceptFlag();
-  void clearInterceptFlag();
-  void setDebuggerSignalFlag();
-  ssize_t fetchAndClearFlags();
-
-  void onSessionInit();
-};
-
-class GlobalNameValueTableWrapper;
+class GlobalsArray;
 class ObjectAllocatorBase;
 class Profiler;
 class CodeCoverage;
-typedef GlobalNameValueTableWrapper GlobalVariables;
-
-int object_alloc_size_to_index(size_t);
-size_t object_alloc_index_to_size(int);
-
-// implemented in runtime/base/thread-info
-typedef boost::intrusive_ptr<ArrayData> ArrayHolder;
-void intrusive_ptr_add_ref(ArrayData* a);
-void intrusive_ptr_release(ArrayData* a);
-
-class ThreadInfo {
-public:
-  enum Executing {
-    Idling,
-    RuntimeFunctions,
-    ExtensionFunctions,
-    UserFunctions,
-    NetworkIO,
-  };
-
-  static void GetExecutionSamples(std::map<Executing, int> &counts);
-
-public:
-  static DECLARE_THREAD_LOCAL_NO_CHECK(ThreadInfo, s_threadInfo);
-
-  RequestInjectionData m_reqInjectionData;
-
-  // For infinite recursion detection.  m_stacklimit is the lowest
-  // address the stack can grow to.
-  char *m_stacklimit;
-
-  // Either null, or populated by initialization of ThreadInfo as an
-  // approximation of the highest address of the current thread's
-  // stack.
-  static __thread char* t_stackbase;
-
-  // This is the amount of "slack" in stack usage checks - if the
-  // stack pointer gets within this distance from the end (minus
-  // overhead), throw an infinite recursion exception.
-  static const int StackSlack = 1024 * 1024;
-
-  MemoryManager* m_mm;
-
-  // This pointer is set by ProfilerFactory
-  Profiler *m_profiler;
-  CodeCoverage *m_coverage;
-
-  Executing m_executing;
-
-  // A C++ exception which will be thrown by the next surprise check.
-  Exception* m_pendingException;
-
-  ThreadInfo();
-  ~ThreadInfo();
-
-  void onSessionInit();
-  void onSessionExit();
-  void setPendingException(Exception* e);
-  void clearPendingException();
-
-  static bool valid(ThreadInfo* info);
-};
-
-extern void throw_infinite_recursion_exception();
-extern void throw_call_non_object() ATTRIBUTE_COLD ATTRIBUTE_NORETURN;
-
-inline void* stack_top_ptr() {
-  DECLARE_STACK_POINTER(sp);
-  return sp;
-}
-
-inline bool stack_in_bounds(ThreadInfo *&info) {
-  return stack_top_ptr() >= info->m_stacklimit;
-}
-
-// The ThreadInfo pointer itself must be from the current stack frame.
-inline void check_recursion(ThreadInfo *&info) {
-  if (!stack_in_bounds(info)) {
-    throw_infinite_recursion_exception();
-  }
-}
-
-// implemented in runtime/base/builtin-functions.cpp
-extern ssize_t check_request_surprise(ThreadInfo *info) ATTRIBUTE_COLD;
-
-// implemented in runtime/ext/ext_hotprofiler.cpp
-extern void begin_profiler_frame(Profiler *p, const char *symbol);
-extern void end_profiler_frame(Profiler *p);
+typedef GlobalsArray GlobalVariables;
 
 ///////////////////////////////////////////////////////////////////////////////
-
-class ExecutionProfiler {
-public:
-  ExecutionProfiler(ThreadInfo *info, bool builtin) : m_info(info) {
-    m_executing = m_info->m_executing;
-    m_info->m_executing =
-      builtin ? ThreadInfo::ExtensionFunctions : ThreadInfo::UserFunctions;
-  }
-  explicit ExecutionProfiler(ThreadInfo::Executing executing) {
-    m_info = ThreadInfo::s_threadInfo.getNoCheck();
-    m_executing = m_info->m_executing;
-    m_info->m_executing = executing;
-  }
-  ~ExecutionProfiler() {
-    m_info->m_executing = m_executing;
-  }
-private:
-  ThreadInfo *m_info;
-  ThreadInfo::Executing m_executing;
-};
 
 class AccessFlags {
 public:
   enum Type {
     None = 0,
-
     Error = 1,
-    CheckExist = 2,
-    Key = 4,
-    NoHipHop = 8,
-
+    Key = 2,
     Error_Key = Error | Key,
-    Error_NoHipHop = Error | NoHipHop,
   };
   static Type IsKey(bool s) { return s ? Key : None; }
   static Type IsError(bool e) { return e ? Error : None; }
@@ -421,20 +245,13 @@ public:
 #define ACCESSPARAMS_IMPL AccessFlags::Type flags
 
 /*
- * Non-enumerated version of type for referring to opcodes or the
- * bytecode stream.  (Use the enum Op in hhbc.h for an enumerated
- * version.)
- */
-typedef uint8_t Opcode;
-
-/*
  * Program counters in the bytecode interpreter.
  *
  * Normally points to an Opcode, but has type const uchar* because
  * during a given instruction it is incremented while decoding
  * immediates and may point to arbitrary bytes.
  */
-typedef const uchar* PC;
+typedef const unsigned char* PC;
 
 /*
  * Id type for various components of a unit that have to have unique
@@ -443,6 +260,29 @@ typedef const uchar* PC;
  */
 typedef int Id;
 const Id kInvalidId = Id(-1);
+
+/*
+ * Translation IDs.
+ *
+ * These represent compilation units for the JIT, and are used to key into
+ * several runtime structures for finding profiling data or tracking
+ * translation information.
+ *
+ * Because we often convert between JIT block IDs and TransIDs, these are
+ * signed integers (blocks can have negative IDs).  However, negative block IDs
+ * logically correspond to blocks without associated translations---hence,
+ * negative TransID's are simply invalid.
+ *
+ * kInvalidTransID should be used when initializing or checking against a
+ * sentinel value.  To ask if a TransID is meaningful in a translation context,
+ * use isValidTransID().
+ */
+using TransID = int32_t;
+constexpr TransID kInvalidTransID = -1;
+
+inline bool isValidTransID(TransID transID) {
+  return transID >= 0;
+}
 
 // Bytecode offsets.  Used for both absolute offsets and relative
 // offsets.
@@ -459,78 +299,24 @@ typedef hphp_hash_set<Offset> OffsetSet;
  * be used for one of these.
  */
 typedef uint32_t Slot;
-const Slot kInvalidSlot = Slot(-1);
+constexpr Slot kInvalidSlot = Slot(-1);
 
 /*
- * Special types that are not relevant to the runtime as a whole.
- * The order for public/protected/private matters in numerous places.
- *
- * Attr unions are directly stored as integers in .hhbc repositories, so
- * incompatible changes here require a schema version bump.
- *
- * AttrTrait on a method means that the method is NOT a constructor,
- * even though it may look like one
- *
- * AttrNoOverride (WholeProgram only) on a class means its not extended
- * and on a method means that no extending class defines the method.
- *
- * AttrVariadicByRef indicates a function is a builtin that takes
- * variadic arguments, where the arguments are either by ref or
- * optionally by ref.  (It is equivalent to having ClassInfo's
- * (RefVariableArguments | MixedVariableArguments).)
- *
- * AttrMayUseVV indicates that a function may need to use a VarEnv or
- * varargs (aka extraArgs) at run time.
- *
- * AttrPhpLeafFn indicates a function does not make any explicit calls
- * to other php functions.  It may still call other user-level
- * functions via re-entry (e.g. for destructors or autoload), and it
- * may make calls to builtins using FCallBuiltin.
- *
- * AttrBuiltin is set on builtin functions - whether c++ or php
- *
- * AttrAllowOverride is set on builtin functions that can be replaced
- *   by user implementations
- *
- * AttrSkipFrame is set to indicate that the frame should be ignored
- *   when searching for the context (eg array_map evaluates its
- *   callback in the context of its caller).
+ * Handles into Request Data Segment.  These are offsets from
+ * RDS::tl_base.  See rds.h.
  */
-enum Attr {
-  AttrNone      = 0,             // class  property  method  //
-  AttrReference = (1 << 0),      //                     X    //
-  AttrPublic    = (1 << 1),      //            X        X    //
-  AttrProtected = (1 << 2),      //            X        X    //
-  AttrPrivate   = (1 << 3),      //            X        X    //
-  AttrStatic    = (1 << 4),      //            X        X    //
-  AttrAbstract  = (1 << 5),      //    X                X    //
-  AttrFinal     = (1 << 6),      //    X                X    //
-  AttrInterface = (1 << 7),      //    X                     //
-  AttrPhpLeafFn = (1 << 7),      //                     X    //
-  AttrTrait     = (1 << 8),      //    X                X    //
-  AttrNoInjection = (1 << 9),    //                     X    //
-  AttrUnique    = (1 << 10),     //    X                X    //
-  AttrDynamicInvoke = (1 << 11), //                     X    //
-  AttrNoExpandTrait = (1 << 12), //    X                     //
-  AttrNoOverride= (1 << 13),     //    X                X    //
-  AttrClone     = (1 << 14),     //                     X    //
-  AttrVariadicByRef = (1 << 15), //                     X    //
-  AttrMayUseVV  = (1 << 16),     //                     X    //
-  AttrPersistent= (1 << 17),     //    X                X    //
-  AttrDeepInit = (1 << 18),      //            X             //
-  AttrHot = (1 << 19),           //                     X    //
-  AttrBuiltin = (1 << 20),       //                     X    //
-  AttrAllowOverride = (1 << 21), //                     X    //
-  AttrSkipFrame = (1 << 22),     //                     X    //
-  AttrNative = (1 << 23),        //                     X    //
-};
-
-inline Attr operator|(Attr a, Attr b) { return Attr((int)a | (int)b); }
-
-inline const char* attrToVisibilityStr(Attr attr) {
-  return (attr & AttrPrivate)   ? "private"   :
-         (attr & AttrProtected) ? "protected" : "public";
+namespace RDS {
+  typedef uint32_t Handle;
+  constexpr Handle kInvalidHandle = 0;
 }
+
+/*
+ * Unique identifier for a Func*.
+ */
+typedef uint32_t FuncId;
+constexpr FuncId InvalidFuncId = FuncId(-1LL);
+constexpr FuncId DummyFuncId = FuncId(-2LL);
+typedef hphp_hash_set<FuncId> FuncIdSet;
 
 ///////////////////////////////////////////////////////////////////////////////
 }

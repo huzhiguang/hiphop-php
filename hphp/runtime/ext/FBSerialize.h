@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -62,6 +62,7 @@ enum class Type {
   VECTOR,
   MAP,
   STRING,
+  OBJECT,
 };
 
 struct FBSerializeBase {
@@ -91,22 +92,29 @@ struct FBSerializeBase {
 template <class V>
 class FBSerializer : private FBSerializeBase {
  public:
-  static size_t serializedSize(const typename V::VariantType& thing);
-  static void serialize(const typename V::VariantType& thing, char* out);
+  template <typename Variant>
+  static size_t serializedSize(const Variant& thing);
+  template <typename Variant>
+  static void serialize(const Variant& thing, char* out);
  private:
   char* out_;
   explicit FBSerializer(char* out);
 
   void write(const char* src, size_t size);
-  void doSerialize(const typename V::VariantType& thing);
+  template <typename Variant>
+  void doSerialize(const Variant& thing);
   void writeCode(Code code);
   void serializeBoolean(bool val);
   void serializeInt64(int64_t val);
   void serializeDouble(double val);
-  void serializeString(const typename V::StringType& str);
-  void serializeMap(const typename V::MapType& map, size_t depth);
-  void serializeVector(const typename V::VectorType& vec, size_t depth);
-  void serializeThing(const typename V::VariantType& thing, size_t depth);
+  template <typename String>
+  void serializeString(const String& str);
+  template <typename Map>
+  void serializeMap(const Map& map, size_t depth);
+  template <typename Vector>
+  void serializeVector(const Vector& vec, size_t depth);
+  template <typename Variant>
+  void serializeThing(const Variant& thing, size_t depth);
 
   static size_t serializedSizeInt64(int64_t v);
   template <typename String>
@@ -122,20 +130,28 @@ class FBSerializer : private FBSerializeBase {
 template <class V>
 class FBUnserializer : private FBSerializeBase {
  public:
-  static typename V::VariantType unserialize(
-    const folly::StringPiece& serialized);
- private:
-  FBUnserializer();
+  static typename V::VariantType unserialize(folly::StringPiece serialized);
 
-  typename V::VariantType doUnserialize(const folly::StringPiece& serialized);
+  explicit FBUnserializer(folly::StringPiece serialized);
 
-  void need(size_t n);
   bool unserializeBoolean();
   int64_t unserializeInt64();
   double unserializeDouble();
   typename V::StringType unserializeString();
+  folly::StringPiece unserializeStringPiece();
   typename V::MapType unserializeMap();
+  // read the next map but don't unserialze it (for lazy or delay
+  // unserialization)
+  folly::StringPiece getSerializedMap();
   typename V::VariantType unserializeThing();
+
+  void advance(size_t delta);
+  Code nextCode() const;
+  bool done() const {
+    return p_ == end_;
+  }
+ private:
+  void need(size_t n) const;
 
   const char* p_;
   const char* end_;

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -30,13 +30,13 @@ namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 // class Closure
 
-FORWARD_DECLARE_CLASS_BUILTIN(Closure);
+FORWARD_DECLARE_CLASS(Closure);
 class c_Closure : public ExtObjectDataFlags<ObjectData::HasClone> {
  public:
-  DECLARE_CLASS(Closure, Closure, ObjectData)
+  DECLARE_CLASS_NO_SWEEP(Closure)
 
-  c_Closure(Class* cls = c_Closure::s_cls)
-    : ExtObjectDataFlags<ObjectData::HasClone>(cls)
+  c_Closure(Class* cls = c_Closure::classof())
+    : ExtObjectDataFlags(cls)
   {
     if (debug) {
       // m_func and m_thisOrClass must be initialized by init(), or the TC.
@@ -58,21 +58,48 @@ class c_Closure : public ExtObjectDataFlags<ObjectData::HasClone> {
 public: // ObjectData overrides
   void t___construct(); // must not be called for Closures
 
-public:
-  ObjectData* getThisOrClass() { return m_thisOrClass; }
-  const Func* getInvokeFunc() { return m_func; }
-  HphpArray* getStaticLocals();
-  TypedValue* getUseVars() { return propVec(); }
-  int getNumUseVars() { return m_cls->numDeclProperties(); }
+  // closure object can't have properties
+  Variant t___get(Variant member);
+  Variant t___set(Variant member, Variant value);
+  bool t___isset(Variant name);
+  Variant t___unset(Variant name);
 
-  static size_t funcOffset() { return offsetof(c_Closure, m_func); }
-  static size_t ctxOffset() { return offsetof(c_Closure, m_thisOrClass); }
+  Array t___debuginfo();
+
+public:
+
+  const Func* getInvokeFunc() { return m_func; }
+  TypedValue* getUseVars() { return propVec(); }
+  TypedValue* getStaticVar(Slot s) { return propVec() + s; }
+  int32_t getNumUseVars() const {
+    return getVMClass()->numDeclProperties() - m_func->numStaticLocals();
+  }
+
+  void* getThisOrClass() { return m_thisOrClass; }
+
+  ObjectData* getThis() { return ActRec::decodeThis(m_thisOrClass); }
+  void setThis(ObjectData* od) { m_thisOrClass = ActRec::encodeThis(od); }
+  bool hasThis() { return getThis() != nullptr; }
+
+  Class* getScope() { return m_func->cls(); }
+
+  Class* getClass() { return ActRec::decodeClass(m_thisOrClass); }
+  void setClass(Class* cls) { m_thisOrClass = ActRec::encodeClass(cls); }
+  bool hasClass() { return getClass() != nullptr; }
+
+  static constexpr size_t funcOffset() { return offsetof(c_Closure, m_func); }
+  static constexpr size_t ctxOffset() { return offsetof(c_Closure, m_thisOrClass); }
 
   static c_Closure* Clone(ObjectData* obj);
 
+  static Object ti_bind(const Variant& closure, const Variant& newthis,
+                        const Variant& scope);
+
+  Object t_bindto(const Variant& newthis, const Variant& scope);
+
+
 private:
-  SmartPtr<HphpArray> m_VMStatics;
-  ObjectData* m_thisOrClass;
+  void* m_thisOrClass;
   const Func* m_func;
 };
 

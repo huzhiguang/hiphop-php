@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,6 +21,8 @@
 
 #include <mutex>
 #include <condition_variable>
+#include <map>
+#include <vector>
 
 namespace HPHP {
 
@@ -69,25 +71,17 @@ struct ProfileDump {
   }
 
   void addAlloc(size_t size, const ProfileStackTrace &trace) {
+    m_numDumps = 1;
     m_currentlyAllocated[trace] += size;
     m_accumAllocated[trace] += size;
   }
   void removeAlloc(size_t size, const ProfileStackTrace &trace) {
+    m_numDumps = 1;
     auto &current = m_currentlyAllocated[trace];
     current -= size;
-    assert(current.m_count >= 0 && current.m_bytes >= 0);
   }
 
   std::string toPProfFormat() const;
-
-  template<typename F>
-  void forEachAddress(F fun) const {
-    for (const auto &data : m_accumAllocated) {
-      for (const SrcKey &sk : data.first) {
-        fun(sk);
-      }
-    }
-  }
 
   // merge operation: takes another dump and adds all of its data.
   // used for global dumps that require logging from multiple VM
@@ -103,12 +97,25 @@ struct ProfileDump {
     return *this;
   }
 
+  bool empty() {
+    return m_numDumps == 0;
+  }
+
 private:
   std::map<ProfileStackTrace, SiteAllocations> m_currentlyAllocated;
   std::map<ProfileStackTrace, SiteAllocations> m_accumAllocated;
 
-  int m_numDumps;
+  int m_numDumps = 0;
 };
+
+enum class ProfileType {
+  Default,    // use the value of RuntimeOption::HHProfAllocationProfile to
+              // determine which mode to use
+  Heap,       // only record allocations that are live at the end of a request
+  Allocation  // record all allocations
+};
+
+typedef std::function<void(const ProfileDump&)> DumpFunc;
 
 // Static controller for requesting and fetching profile dumps. The pprof
 // server will place requests for dumps, and the VM threads will give
@@ -117,16 +124,23 @@ private:
 // it needs to wait for a request to finish, it will.
 struct ProfileController {
   // request API
-  static bool requestNext();
-  static bool requestNextURL(const std::string &url);
-  static bool requestGlobal();
+  static bool requestNext(ProfileType type);
+  static bool requestNextURL(ProfileType type, const std::string &url);
+  static bool requestGlobal(ProfileType type);
   static void cancelRequest();
 
   // give API
   static void offerProfile(const ProfileDump &dump);
 
-  // get API
-  static ProfileDump waitForProfile();
+  // process API
+  static void waitForProfile(DumpFunc df);
+
+  // control API
+  static bool isTracking();
+  static bool isProfiling();
+  static ProfileType profileType();
+
+  static void enqueueOrphanedUnit(const Unit*);
 };
 
 }

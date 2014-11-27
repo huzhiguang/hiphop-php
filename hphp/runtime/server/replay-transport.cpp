@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,11 +13,14 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/runtime/server/replay-transport.h"
+#include <folly/Conv.h>
+
 #include "hphp/runtime/base/string-util.h"
 #include "hphp/runtime/base/zend-functions.h"
 #include "hphp/runtime/base/zend-string.h"
+#include "hphp/runtime/base/config.h"
+#include "hphp/runtime/server/http-protocol.h"
 #include "hphp/util/process.h"
 
 namespace HPHP {
@@ -30,11 +33,11 @@ void ReplayTransport::recordInput(Transport* transport, const char *filename) {
 
   char buf[32];
   snprintf(buf, sizeof(buf), "%u", Process::GetProcessId());
-  hdf["pid"] = string(buf);
+  hdf["pid"] = std::string(buf);
   snprintf(buf, sizeof(buf), "%" PRIx64, (int64_t)Process::GetThreadId());
-  hdf["tid"] = string(buf);
+  hdf["tid"] = std::string(buf);
   snprintf(buf, sizeof(buf), "%u", Process::GetThreadPid());
-  hdf["tpid"] = string(buf);
+  hdf["tpid"] = std::string(buf);
 
   hdf["cmd"] = static_cast<int>(transport->getMethod());
   hdf["url"] = transport->getUrl();
@@ -55,10 +58,8 @@ void ReplayTransport::recordInput(Transport* transport, const char *filename) {
   int size;
   const void *data = transport->getPostData(size);
   if (size) {
-    int len;
-    char *encoded = string_uuencode((const char *)data, size, len);
-    hdf["post"] = encoded;
-    free(encoded);
+    String encoded = string_uuencode((const char *)data, size);
+    hdf["post"] = encoded.get()->data();
   } else {
     hdf["post"] = "";
   }
@@ -67,7 +68,8 @@ void ReplayTransport::recordInput(Transport* transport, const char *filename) {
 }
 
 void ReplayTransport::replayInput(const char *filename) {
-  m_hdf.open(filename);
+  std::string fname = filename;
+  Config::ParseConfigFile(fname, m_ini, m_hdf);
   replayInputImpl();
 }
 
@@ -77,24 +79,26 @@ void ReplayTransport::replayInput(Hdf hdf) {
 }
 
 void ReplayTransport::replayInputImpl() {
-  String postData = StringUtil::UUDecode(m_hdf["post"].get(""));
-  m_postData = string(postData.data(), postData.size());
+  String postData = StringUtil::UUDecode(Config::Get(m_ini, m_hdf["post"], ""));
+  m_postData = std::string(postData.data(), postData.size());
   m_requestHeaders.clear();
   for (Hdf hdf = m_hdf["headers"].firstChild(); hdf.exists();
        hdf = hdf.next()) {
-    m_requestHeaders[hdf["name"].get("")].push_back(hdf["value"].get(""));
+    m_requestHeaders[Config::Get(m_ini, hdf["name"], "")].push_back(
+      Config::Get(m_ini, hdf["value"], "")
+    );
   }
 }
 
 const char *ReplayTransport::getUrl() {
-  return m_hdf["url"].get("");
+  return Config::Get(m_ini, m_hdf["url"], "");
 }
 
 const char *ReplayTransport::getRemoteHost() {
-  return m_hdf["remote_host"].get("");
+  return Config::Get(m_ini, m_hdf["remote_host"], "");
 }
 uint16_t ReplayTransport::getRemotePort() {
-  return m_hdf["remote_port"].getUInt16(0);
+  return Config::GetUInt16(m_ini, m_hdf["remote_port"], 0);
 }
 
 const void *ReplayTransport::getPostData(int &size) {
@@ -103,7 +107,7 @@ const void *ReplayTransport::getPostData(int &size) {
 }
 
 Transport::Method ReplayTransport::getMethod() {
-  return (Transport::Method)m_hdf["cmd"].getInt32();
+  return (Transport::Method)Config::GetInt32(m_ini, m_hdf["cmd"]);
 }
 
 std::string ReplayTransport::getHeader(const char *name) {
@@ -134,9 +138,9 @@ void ReplayTransport::sendImpl(const void *data, int size, int code,
   m_code = code;
 
   m_response = "HTTP/1.1 ";
-  m_response += boost::lexical_cast<string>(code);
+  m_response += folly::to<std::string>(code);
   m_response += " ";
-  m_response += (m_code == 200 ? "OK" : "Internal Server Error");
+  m_response += HttpProtocol::GetReasonString(m_code);
   m_response += "\r\n";
 
   for (HeaderMap::const_iterator iter = m_responseHeaders.begin();

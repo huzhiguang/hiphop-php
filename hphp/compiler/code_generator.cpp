@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,19 +14,23 @@
    +----------------------------------------------------------------------+
 */
 
-#include <stdarg.h>
-
 #include "hphp/compiler/code_generator.h"
+#include "hphp/compiler/code_model_enums.h"
 #include "hphp/compiler/statement/statement_list.h"
+#include "hphp/compiler/expression/expression_list.h"
 #include "hphp/compiler/option.h"
 #include "hphp/compiler/analysis/file_scope.h"
 #include "hphp/compiler/analysis/function_scope.h"
 #include "hphp/compiler/analysis/analysis_result.h"
 #include "hphp/compiler/analysis/variable_table.h"
-#include "hphp/util/util.h"
+#include "hphp/runtime/base/zend-printf.h"
+#include "hphp/util/text-util.h"
 #include "hphp/util/hash.h"
+#include <folly/Conv.h>
 #include <boost/format.hpp>
 #include <boost/scoped_array.hpp>
+#include <algorithm>
+#include <vector>
 
 using namespace HPHP;
 
@@ -234,28 +238,9 @@ void CodeGenerator::printDocComment(const std::string comment) {
   printf("\n");
 }
 
-std::string CodeGenerator::FormatLabel(const std::string &name) {
-  string ret;
-  ret.reserve(name.size());
-  for (size_t i = 0; i < name.size(); i++) {
-    unsigned char ch = name[i];
-    if ((ch >= 'a' && ch <= 'z') ||
-        (ch >= 'A' && ch <= 'Z') ||
-        (ch >= '0' && ch <= '9') || ch == '_') {
-      ret += ch;
-    } else {
-      char buf[10];
-      snprintf(buf, sizeof(buf), "%s%02X", Option::LabelEscape.c_str(),
-               (int)ch);
-      ret += buf;
-    }
-  }
-  return ret;
-}
-
 std::string CodeGenerator::EscapeLabel(const std::string &name,
                                        bool *binary /* = NULL */) {
-  return Util::escapeStringForCPP(name, binary);
+  return escapeStringForCPP(name, binary);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -335,8 +320,7 @@ void CodeGenerator::printIndent() {
 
 int CodeGenerator::s_idLambda = 0;
 string CodeGenerator::GetNewLambda() {
-  return Option::LambdaPrefix + "lambda_" +
-    boost::lexical_cast<string>(++s_idLambda);
+  return Option::LambdaPrefix + "lambda_" + folly::to<string>(++s_idLambda);
 }
 
 void CodeGenerator::resetIdCount(const std::string &key) {
@@ -423,4 +407,194 @@ int CodeGenerator::ClassScopeCompare::cmp(const ClassScopeRawPtr &p1,
   int d = p1->getRedeclaringId() - p2->getRedeclaringId();
   if (d) return d;
   return strcasecmp(p1->getName().c_str(), p2->getName().c_str());
+}
+
+void CodeGenerator::printObjectHeader(const std::string className,
+                                      int numProperties) {
+  std::string prefixedClassName;
+  prefixedClassName.append(m_astPrefix);
+  prefixedClassName.append(className);
+  m_astClassNames.push_back(prefixedClassName);
+  printf("O:%d:\"%s\":%d:{",
+    (int)prefixedClassName.length(), prefixedClassName.c_str(), numProperties);
+}
+
+void CodeGenerator::printObjectFooter() {
+  printf("}");
+  m_astClassNames.pop_back();
+}
+
+void CodeGenerator::printPropertyHeader(const std::string propertyName) {
+  auto prefixedClassName = m_astClassNames.back();
+  auto len = 2+prefixedClassName.length()+propertyName.length();
+  printf("s:%d:\"", (int)len);
+  *m_out << (char)0;
+  printf("%s", prefixedClassName.c_str());
+  *m_out << (char)0;
+  printf("%s\";", propertyName.c_str());
+}
+
+void CodeGenerator::printNull() {
+  printf("N;");
+}
+
+void CodeGenerator::printBool(bool value) {
+  printf("b:%d;", value ? 1 : 0);
+}
+
+void CodeGenerator::printValue(double v) {
+  *m_out << "d:";
+  if (std::isnan(v)) {
+    *m_out << "NAN";
+  } else if (std::isinf(v)) {
+    if (v < 0) *m_out << '-';
+    *m_out << "INF";
+  } else {
+    char *buf;
+    if (v == 0.0) v = 0.0; // so to avoid "-0" output
+    vspprintf(&buf, 0, "%.*H", 14, v);
+    m_out->write(buf, strlen(buf));
+    free(buf);
+  }
+  *m_out << ';';
+}
+
+void CodeGenerator::printValue(int32_t value) {
+  printf("i:%d;", value);
+}
+
+void CodeGenerator::printValue(int64_t value) {
+  printf("i:%" PRId64 ";", value);
+}
+
+void CodeGenerator::printValue(std::string value) {
+  printf("s:%d:\"", (int)value.length());
+  getStream()->write(value.c_str(), value.length());
+  printf("\";");
+}
+
+void CodeGenerator::printModifierVector(std::string value) {
+  printf("V:9:\"HH\\Vector\":1:{");
+  printObjectHeader("Modifier", 1);
+  printPropertyHeader("name");
+  printValue(value);
+  printObjectFooter();
+  printf("}");
+}
+
+void CodeGenerator::printTypeExpression(std::string value) {
+  printObjectHeader("TypeExpression", 1);
+  printPropertyHeader("name");
+  printValue(value);
+  printObjectFooter();
+}
+
+void CodeGenerator::printTypeExpression(ExpressionPtr expression) {
+  printObjectHeader("TypeExpression", 2);
+  printPropertyHeader("name");
+  expression->outputCodeModel(*this);
+  printPropertyHeader("sourceLocation");
+  printLocation(expression->getLocation());
+  printObjectFooter();
+}
+
+void CodeGenerator::printExpression(ExpressionPtr expression, bool isRef) {
+  if (isRef) {
+    printObjectHeader("UnaryOpExpression", 3);
+    printPropertyHeader("expression");
+    expression->outputCodeModel(*this);
+    printPropertyHeader("operation");
+    printValue(PHP_REFERENCE_OP);
+    printPropertyHeader("sourceLocation");
+    printLocation(expression->getLocation());
+    printObjectFooter();
+  } else {
+    expression->outputCodeModel(*this);
+  }
+}
+
+void CodeGenerator::printExpressionVector(ExpressionListPtr el) {
+  auto count = el == nullptr ? 0 : el->getCount();
+  printf("V:9:\"HH\\Vector\":%d:{", count);
+  if (count > 0) {
+    el->outputCodeModel(*this);
+  }
+  printf("}");
+}
+
+void CodeGenerator::printExpressionVector(ExpressionPtr e) {
+  if (e->is(Expression::KindOfExpressionList)) {
+    auto sl = static_pointer_cast<ExpressionList>(e);
+    printExpressionVector(sl);
+  } else {
+    printf("V:9:\"HH\\Vector\":1:{");
+    e->outputCodeModel(*this);
+    printf("}");
+  }
+}
+
+void CodeGenerator::printTypeExpressionVector(ExpressionListPtr el) {
+  auto count = el == nullptr ? 0 : el->getCount();
+  printf("V:9:\"HH\\Vector\":%d:{", count);
+  for (int i = 0; i < count; i++) {
+    auto te = (*el)[i];
+    printTypeExpression(te);
+  }
+  printf("}");
+}
+
+void CodeGenerator::printAsBlock(StatementPtr s, bool isEnclosed) {
+  if (s != nullptr && s->is(Statement::KindOfBlockStatement)) {
+    s->outputCodeModel(*this);
+  } else {
+    auto numProps = s == nullptr ? 0 : 2;
+    if (isEnclosed) numProps++;
+    printObjectHeader("BlockStatement", numProps);
+    if (s != nullptr) {
+      printPropertyHeader("statements");
+      printStatementVector(s);
+      printPropertyHeader("sourceLocation");
+      printLocation(s->getLocation());
+    }
+    if (isEnclosed) {
+      printPropertyHeader("isEnclosed");
+      printBool(true);
+    }
+    printObjectFooter();
+  }
+}
+
+void CodeGenerator::printStatementVector(StatementListPtr sl) {
+  printf("V:9:\"HH\\Vector\":%d:{", sl->getCount());
+  if (sl->getCount() > 0) {
+    sl->outputCodeModel(*this);
+  }
+  printf("}");
+}
+
+void CodeGenerator::printStatementVector(StatementPtr s) {
+  if (s == nullptr) {
+    printf("V:9:\"HH\\Vector\":0:{}");
+  } else if (s->is(Statement::KindOfStatementList)) {
+    auto sl = static_pointer_cast<StatementList>(s);
+    printStatementVector(sl);
+  } else {
+    printf("V:9:\"HH\\Vector\":1:{");
+    s->outputCodeModel(*this);
+    printf("}");
+  }
+}
+
+void CodeGenerator::printLocation(LocationPtr location) {
+  if (location == nullptr) return;
+  printObjectHeader("SourceLocation", 4);
+  printPropertyHeader("startLine");
+  printValue(location->line0);
+  printPropertyHeader("endLine");
+  printValue(location->line1);
+  printPropertyHeader("startColumn");
+  printValue(location->char0);
+  printPropertyHeader("endColumn");
+  printValue(location->char1);
+  printObjectFooter();
 }

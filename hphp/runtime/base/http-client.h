@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,6 +18,7 @@
 #define incl_HPHP_HTTP_CLIENT_H_
 
 #include "hphp/runtime/base/string-buffer.h"
+#include <vector>
 #include "hphp/runtime/server/transport.h"
 
 namespace HPHP {
@@ -61,7 +62,14 @@ public:
            const HeaderMap *requestHeaders = nullptr,
            std::vector<String> *responseHeaders = nullptr);
 
+  int request(const char* method,
+              const char *url, const char *data, int size,
+              StringBuffer &response, const HeaderMap *requestHeaders,
+              std::vector<String> *responseHeaders);
+
   std::string getLastError() const { return m_error;}
+
+  static const int defaultMaxRedirect = 20;
 
 private:
   int m_timeout;
@@ -84,9 +92,6 @@ private:
 
   Array       m_stream_context_options;
 
-  int impl(const char *url, const char *data, int size, StringBuffer &response,
-           const HeaderMap *requestHeaders,
-           std::vector<String> *responseHeaders);
 
   static size_t curl_write(char *data, size_t size, size_t nmemb, void *ctx);
   static size_t curl_header(char *data, size_t size, size_t nmemb, void *ctx);

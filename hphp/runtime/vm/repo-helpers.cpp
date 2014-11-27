@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,9 +15,11 @@
 */
 
 #include "hphp/runtime/vm/repo-helpers.h"
-#include "hphp/runtime/vm/repo.h"
-#include "hphp/runtime/vm/blob-helper.h"
+
 #include "hphp/runtime/base/builtin-functions.h"
+
+#include "hphp/runtime/vm/blob-helper.h"
+#include "hphp/runtime/vm/repo.h"
 
 namespace HPHP {
 
@@ -170,7 +172,7 @@ void RepoQuery::bindTypedValue(const char* paramName, const TypedValue& tv) {
     bindBlob(paramName, "", 0, true);
   } else {
     String blob = f_serialize(tvAsCVarRef(&tv));
-    bindBlob(paramName, blob->data(), blob->size());
+    bindBlob(paramName, blob.data(), blob.size());
   }
 }
 
@@ -191,6 +193,10 @@ void RepoQuery::bindStaticString(const char* paramName, const StringData* sd) {
   } else {
     bindText(paramName, sd->data(), sd->size(), true);
   }
+}
+
+void RepoQuery::bindStdString(const char* paramName, const std::string& s) {
+  bindText(paramName, s.data(), s.size(), true);
 }
 
 void RepoQuery::bindDouble(const char* paramName, double val) {
@@ -347,7 +353,7 @@ void RepoQuery::getTypedValue(int iCol, TypedValue& tv) {
     String s = String((const char*)blob, size, CopyString);
     Variant v = unserialize_from_string(s);
     if (v.isString()) {
-      v = String(StringData::GetStaticString(v.asCStrRef().get()));
+      v = String(makeStaticString(v.asCStrRef().get()));
     } else if (v.isArray()) {
       v = Array(ArrayData::GetScalarArray(v.asCArrRef().get()));
     } else {
@@ -372,6 +378,13 @@ void RepoQuery::getText(int iCol, const char*& text, size_t& size) {
   size = size_t(sqlite3_column_bytes(m_stmt.get(), iCol));
 }
 
+void RepoQuery::getStdString(int iCol, std::string& s) {
+  const char* text;
+  size_t size;
+  getText(iCol, text, size);
+  s = std::string(text, size);
+}
+
 void RepoQuery::getStaticString(int iCol, StringData*& s) {
   if (isNull(iCol)) {
     s = nullptr;
@@ -379,7 +392,7 @@ void RepoQuery::getStaticString(int iCol, StringData*& s) {
     const char* text;
     size_t size;
     getText(iCol, text, size);
-    s = StringData::GetStaticString(text, size);
+    s = makeStaticString(text, size);
   }
 }
 

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -318,7 +318,7 @@ bool TestParserExpr::TestArrayPairExpression() {
 
 bool TestParserExpr::TestClassConstantExpression() {
   V("<?php function a() { static $a = A::b;}",
-    "function a() {\nstatic $a = A::b;\n}\n");
+    "function a() {\nstatic $a = \\A::b;\n}\n");
   return true;
 }
 
@@ -436,7 +436,7 @@ bool TestParserExpr::TestXHP() {
 
   // attributes
   V("<?hh $x = <x:y attr={:tag::CONSTANT} />;",
-    "$x = new xhp_x__y(array('attr' => xhp_tag::CONSTANT), array(), __FILE__, __LINE__);\n");
+    "$x = new xhp_x__y(array('attr' => \\xhp_tag::CONSTANT), array(), __FILE__, __LINE__);\n");
   V("<?hh $x = <a b=\"&nbsp;\">c</a>;",
     "$x = new xhp_a(array('b' => '\xC2\xA0'), array('c'), __FILE__, __LINE__);\n");
   V("<?hh $x = <a b=\"\" />;",

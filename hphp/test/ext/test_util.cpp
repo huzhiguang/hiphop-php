@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,9 +16,11 @@
 
 #include "hphp/test/ext/test_util.h"
 #include "hphp/util/logger.h"
+#include "hphp/runtime/base/file-util.h"
 #include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/base/shared-string.h"
 #include "hphp/runtime/base/zend-string.h"
+#include "hphp/runtime/base/config.h"
 
 #define VERIFY_DUMP(map, exp)                                           \
   if (!(exp)) {                                                         \
@@ -46,13 +48,13 @@ bool TestUtil::RunTests(const std::string &which) {
 // data types
 
 struct testhash {
-  size_t operator()(CStrRef s) const {
+  size_t operator()(const String& s) const {
     return hash_string(s.data(), s.size());
   }
 };
 
 struct testeqstr {
-  bool operator()(CStrRef s1, CStrRef s2) const {
+  bool operator()(const String& s1, const String& s2) const {
     return string_strcmp(s1.data(), s1.size(), s2.data(), s2.size()) == 0;
   }
 };
@@ -99,21 +101,26 @@ bool TestUtil::TestSharedString() {
 }
 
 bool TestUtil::TestCanonicalize() {
-  VERIFY(Util::canonicalize("foo") == "foo");
-  VERIFY(Util::canonicalize("/foo") == "/foo");
-  VERIFY(Util::canonicalize("./foo") == "foo");
-  VERIFY(Util::canonicalize("foo/bar") == "foo/bar");
-  VERIFY(Util::canonicalize("foo/////bar") == "foo/bar");
-  VERIFY(Util::canonicalize("foo/bar/") == "foo/bar/");
-  VERIFY(Util::canonicalize("foo/../bar") == "bar");
-  VERIFY(Util::canonicalize("./foo/../bar") == "bar");
-  VERIFY(Util::canonicalize(".////foo/xyz////..////../bar") == "bar");
-  VERIFY(Util::canonicalize("a/foo../bar") == "a/foo../bar");
-  VERIFY(Util::canonicalize("a./foo/./bar") == "a./foo/bar");
-  VERIFY(Util::canonicalize("////a/foo") == "/a/foo");
-  VERIFY(Util::canonicalize("../foo") == "../foo");
-  VERIFY(Util::canonicalize("foo/../../bar") == "../bar");
-  VERIFY(Util::canonicalize("./../../") == "../../");
+  VERIFY(FileUtil::canonicalize(String("foo")) == String("foo"));
+  VERIFY(FileUtil::canonicalize(String("/foo")) == String("/foo"));
+  VERIFY(FileUtil::canonicalize(String("./foo")) == String("foo"));
+  VERIFY(FileUtil::canonicalize(String("foo/bar")) == String("foo/bar"));
+  VERIFY(FileUtil::canonicalize(String("foo/////bar")) == String("foo/bar"));
+  VERIFY(FileUtil::canonicalize(String("foo/bar/")) == String("foo/bar/"));
+  VERIFY(FileUtil::canonicalize(String("foo/../bar")) == String("bar"));
+  VERIFY(FileUtil::canonicalize(String("./foo/../bar")) == String("bar"));
+  VERIFY(FileUtil::canonicalize(String(".////foo/xyz////..////../bar"))
+         == String("bar"));
+  VERIFY(FileUtil::canonicalize(String("a/foo../bar"))
+         == String("a/foo../bar"));
+  VERIFY(FileUtil::canonicalize(String("a./foo/./bar"))
+         == String("a./foo/bar"));
+  VERIFY(FileUtil::canonicalize(String("////a/foo")) == String("/a/foo"));
+  VERIFY(FileUtil::canonicalize(String("../foo")) == String("../foo"));
+  VERIFY(FileUtil::canonicalize(String("foo/../../bar")) == String("../bar"));
+  VERIFY(FileUtil::canonicalize(String("./../../")) == String("../../"));
+  VERIFY(FileUtil::canonicalize(String("/test\0", 6, CopyString))
+         == String("/test"));
   return Count(true);
 }
 
@@ -125,12 +132,13 @@ bool TestUtil::TestHDF() {
   }
 
   {
+    IniSetting::Map ini = IniSetting::Map::object;
     Hdf doc;
     doc.fromString(
       "node.* {\n"
       "  name = value\n"
       "}");
-    VS(doc["node"][0]["name"].getString(), "value");
+    VS(Config::GetString(ini, doc["node"][0]["name"]), "value");
   }
 
   return Count(true);

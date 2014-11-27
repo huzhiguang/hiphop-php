@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -47,7 +47,6 @@ public:
                   ExpressionListPtr attrList, bool method = true);
 
   DECLARE_STATEMENT_VIRTUAL_FUNCTIONS;
-  void inferFunctionTypes(AnalysisResultPtr ar);
   virtual bool hasDecl() const { return true; }
   virtual bool hasImpl() const { return false; }
   virtual int getRecursiveCount() const;
@@ -72,6 +71,7 @@ public:
   }
   StatementListPtr getStmts() { return m_stmt;}
   bool isRef(int index = -1) const;
+  bool isSystem() const;
 
   int getLocalEffects() const;
 
@@ -122,8 +122,6 @@ public:
   void setHasCallToGetArgs(bool f) { m_hasCallToGetArgs = f; }
   bool hasCallToGetArgs() const { return m_hasCallToGetArgs; }
 
-  std::string getGeneratorName() const;
-
 private:
   void checkParameters();
 
@@ -133,6 +131,7 @@ protected:
   bool m_hasCallToGetArgs;
   int m_attribute;
   int m_cppLength;
+  int m_autoPropCount;
   ModifierExpressionPtr m_modifiers;
   std::string m_name;
   std::string m_originalName;

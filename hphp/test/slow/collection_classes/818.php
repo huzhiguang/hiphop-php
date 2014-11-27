@@ -1,7 +1,7 @@
-<?php
+<?hh
 
 function f() {
-  $x = StableMap {
+  $x = Map {
 'a' => 1, 'b' => 2, 'c' => 3, 'd' => 4}
 ;
   unset($x['a']);

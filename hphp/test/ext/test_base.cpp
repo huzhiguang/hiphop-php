@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,8 +19,8 @@
 #include "hphp/compiler/option.h"
 #include "hphp/test/ext/test.h"
 #include "hphp/runtime/base/complex-types.h"
-#include "hphp/runtime/ext/ext_variable.h"
-#include "hphp/runtime/ext/ext_array.h"
+#include "hphp/runtime/ext/array/ext_array.h"
+#include "hphp/runtime/ext/std/ext_std_variable.h"
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -50,11 +50,11 @@ bool TestBase::CountSkip() {
 }
 
 bool TestBase::VerifySame(const char *exp1, const char *exp2,
-                          CVarRef v1, CVarRef v2) {
+                          const Variant& v1, const Variant& v2) {
   if (!same(v1, v2)) {
     g_context->obEndAll();
-    printf("%s = \n", exp1); f_var_dump(v1);
-    printf("%s = \n", exp2); f_var_dump(v2);
+    printf("%s = \n", exp1); HHVM_FN(var_dump)(v1);
+    printf("%s = \n", exp2); HHVM_FN(var_dump)(v2);
     return false;
   }
   return true;
@@ -65,17 +65,17 @@ bool TestBase::VerifyClose(const char *exp1, const char *exp2,
   double diff = v1 > v2 ? v1 - v2 : v2 - v1;
   if (diff > 0.00001) {
     g_context->obEndAll();
-    printf("%s = \n", exp1); f_var_dump(v1);
-    printf("%s = \n", exp2); f_var_dump(v2);
+    printf("%s = \n", exp1); HHVM_FN(var_dump)(v1);
+    printf("%s = \n", exp2); HHVM_FN(var_dump)(v2);
     return false;
   }
   return true;
 }
 
-bool TestBase::array_value_exists(CVarRef var, CVarRef value) {
-  bool found = !same(f_array_search(value, var.toArray()), false);
+bool TestBase::array_value_exists(const Variant& var, const Variant& value) {
+  bool found = !same(HHVM_FN(array_search)(value, var.toArray()), false);
   if (!found) {
-    f_var_dump(var);
+    HHVM_FN(var_dump)(var);
   }
   return found;
 }

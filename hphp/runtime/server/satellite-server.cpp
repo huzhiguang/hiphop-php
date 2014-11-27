@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,10 +20,9 @@
 #include "hphp/runtime/server/virtual-host.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/preg.h"
-#include "hphp/util/util.h"
-#include "folly/Memory.h"
-
-#include <boost/make_shared.hpp>
+#include "hphp/runtime/base/config.h"
+#include "hphp/util/text-util.h"
+#include <folly/Memory.h>
 
 using folly::make_unique;
 using std::set;
@@ -34,29 +33,30 @@ namespace HPHP {
 std::set<std::string> SatelliteServerInfo::InternalURLs;
 int SatelliteServerInfo::DanglingServerPort = 0;
 
-SatelliteServerInfo::SatelliteServerInfo(Hdf hdf) {
+SatelliteServerInfo::SatelliteServerInfo(const IniSetting::Map& ini, Hdf hdf) {
   m_name = hdf.getName();
-  m_port = hdf["Port"].getInt16(0);
-  m_threadCount = hdf["ThreadCount"].getInt32(5);
-  m_maxRequest = hdf["MaxRequest"].getInt32(500);
-  m_maxDuration = hdf["MaxDuration"].getInt32(120);
-  m_timeoutSeconds = std::chrono::seconds
-    (hdf["TimeoutSeconds"].getInt32(RuntimeOption::RequestTimeoutSeconds));
-  m_reqInitFunc = hdf["RequestInitFunction"].getString("");
-  m_reqInitDoc = hdf["RequestInitDocument"].getString("");
-  m_password = hdf["Password"].getString("");
-  hdf["Passwords"].get(m_passwords);
-  m_alwaysReset = hdf["AlwaysReset"].getBool(false);
+  m_port = Config::GetUInt16(ini, hdf["Port"], 0);
+  m_threadCount = Config::GetInt32(ini, hdf["ThreadCount"], 5);
+  m_maxRequest = Config::GetInt32(ini, hdf["MaxRequest"], 500);
+  m_maxDuration = Config::GetInt32(ini, hdf["MaxDuration"], 120);
+  m_timeoutSeconds = std::chrono::seconds(
+    Config::GetInt32(ini, hdf["TimeoutSeconds"],
+                      RuntimeOption::RequestTimeoutSeconds));
+  m_reqInitFunc = Config::GetString(ini, hdf["RequestInitFunction"], "");
+  m_reqInitDoc = Config::GetString(ini, hdf["RequestInitDocument"], "");
+  m_password = Config::GetString(ini, hdf["Password"], "");
+  Config::Get(ini, hdf["Passwords"], m_passwords);
+  m_alwaysReset = Config::GetBool(ini, hdf["AlwaysReset"], false);
 
-  string type = hdf["Type"].getString();
+  std::string type = Config::GetString(ini, hdf["Type"]);
   if (type == "InternalPageServer") {
     m_type = SatelliteServer::Type::KindOfInternalPageServer;
-    vector<string> urls;
-    hdf["URLs"].get(urls);
+    std::vector<std::string> urls;
+    Config::Get(ini, hdf["URLs"], urls);
     for (unsigned int i = 0; i < urls.size(); i++) {
-      m_urls.insert(Util::format_pattern(urls[i], true));
+      m_urls.insert(format_pattern(urls[i], true));
     }
-    if (hdf["BlockMainServer"].getBool(true)) {
+    if (Config::GetBool(ini, hdf["BlockMainServer"], true)) {
       InternalURLs.insert(m_urls.begin(), m_urls.end());
     }
   } else if (type == "DanglingPageServer") {
@@ -71,8 +71,7 @@ SatelliteServerInfo::SatelliteServerInfo(Hdf hdf) {
 
 bool SatelliteServerInfo::checkMainURL(const std::string& path) {
   String url(path.c_str(), path.size(), CopyString);
-  for (std::set<string>::const_iterator iter =
-         SatelliteServerInfo::InternalURLs.begin();
+  for (auto iter = SatelliteServerInfo::InternalURLs.begin();
        iter != SatelliteServerInfo::InternalURLs.end(); ++iter) {
     Variant ret = preg_match
       (String(iter->c_str(), iter->size(), CopyString), url);
@@ -88,7 +87,7 @@ bool SatelliteServerInfo::checkMainURL(const std::string& path) {
 
 class InternalPageServer : public SatelliteServer {
 public:
-  explicit InternalPageServer(SatelliteServerInfoPtr info)
+  explicit InternalPageServer(std::shared_ptr<SatelliteServerInfo> info)
     : m_allowedURLs(info->getURLs()) {
     m_server = ServerFactoryRegistry::createServer
       (RuntimeOption::ServerType, RuntimeOption::ServerIP, info->getPort(),
@@ -135,7 +134,7 @@ private:
 
 class DanglingPageServer : public SatelliteServer {
 public:
-  explicit DanglingPageServer(SatelliteServerInfoPtr info) {
+  explicit DanglingPageServer(std::shared_ptr<SatelliteServerInfo> info) {
     m_server = ServerFactoryRegistry::createServer
       (RuntimeOption::ServerType, RuntimeOption::ServerIP, info->getPort(),
        info->getThreadCount());
@@ -165,7 +164,7 @@ private:
 
 class RPCServer : public SatelliteServer {
 public:
-  explicit RPCServer(SatelliteServerInfoPtr info) {
+  explicit RPCServer(std::shared_ptr<SatelliteServerInfo> info) {
     m_server = ServerFactoryRegistry::createServer
       (RuntimeOption::ServerType, RuntimeOption::ServerIP, info->getPort(),
        info->getThreadCount());
@@ -197,21 +196,22 @@ private:
 ///////////////////////////////////////////////////////////////////////////////
 // SatelliteServer
 
-SatelliteServerPtr SatelliteServer::Create(SatelliteServerInfoPtr info) {
-  SatelliteServerPtr satellite;
+std::unique_ptr<SatelliteServer>
+SatelliteServer::Create(std::shared_ptr<SatelliteServerInfo> info) {
+  std::unique_ptr<SatelliteServer> satellite;
   if (info->getPort()) {
     switch (info->getType()) {
     case Type::KindOfInternalPageServer:
-      satellite = SatelliteServerPtr(new InternalPageServer(info));
+      satellite.reset(new InternalPageServer(info));
       break;
     case Type::KindOfDanglingPageServer:
-      satellite = SatelliteServerPtr(new DanglingPageServer(info));
+      satellite.reset(new DanglingPageServer(info));
       break;
     case Type::KindOfRPCServer:
-      satellite = SatelliteServerPtr(new RPCServer(info));
+      satellite.reset(new RPCServer(info));
       break;
     case Type::KindOfXboxServer:
-      satellite = SatelliteServerPtr(new RPCServer(info));
+      satellite.reset(new RPCServer(info));
       break;
     default:
       assert(false);

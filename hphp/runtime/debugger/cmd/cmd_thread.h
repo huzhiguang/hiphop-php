@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,12 +18,12 @@
 #define incl_HPHP_EVAL_DEBUGGER_CMD_THREAD_H_
 
 #include "hphp/runtime/debugger/debugger_command.h"
+#include <vector>
 #include "hphp/runtime/base/debuggable.h"
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
 
-DECLARE_BOOST_TYPES(CmdThread);
 class CmdThread : public DebuggerCommand, public IDebuggable {
 public:
   CmdThread() : DebuggerCommand(KindOfThread) {}
@@ -43,7 +43,7 @@ private:
   virtual void debuggerInfo(InfoVec &info);
 
   String m_out;
-  DThreadInfoPtrVec m_threads;
+  std::vector<DThreadInfoPtr> m_threads;
 
   void processList(DebuggerClient &client, bool output = true);
 };

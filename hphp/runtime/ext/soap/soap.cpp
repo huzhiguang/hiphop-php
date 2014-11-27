@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -21,12 +21,8 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-StaticString soapHeader::s_class_name("soapHeader");
-
-///////////////////////////////////////////////////////////////////////////////
-
 SoapData::SoapData() : m_cache(WSDL_CACHE_MEMORY), m_cache_ttl(86400) {
-  for (int i = 0; s_defaultEncoding[i].type != END_KNOWN_TYPES; ++i){
+  for (int i = 0; s_defaultEncoding[i].type != END_KNOWN_TYPES; ++i) {
     encodeStatic &e = s_defaultEncoding[i];
 
     encodePtr enc(new encode());
@@ -38,9 +34,9 @@ SoapData::SoapData() : m_cache(WSDL_CACHE_MEMORY), m_cache_ttl(86400) {
 
     const encodeType &details = enc->details;
     if (!details.type_str.empty()) {
-      string name = details.type_str;
+      std::string name = details.type_str;
       if (!details.ns.empty()) {
-        name = string(details.ns) + ':' + name;
+        name = std::string(details.ns) + ':' + name;
       }
       m_defEnc[name] = enc;
     }
@@ -64,7 +60,7 @@ sdl *SoapData::get_sdl(const char *uri, long cache_wsdl,
   if (sdl) {
     // holding it for the entire request life time, so soapserver and
     // soapclient can use sdl* without being deleted
-    m_sdls.push_back(sdl);
+    m_sdls.insert(sdl);
     return sdl.get();
   }
   return NULL;
@@ -74,7 +70,7 @@ encodeMap *SoapData::register_typemap(encodeMapPtr typemap) {
   if (typemap) {
     // holding it for the entire request life time, so soapserver and
     // soapclient can use encodeMap* without being deleted
-    m_typemaps.push_back(typemap);
+    m_typemaps.insert(typemap);
     return typemap.get();
   }
   return NULL;
@@ -82,7 +78,7 @@ encodeMap *SoapData::register_typemap(encodeMapPtr typemap) {
 
 void SoapData::register_encoding(xmlCharEncodingHandlerPtr encoding) {
   if (encoding) {
-    m_encodings.push_back(encoding);
+    m_encodings.insert(encoding);
   }
 }
 
@@ -91,7 +87,7 @@ sdlPtr SoapData::get_sdl_impl(const char *uri, long cache_wsdl,
   if (cache_wsdl & WSDL_CACHE_MEMORY) {
     sdlCache::iterator iter = m_mem_cache.find(uri);
     if (iter != m_mem_cache.end()) {
-      sdlCacheBucketPtr p = iter->second;
+      auto p = iter->second;
       if (p->time >= time(0) - m_cache_ttl) {
         return p->sdl;
       }
@@ -106,7 +102,7 @@ sdlPtr SoapData::get_sdl_impl(const char *uri, long cache_wsdl,
   m_error_code = old;
 
   if (sdl && (cache_wsdl & WSDL_CACHE_MEMORY)) {
-    sdlCacheBucketPtr p(new sdlCacheBucket());
+    auto p = std::make_shared<sdlCacheBucket>();
     p->sdl = sdl;
     p->time = time(0);
     m_mem_cache[uri] = p;
@@ -134,14 +130,13 @@ void SoapData::reset() {
   m_sdls.clear();
   m_typemaps.clear();
 
-  for (unsigned int i = 0; i < m_encodings.size(); i++) {
-    xmlCharEncCloseFunc(m_encodings[i]);
+  for (auto itr = m_encodings.begin(); itr != m_encodings.end(); ++itr) {
+    xmlCharEncCloseFunc(*itr);
   }
   m_encodings.clear();
 }
 
 IMPLEMENT_REQUEST_LOCAL(SoapData, s_soap_data);
-IMPLEMENT_OBJECT_ALLOCATION(soapHeader);
 ///////////////////////////////////////////////////////////////////////////////
 
 SoapException::SoapException(const char *fmt, ...) {

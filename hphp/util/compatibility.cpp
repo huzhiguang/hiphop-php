@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,6 +16,16 @@
 
 #include "hphp/util/compatibility.h"
 #include "hphp/util/vdso.h"
+
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -54,7 +64,10 @@ int dprintf(int fd, const char *format, ...) {
 #endif
 
 int gettime(clockid_t which_clock, struct timespec *tp) {
-#if defined(__APPLE__) || defined(__FreeBSD__)
+#if defined(__CYGWIN__)
+  // let's bypass trying to load vdso
+  return clock_gettime(which_clock, tp);
+#elif defined(__APPLE__) || defined(__FreeBSD__)
   // XXX: OSX doesn't support realtime so we ignore which_clock
   struct timeval tv;
   int ret = gettimeofday(&tv, nullptr);
@@ -62,10 +75,10 @@ int gettime(clockid_t which_clock, struct timespec *tp) {
   tp->tv_nsec = tv.tv_usec * 1000;
   return ret;
 #else
-  static int vdso_usable =
-    Util::Vdso::ClockGetTime(which_clock, tp);
-  if (vdso_usable == 0)
-    return Util::Vdso::ClockGetTime(which_clock, tp);
+  static int vdso_usable = Vdso::ClockGetTime(which_clock, tp);
+  if (vdso_usable == 0) {
+    return Vdso::ClockGetTime(which_clock, tp);
+  }
   return clock_gettime(which_clock, tp);
 #endif
 }
@@ -75,6 +88,60 @@ int64_t gettime_diff_us(const timespec &start, const timespec &end) {
   int64_t dnsec = end.tv_nsec - start.tv_nsec;
   return dsec * 1000000 + dnsec / 1000;
 }
+
+int fadvise_dontneed(int fd, off_t len) {
+#if defined(__FreeBSD__) || defined(__APPLE__)
+  return 0;
+#else
+  return posix_fadvise(fd, 0, len, POSIX_FADV_DONTNEED);
+#endif
+}
+
+#if defined(__CYGWIN__)
+#include <windows.h>
+#include <libintl.h>
+
+// since we only support win 7+
+// capturestackbacktrace is always available in kernel
+int backtrace (void **buffer, int size) {
+  USHORT frames;
+
+  if (size <= 0) {
+    return 0;
+  }
+
+  frames = CaptureStackBackTrace(0, (DWORD) size, buffer, nullptr);
+
+  return (int) frames;
+}
+
+int dladdr(const void *addr, Dl_info *info) {
+  MEMORY_BASIC_INFORMATION mem_info;
+  HMODULE module;
+  char moduleName[MAX_PATH];
+
+  if(!VirtualQuery(addr, &mem_info, sizeof(mem_info))) {
+    return 0;
+  }
+
+  if(!GetModuleFileNameA(module, moduleName, sizeof(moduleName))) {
+    return 0;
+  }
+
+  info->dli_fname = (char *)(malloc(strlen(moduleName) + 1));
+  strcpy((char *)info->dli_fname, moduleName);
+  info->dli_fbase = mem_info.BaseAddress;
+  info->dli_sname = nullptr;
+  info->dli_saddr = (void *) addr;
+
+  return 1;
+}
+
+// libbfd on cygwin is broken, stub dgettext to make linker unstupid
+char * libintl_dgettext(const char *domainname, const char *msgid) {
+  return dgettext(domainname, msgid);
+}
+#endif
 
 ///////////////////////////////////////////////////////////////////////////////
 }

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,49 +13,48 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/util/process.h"
-#include "hphp/util/base.h"
-#include "util.h"
+
+#include <sys/types.h>
+#include <sys/utsname.h>
+#include <sys/wait.h>
+#include <pwd.h>
+#include <poll.h>
+#include <unistd.h>
+#include <stdlib.h>
+
+#include <folly/Conv.h>
+#include <folly/ScopeGuard.h>
+#include <folly/String.h>
+
 #include "hphp/util/logger.h"
 #include "hphp/util/async-func.h"
 #include "hphp/util/text-color.h"
-#include "folly/String.h"
-
-#include <pwd.h>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 // helpers
 
+using std::string;
+
 static void swap_fd(const string &filename, FILE *fdesc) {
   FILE *f = fopen(filename.c_str(), "a");
   if (f == nullptr || dup2(fileno(f), fileno(fdesc)) < 0) {
     if (f) fclose(f);
-    _exit(-1);
+    _Exit(HPHP_EXIT_FAILURE);
   }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class FileReader {
-public:
-  FileReader(FilePtr f, string &out) : m_f(f), m_out(out) {}
-  void read() { readString(m_f.get(), m_out); }
-
-  static void readString(FILE *f, string &out) {
-    size_t nread = 0;
-    const unsigned int BUFFER_SIZE = 1024;
-    char buf[BUFFER_SIZE];
-    while ((nread = fread(buf, 1, BUFFER_SIZE, f)) != 0) {
-      out.append(buf, nread);
-    }
+static void readString(FILE *f, string &out) {
+  size_t nread = 0;
+  const unsigned int BUFFER_SIZE = 1024;
+  char buf[BUFFER_SIZE];
+  while ((nread = fread(buf, 1, BUFFER_SIZE, f)) != 0) {
+    out.append(buf, nread);
   }
-
-private:
-  FilePtr m_f;
-  string &m_out;
-};
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -77,10 +76,11 @@ bool Process::Exec(const char *path, const char *argv[], const char *in,
   if (pid == 0) return false;
 
   {
-    FilePtr sin(fdopen(fdin, "w"), file_closer());
+    FILE* sin = fdopen(fdin, "w");
     if (!sin) return false;
+    SCOPE_EXIT { fclose(sin); };
     if (in && *in) {
-      fwrite(in, 1, strlen(in), sin.get());
+      fwrite(in, 1, strlen(in), sin);
     }
   }
 
@@ -178,8 +178,8 @@ bool Process::Exec(const char *path, const char *argv[], const char *in,
 
 int Process::Exec(const std::string &cmd, const std::string &outf,
                   const std::string &errf) {
-  vector<string> argvs;
-  Util::split(' ', cmd.c_str(), argvs);
+  std::vector<std::string> argvs;
+  folly::split(' ', cmd, argvs);
   if (argvs.empty()) {
     return -1;
   }
@@ -205,7 +205,7 @@ int Process::Exec(const std::string &cmd, const std::string &outf,
 
     execvp(argv[0], argv);
     Logger::Error("Failed to exec `%s'\n", cmd.c_str());
-    _exit(-1);
+    _Exit(HPHP_EXIT_FAILURE);
   }
   int status = -1;
   wait(&status);
@@ -241,7 +241,7 @@ int Process::Exec(const char *path, const char *argv[], int *fdin, int *fdout,
       execvp(path, const_cast<char**>(argv ? argv : argvnull));
     }
     Logger::Error("Failed to exec `%s'\n", path);
-    _exit(-1);
+    _Exit(HPHP_EXIT_FAILURE);
   }
   if (fdout) *fdout = pipeout.detachOut();
   if (fderr) *fderr = pipeerr.detachOut();
@@ -252,8 +252,6 @@ int Process::Exec(const char *path, const char *argv[], int *fdin, int *fdout,
 /**
  * Copied from http://www-theorie.physik.unizh.ch/~dpotter/howto/daemonize
  */
-#define EXIT_SUCCESS 0
-#define EXIT_FAILURE 1
 void Process::Daemonize(const char *stdoutFile /* = "/dev/null" */,
                         const char *stderrFile /* = "/dev/null" */) {
   pid_t pid, sid;
@@ -318,8 +316,8 @@ void Process::GetProcessId(const std::string &cmd, std::vector<pid_t> &pids,
   string out;
   Exec("find", argv, nullptr, out);
 
-  vector<string> files;
-  Util::split('\n', out.c_str(), files, true);
+  std::vector<std::string> files;
+  folly::split('\n', out, files, true);
 
   string ccmd = cmd;
   if (!matchAll) {
@@ -341,7 +339,7 @@ void Process::GetProcessId(const std::string &cmd, std::vector<pid_t> &pids,
     FILE * f = fopen(filename.c_str(), "r");
     if (f) {
       string cmdline;
-      FileReader::readString(f, cmdline);
+      readString(f, cmdline);
       fclose(f);
       string converted;
       if (matchAll) {
@@ -372,12 +370,12 @@ void Process::GetProcessId(const std::string &cmd, std::vector<pid_t> &pids,
 }
 
 std::string Process::GetCommandLine(pid_t pid) {
-  string name = "/proc/" + boost::lexical_cast<string>(pid) + "/cmdline";
+  string name = "/proc/" + folly::to<string>(pid) + "/cmdline";
 
   string cmdline;
   FILE * f = fopen(name.c_str(), "r");
   if (f) {
-    FileReader::readString(f, cmdline);
+    readString(f, cmdline);
     fclose(f);
   }
 
@@ -404,18 +402,18 @@ bool Process::IsUnderGDB() {
   return CommandStartsWith(GetParentProcessId(), "gdb ");
 }
 
-int Process::GetProcessRSS(pid_t pid) {
-  string name = "/proc/" + boost::lexical_cast<string>(pid) + "/status";
+int64_t Process::GetProcessRSS(pid_t pid) {
+  string name = "/proc/" + folly::to<string>(pid) + "/status";
 
   string status;
   FILE * f = fopen(name.c_str(), "r");
   if (f) {
-    FileReader::readString(f, status);
+    readString(f, status);
     fclose(f);
   }
 
-  vector<string> lines;
-  Util::split('\n', status.c_str(), lines, true);
+  std::vector<std::string> lines;
+  folly::split('\n', status, lines, true /* ignoreEmpty */);
   for (unsigned int i = 0; i < lines.size(); i++) {
     string &line = lines[i];
     if (line.find("VmRSS:") == 0) {
@@ -448,12 +446,12 @@ size_t Process::GetCodeFootprint(pid_t pid) {
   //
   // Return (share + text), under the assumption that share consists only of
   // shared libraries.
-  string name = "/proc/" + boost::lexical_cast<string>(pid) + "/statm";
+  string name = "/proc/" + folly::to<string>(pid) + "/statm";
 
   string statm;
   FILE * f = fopen(name.c_str(), "r");
   if (f) {
-    FileReader::readString(f, statm);
+    readString(f, statm);
     fclose(f);
   }
 
@@ -490,16 +488,11 @@ std::string Process::GetCPUModel() {
   uint32_t regs[4];
   do_cpuid(0, regs);
 
-  char cpu_vendor[13];
-  //uint32_t cpu_high = regs[0];
-  ((uint32_t *)&cpu_vendor)[0] = regs[1];
-  ((uint32_t *)&cpu_vendor)[1] = regs[3];
-  ((uint32_t *)&cpu_vendor)[2] = regs[2];
-  cpu_vendor[12] = '\0';
-
+  const int vendor_size = sizeof(regs[1])*3;
+  std::swap(regs[2], regs[3]);
   uint32_t cpu_exthigh = 0;
-  if (strcmp(cpu_vendor, "GenuineIntel") == 0 ||
-      strcmp(cpu_vendor, "AuthenticAMD") == 0) {
+  if (memcmp(regs + 1, "GenuineIntel", vendor_size) == 0 ||
+      memcmp(regs + 1, "AuthenticAMD", vendor_size) == 0) {
     do_cpuid(0x80000000, regs);
     cpu_exthigh = regs[0];
   }
@@ -538,14 +531,6 @@ std::string Process::GetAppName() {
   return progname;
 }
 
-std::string Process::GetAppVersion() {
-#ifdef HPHP_VERSION
-#undefine HPHP_VERSION
-#endif
-#define HPHP_VERSION(v) return #v;
-#include "../version"
-}
-
 std::string Process::GetHostName() {
   char hostbuf[128];
   hostbuf[0] = '\0'; // for cleaner valgrind output when gethostname() fails
@@ -567,9 +552,36 @@ std::string Process::GetCurrentUser() {
 }
 
 std::string Process::GetCurrentDirectory() {
-  char buf[PATH_MAX];
-  memset(buf, 0, PATH_MAX);
-  return getcwd(buf, PATH_MAX);
+  auto const kDeleted = " (deleted)";
+  auto const kDeletedLen = strlen(kDeleted);
+
+  // Allocate additional space for kDeleted part.
+  char buf[PATH_MAX + kDeletedLen];
+  memset(buf, 0, sizeof(buf));
+  char* cwd = getcwd(buf, PATH_MAX);
+
+  if (cwd != nullptr) {
+    return cwd;
+  }
+
+#if defined(__linux__)
+  if (errno != ENOENT) {
+    return "";
+  }
+  // Read cwd symlink directly if it leads to the deleted path.
+  int r = readlink("/proc/self/cwd", buf, sizeof(buf));
+  if (r == -1) {
+    return "";
+  }
+
+  if (r >= kDeletedLen && !strcmp(buf + r - kDeletedLen, " (deleted)")) {
+    buf[r - kDeletedLen] = 0;
+  }
+  return buf;
+#else
+  // /proc/self/cwd is not available.
+  return "";
+#endif
 }
 
 std::string Process::GetHomeDirectory() {

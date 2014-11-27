@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,10 +19,10 @@
 
 #include <type_traits>
 
-#include "hphp/runtime/base/smart-containers.h"
-#include "hphp/runtime/vm/jit/ir-factory.h"
+#include "hphp/runtime/vm/jit/containers.h"
+#include "hphp/runtime/vm/jit/ir-unit.h"
 
-namespace HPHP { namespace JIT {
+namespace HPHP { namespace jit {
 
 //////////////////////////////////////////////////////////////////////
 
@@ -35,7 +35,7 @@ namespace HPHP { namespace JIT {
  */
 template<class Key, class Info>
 struct StateVector {
-  typedef smart::vector<Info> InfoVector;
+  typedef jit::vector<Info> InfoVector;
   typedef typename InfoVector::iterator iterator;
   typedef typename InfoVector::const_iterator const_iterator;
   typedef typename InfoVector::reference reference;
@@ -48,20 +48,20 @@ struct StateVector {
     "StateVector can only be used with Block, IRInstruction, or SSATmp"
   );
 
-  StateVector(const IRFactory& factory, Info init)
-    : m_factory(factory)
-    , m_info(numIds(factory, static_cast<Key*>(nullptr)), init)
+  StateVector(const IRUnit& unit, Info init)
+    : m_unit(unit)
+    , m_info(unit.numIds(nullKey))
     , m_init(init) {
   }
 
   StateVector(const StateVector& other)
-    : m_factory(other.m_factory)
+    : m_unit(other.m_unit)
     , m_info(other.m_info)
     , m_init(other.m_init)
   {}
 
   StateVector& operator=(const StateVector& other) {
-    assert(&other.m_factory == &m_factory);
+    assert(&other.m_unit == &m_unit);
     m_info = other.m_info;
     m_init = other.m_init;
     return *this;
@@ -72,20 +72,21 @@ struct StateVector {
     grow();
   }
 
-  reference operator[](const Key& k) { return (*this)[&k]; }
-  reference operator[](const Key* k) {
-    auto id = k->id();
+  reference operator[](uint32_t id) {
     if (id >= m_info.size()) grow();
-    assert(id < m_info.size());
     return m_info[id];
   }
 
-  const_reference operator[](const Key& k) const { return (*this)[&k]; }
-  const_reference operator[](const Key* k) const {
-    assert(k->id() < numIds(m_factory, (Key*)nullptr));
-    auto id = k->id();
+  const_reference operator[](uint32_t id) const {
+    assert(id < m_unit.numIds(nullKey));
     return id < m_info.size() ? m_info[id] : m_init;
   }
+
+  reference operator[](const Key& k) { return (*this)[k.id()]; }
+  reference operator[](const Key* k) { return (*this)[k->id()]; }
+
+  const_reference operator[](const Key& k) const { return (*this)[k.id()]; }
+  const_reference operator[](const Key* k) const { return (*this)[k->id()]; }
 
   iterator begin()              { return m_info.begin(); }
   iterator end()                { return m_info.end(); }
@@ -95,24 +96,13 @@ struct StateVector {
   const_iterator cend()   const { return m_info.cend(); }
 
 private:
-  static unsigned numIds(const IRFactory& factory, IRInstruction*) {
-    return factory.numInsts();
-  }
-  static unsigned numIds(const IRFactory& factory, SSATmp*) {
-    return factory.numTmps();
-  }
-  static unsigned numIds(const IRFactory& factory, Block*) {
-    return factory.numBlocks();
-  }
-
-private:
   void grow() {
-    m_info.resize(numIds(m_factory, static_cast<Key*>(nullptr)),
-                  m_init);
+    m_info.resize(m_unit.numIds(nullKey), m_init);
   }
 
 private:
-  const IRFactory& m_factory;
+  static constexpr Key* nullKey { nullptr };
+  const IRUnit& m_unit;
   InfoVector m_info;
   Info m_init;
 };

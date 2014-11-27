@@ -1,3 +1,0 @@
-<?php
-strpos("lllllll", '');
-?>

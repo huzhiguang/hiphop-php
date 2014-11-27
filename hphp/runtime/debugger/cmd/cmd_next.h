@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,14 +18,18 @@
 #define incl_HPHP_EVAL_DEBUGGER_CMD_NEXT_H_
 
 #include "hphp/runtime/debugger/cmd/cmd_flow_control.h"
+#include "hphp/runtime/vm/bytecode.h"
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
 
-DECLARE_BOOST_TYPES(CmdNext);
 class CmdNext : public CmdFlowControl {
 public:
-  CmdNext() : CmdFlowControl(KindOfNext), m_stepContTag(nullptr) {}
+  CmdNext() :
+      CmdFlowControl(KindOfNext)
+      , m_stepResumableId(nullptr)
+      , m_skippingAwait(false)
+    {}
 
   virtual void help(DebuggerClient& client);
   virtual void onSetup(DebuggerProxy& proxy, CmdInterrupt& interrupt);
@@ -33,14 +37,16 @@ public:
 
 private:
   void stepCurrentLine(CmdInterrupt& interrupt, ActRec* fp, PC pc);
-  bool hasStepCont();
-  bool atStepContOffset(Unit* unit, Offset o);
-  void setupStepCont(ActRec* fp, PC pc);
-  void cleanupStepCont();
-  void* getContinuationTag(ActRec* fp);
+  void stepAfterAwait();
+  bool hasStepResumable();
+  bool atStepResumableOffset(Unit* unit, Offset o);
+  void setupStepSuspend(ActRec* fp, PC pc);
+  void cleanupStepResumable();
+  void* getResumableId(ActRec* fp);
 
-  StepDestination m_stepCont;
-  void* m_stepContTag; // Unique identifier for the continuation we're stepping
+  StepDestination m_stepResumable;
+  ActRec* m_stepResumableId;  // Unique id for the resumable we're stepping
+  bool m_skippingAwait;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

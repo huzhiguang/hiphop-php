@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -17,13 +17,20 @@
 
 #include "hphp/runtime/ext/ext_spl.h"
 #include "hphp/runtime/ext/ext_math.h"
-#include "hphp/runtime/ext/ext_class.h"
-#include "hphp/runtime/ext/ext_string.h"
+#include "hphp/runtime/ext/std/ext_std_classobj.h"
+#include "hphp/runtime/ext/std/ext_std_file.h"
+#include "hphp/runtime/ext/string/ext_string.h"
+
+#include "hphp/runtime/base/directory.h"
+#include "hphp/runtime/base/glob-stream-wrapper.h"
+#include "hphp/runtime/base/stream-wrapper-registry.h"
+#include "hphp/runtime/base/request-event-handler.h"
+#include "hphp/runtime/base/autoload-handler.h"
 
 #include "hphp/system/systemlib.h"
+#include "hphp/util/string-vsnprintf.h"
 
 namespace HPHP {
-IMPLEMENT_DEFAULT_EXTENSION(SPL);
 ///////////////////////////////////////////////////////////////////////////////
 
 const StaticString
@@ -35,7 +42,8 @@ const StaticString
   s_next("next"),
   s_current("current"),
   s_key("key"),
-  s_getIterator("getIterator");
+  s_getIterator("getIterator"),
+  s_directory_iterator("DirectoryIterator");
 
 const StaticString spl_classes[] = {
   StaticString("AppendIterator"),
@@ -45,7 +53,7 @@ const StaticString spl_classes[] = {
   StaticString("BadMethodCallException"),
   StaticString("CachingIterator"),
   StaticString("Countable"),
-  StaticString("DirectoryIterator"),
+  s_directory_iterator,
   StaticString("DomainException"),
   StaticString("EmptyIterator"),
   StaticString("FilesystemIterator"),
@@ -96,11 +104,11 @@ const StaticString spl_classes[] = {
 
 Array f_spl_classes() {
   const size_t num_classes = sizeof(spl_classes) / sizeof(spl_classes[0]);
-  ArrayInit ret(num_classes);
+  ArrayInit ret(num_classes, ArrayInit::Map{});
   for (size_t i = 0; i < num_classes; ++i) {
     ret.set(spl_classes[i], spl_classes[i]);
   }
-  return ret.create();
+  return ret.toArray();
 }
 
 void throw_spl_exception(const char *fmt, ...) ATTRIBUTE_PRINTF(1,2);
@@ -108,7 +116,7 @@ void throw_spl_exception(const char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
   std::string msg;
-  Util::string_vsnprintf(msg, fmt, ap);
+  string_vsnprintf(msg, fmt, ap);
   va_end(ap);
 
   throw Object(SystemLib::AllocExceptionObject(Variant(msg)));
@@ -118,7 +126,7 @@ static bool s_inited = false;
 static int64_t s_hash_mask_handle = 0;
 static Mutex s_mutex;
 
-String f_spl_object_hash(CObjRef obj) {
+String f_spl_object_hash(const Object& obj) {
   if (!s_inited) {
     Lock lock(s_mutex);
     if (!s_inited) {
@@ -137,90 +145,110 @@ String f_spl_object_hash(CObjRef obj) {
   return String(buf, CopyString);
 }
 
-int64_t f_hphp_object_pointer(CObjRef obj) { return (int64_t)obj.get();}
+int64_t f_hphp_object_pointer(const Object& obj) { return (int64_t)obj.get();}
 
 Variant f_hphp_get_this() {
-  return g_vmContext->getThis();
+  return g_context->getThis();
 }
 
-Variant f_class_implements(CVarRef obj, bool autoload /* = true */) {
+Variant f_class_implements(const Variant& obj, bool autoload /* = true */) {
   Class* cls;
   if (obj.isString()) {
     cls = Unit::getClass(obj.getStringData(), autoload);
     if (!cls) {
+      String err = "class_implements(): Class %s does not exist";
+      if (autoload) {
+        err += " and could not be loaded";
+      }
+      raise_warning(err.c_str(), obj.toString().c_str());
       return false;
     }
   } else if (obj.isObject()) {
     cls = obj.getObjectData()->getVMClass();
   } else {
+    raise_warning("class_implements(): object or string expected");
     return false;
   }
   Array ret(Array::Create());
   const Class::InterfaceMap& ifaces = cls->allInterfaces();
   for (int i = 0, size = ifaces.size(); i < size; i++) {
-    ret.set(ifaces[i]->nameRef(), ifaces[i]->nameRef());
+    ret.set(ifaces[i]->nameStr(), VarNR(ifaces[i]->name()));
   }
   return ret;
 }
 
-Variant f_class_parents(CVarRef obj, bool autoload /* = true */) {
+Variant f_class_parents(const Variant& obj, bool autoload /* = true */) {
   Class* cls;
   if (obj.isString()) {
     cls = Unit::getClass(obj.getStringData(), autoload);
     if (!cls) {
+      String err = "class_parents(): Class %s does not exist";
+      if (autoload) {
+        err += " and could not be loaded";
+      }
+      raise_warning(err.c_str(), obj.toString().c_str());
       return false;
     }
   } else if (obj.isObject()) {
     cls = obj.getObjectData()->getVMClass();
   } else {
+    raise_warning("class_parents(): object or string expected");
     return false;
   }
   Array ret(Array::Create());
   for (cls = cls->parent(); cls; cls = cls->parent()) {
-    auto& clsName = cls->nameRef();
-    ret.set(clsName, clsName);
+    ret.set(cls->nameStr(), VarNR(cls->name()));
   }
   return ret;
 }
 
-Variant f_class_uses(CVarRef obj, bool autoload /* = true */) {
+Variant f_class_uses(const Variant& obj, bool autoload /* = true */) {
   Class* cls;
   if (obj.isString()) {
     cls = Unit::getClass(obj.getStringData(), autoload);
     if (!cls) {
+      String err = "class_uses(): Class %s does not exist";
+      if (autoload) {
+        err += " and could not be loaded";
+      }
+      raise_warning(err.c_str(), obj.toString().c_str());
       return false;
     }
   } else if (obj.isObject()) {
     cls = obj.getObjectData()->getVMClass();
   } else {
+    raise_warning("class_uses(): object or string expected");
     return false;
   }
   Array ret(Array::Create());
-  for (auto& elem : cls->usedTraits()) {
-    auto& traitName = elem->nameRef();
-    ret.set(traitName, traitName);
+  for (auto const& traitName : cls->preClass()->usedTraits()) {
+    ret.set(StrNR(traitName), VarNR(traitName));
   }
   return ret;
 }
 
-Object get_traversable_object_iterator(CVarRef obj) {
-  if (!obj.instanceof(SystemLib::s_TraversableClass)) {
-    raise_error("Argument must implement interface Traversable");
+#define CHECK_TRAVERSABLE_IMPL(obj, ret) \
+  if (!obj.isObject() || \
+      !obj.getObjectData()->instanceof(SystemLib::s_TraversableClass)) { \
+    raise_recoverable_error("Argument must implement interface Traversable"); \
+    return ret; \
   }
 
+Object get_traversable_object_iterator(const Variant& obj) {
   bool isIteratorAggregate;
   Object itObj = obj.getObjectData()
     ->iterableObject(isIteratorAggregate, true);
 
   if (!isIteratorAggregate) {
-    if (obj.instanceof(SystemLib::s_IteratorAggregateClass)) {
+    if (!obj.getObjectData()->instanceof(
+        SystemLib::s_IteratorAggregateClass)) {
       raise_error("Objects returned by getIterator() must be traversable or "
                   "implement interface Iterator");
     } else {
       raise_error(
         "Class %s must implement interface Traversable as part of either "
         "Iterator or IteratorAggregate",
-        obj.toObject()->o_getClassName()->data()
+        obj.toObject()->o_getClassName().data()
       );
     }
   }
@@ -228,8 +256,9 @@ Object get_traversable_object_iterator(CVarRef obj) {
   return itObj;
 }
 
-Variant f_iterator_apply(CVarRef obj, CVarRef func,
-                         CArrRef params /* = null_array */) {
+Variant f_iterator_apply(const Variant& obj, const Variant& func,
+                         const Array& params /* = null_array */) {
+  CHECK_TRAVERSABLE_IMPL(obj, 0);
   Object pobj = get_traversable_object_iterator(obj);
   pobj->o_invoke_few_args(s_rewind, 0);
   int64_t count = 0;
@@ -243,7 +272,8 @@ Variant f_iterator_apply(CVarRef obj, CVarRef func,
   return count;
 }
 
-Variant f_iterator_count(CVarRef obj) {
+Variant f_iterator_count(const Variant& obj) {
+  CHECK_TRAVERSABLE_IMPL(obj, 0);
   Object pobj = get_traversable_object_iterator(obj);
   pobj->o_invoke_few_args(s_rewind, 0);
   int64_t count = 0;
@@ -254,9 +284,10 @@ Variant f_iterator_count(CVarRef obj) {
   return count;
 }
 
-Variant f_iterator_to_array(CVarRef obj, bool use_keys /* = true */) {
-  Object pobj = get_traversable_object_iterator(obj);
+Variant f_iterator_to_array(const Variant& obj, bool use_keys /* = true */) {
   Array ret(Array::Create());
+  CHECK_TRAVERSABLE_IMPL(obj, ret);
+  Object pobj = get_traversable_object_iterator(obj);
 
   pobj->o_invoke_few_args(s_rewind, 0);
   while (same(pobj->o_invoke_few_args(s_valid, 0), true)) {
@@ -272,7 +303,7 @@ Variant f_iterator_to_array(CVarRef obj, bool use_keys /* = true */) {
   return ret;
 }
 
-bool f_spl_autoload_register(CVarRef autoload_function /* = null_variant */,
+bool f_spl_autoload_register(const Variant& autoload_function /* = null_variant */,
                              bool throws /* = true */,
                              bool prepend /* = false */) {
   if (same(autoload_function, s_spl_autoload_call)) {
@@ -282,7 +313,7 @@ bool f_spl_autoload_register(CVarRef autoload_function /* = null_variant */,
     }
     return false;
   }
-  CVarRef func = autoload_function.isNull() ?
+  const Variant& func = autoload_function.isNull() ?
                  s_spl_autoload : autoload_function;
   bool res = AutoloadHandler::s_instance->addHandler(func, prepend);
   if (!res && throws) {
@@ -291,7 +322,7 @@ bool f_spl_autoload_register(CVarRef autoload_function /* = null_variant */,
   return res;
 }
 
-bool f_spl_autoload_unregister(CVarRef autoload_function) {
+bool f_spl_autoload_unregister(const Variant& autoload_function) {
   if (same(autoload_function, s_spl_autoload_call)) {
     AutoloadHandler::s_instance->removeAllHandlers();
   } else {
@@ -301,24 +332,24 @@ bool f_spl_autoload_unregister(CVarRef autoload_function) {
 }
 
 Variant f_spl_autoload_functions() {
-  CArrRef handlers = AutoloadHandler::s_instance->getHandlers();
-  if (handlers.isNull())
+  const Array& handlers = AutoloadHandler::s_instance->getHandlers();
+  if (handlers.isNull()) {
     return false;
-  else
+  } else {
     return handlers.values();
+  }
 }
 
-void f_spl_autoload_call(CStrRef class_name) {
-  AutoloadHandler::s_instance->invokeHandler(class_name, true);
+void f_spl_autoload_call(const String& class_name) {
+  AutoloadHandler::s_instance->autoloadClass(class_name, true);
 }
 
 namespace {
-class ExtensionList : public RequestEventHandler {
-public:
-  virtual void requestInit() {
-    extensions = CREATE_VECTOR2(String(".inc"), String(".php"));
+struct ExtensionList final : RequestEventHandler {
+  void requestInit() override {
+    extensions = make_packed_array(String(".inc"), String(".php"));
   }
-  virtual void requestShutdown() {
+  void requestShutdown() override {
     extensions.reset();
   }
 
@@ -328,7 +359,7 @@ public:
 IMPLEMENT_STATIC_REQUEST_LOCAL(ExtensionList, s_extension_list);
 }
 
-String f_spl_autoload_extensions(CStrRef file_extensions /* = null_string */) {
+String f_spl_autoload_extensions(const String& file_extensions /* = null_string */) {
   if (!file_extensions.isNull()) {
     s_extension_list->extensions = StringUtil::Explode(file_extensions, ",")
                                    .toArray();
@@ -337,26 +368,41 @@ String f_spl_autoload_extensions(CStrRef file_extensions /* = null_string */) {
   return StringUtil::Implode(s_extension_list->extensions, ",");
 }
 
-void f_spl_autoload(CStrRef class_name,
-                    CStrRef file_extensions /* = null_string */) {
-  Array ext = file_extensions.isNull()
-              ? s_extension_list->extensions
-              : StringUtil::Explode(file_extensions, ",").toArray();
-  String lClass = f_strtolower(class_name);
-  bool found = false;
-  for (ArrayIter iter(ext); iter; ++iter) {
-    String fileName = lClass + iter.second().toString();
-    include(fileName, true, "", false);
-    if (f_class_exists(class_name, false)) {
-      found = true;
-      break;
-    }
+///////////////////////////////////////////////////////////////////////////////
+
+template <class T>
+static T* getDir(const Object& dir_iter) {
+  static_assert(std::is_base_of<Directory, T>::value,
+                "Only cast to directories");
+  auto dir = dir_iter->o_realProp("dir", 0, s_directory_iterator);
+  return dir->asCResRef().getTyped<T>();
+}
+
+static Variant HHVM_METHOD(DirectoryIterator, hh_readdir) {
+  auto dir = getDir<Directory>(ObjNR(this_).asObject());
+
+  if (auto array_dir = dynamic_cast<ArrayDirectory*>(dir)) {
+    auto prop = this_->o_realProp("dirName", 0, s_directory_iterator);
+    *prop = array_dir->path();
   }
 
-  if (!found && !AutoloadHandler::s_instance->isRunning()) {
-    throw_spl_exception("Class %s could not be loaded", class_name.c_str());
-  }
+  return HHVM_FN(readdir)(Resource(dir));
 }
+
+static int64_t HHVM_METHOD(GlobIterator, count) {
+  return getDir<ArrayDirectory>(ObjNR(this_).asObject())->size();
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+static class SPLExtension : public Extension {
+ public:
+  SPLExtension() : Extension("SPL", "0.2") { }
+  virtual void moduleLoad(const IniSetting::Map& ini, Hdf config) {
+    HHVM_ME(DirectoryIterator, hh_readdir);
+    HHVM_ME(GlobIterator, count);
+  }
+} s_SPL_extension;
 
 ///////////////////////////////////////////////////////////////////////////////
 }

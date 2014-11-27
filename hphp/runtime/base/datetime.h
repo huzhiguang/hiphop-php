@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,6 +18,10 @@
 #define incl_HPHP_DATETIME_H_
 
 #include "hphp/runtime/base/types.h"
+#include <memory>
+
+#include "hphp/runtime/base/array-init.h"
+#include "hphp/runtime/base/request-event-handler.h"
 #include "hphp/runtime/base/smart-object.h"
 #include "hphp/runtime/base/timezone.h"
 #include "hphp/runtime/base/dateinterval.h"
@@ -30,7 +34,7 @@ namespace HPHP {
  * Encapsulating all date/time manipulations, conversions, input and output
  * into this one single class.
  */
-class DateTime : public SweepableResourceData {
+class DateTime final : public SweepableResourceData {
 public:
   DECLARE_RESOURCE_ALLOCATION(DateTime);
 
@@ -218,17 +222,19 @@ public:
    * Returns are really in special PHP formats, and please read datetime.cpp
    * for details.
    */
-  static Array Parse(CStrRef datetime);
-  static Array Parse(CStrRef ts, CStrRef format);
+  static Array Parse(const String& datetime);
+  static Array Parse(const String& format, const String& date);
+  static Array ParseAsStrptime(const String& format, const String& date);
 
 public:
   // constructor
   DateTime();
   explicit DateTime(int64_t timestamp, bool utc = false); // from a timestamp
+  explicit DateTime(int64_t timestamp, SmartResource<TimeZone> tz);
 
-  static StaticString s_class_name;
+  CLASSNAME_IS("DateTime");
   // overriding ResourceData
-  CStrRef o_getClassNameHook() const { return s_class_name; }
+  const String& o_getClassNameHook() const { return classnameof(); }
 
   // informational
   bool local() const { return m_time->is_localtime;}
@@ -241,6 +247,7 @@ public:
   int minute() const { return m_time->i;}
   int second() const { return m_time->s;}
   double fraction() const { return m_time->f;}
+  int zoneType() const { return m_time->zone_type;}
   int beat() const;    // Swatch Beat a.k.a. Internet Time
   int dow() const;     // day of week
   int doy() const;     // day of year
@@ -261,21 +268,20 @@ public:
   void setISODate(int year, int week, int day = 1);
   void setTime(int hour, int minute, int second = 0);
   void setTimezone(SmartResource<TimeZone> tz);
-  void modify(CStrRef diff); // PHP's date_modify() function, very powerful
+  void modify(const String& diff); // PHP's date_modify() function, muy powerful
   void add(const SmartResource<DateInterval> &interval);
   void sub(const SmartResource<DateInterval> &interval);
-  void internalModify(timelib_rel_time *rel, bool have_relative, char bias);
 
   // conversions
   void toTm(struct tm &ta) const;
   int64_t toTimeStamp(bool &err) const;
   int64_t toInteger(char format) const;
-  String toString(CStrRef format, bool stdc = false) const;
+  String toString(const String& format, bool stdc = false) const;
   String toString(DateFormat format) const;
   Array toArray(ArrayFormat format) const;
   void fromTimeStamp(int64_t timestamp, bool utc = false);
-  bool fromString(CStrRef input, SmartResource<TimeZone> tz,
-                  const char* format=nullptr);
+  bool fromString(const String& input, SmartResource<TimeZone> tz,
+                  const char* format=nullptr, bool throw_on_error = true);
 
   // comparison
   SmartResource<DateInterval> diff(SmartResource<DateTime> datetime2,
@@ -292,40 +298,43 @@ public:
 
   // Error access
 private:
-  class LastErrors : public RequestEventHandler {
-    public:
-      virtual void requestInit() {
-        m_errors = nullptr;
+  void internalModify(timelib_time *t);
+  void internalModifyRelative(timelib_rel_time *rel, bool have_relative,
+                              char bias);
+  struct LastErrors final : RequestEventHandler {
+    void requestInit() override {
+      m_errors = nullptr;
+    }
+    void requestShutdown() override {
+      if (m_errors) {
+        timelib_error_container_dtor(m_errors);
       }
-      virtual void requestShutdown() {
-        if (m_errors) {
-          timelib_error_container_dtor(m_errors);
-        }
+    }
+    void set(timelib_error_container *ec) {
+      requestShutdown();
+      m_errors = ec;
+    }
+    Array getLastWarnings() const {
+      if (!m_errors) return empty_array();
+      ArrayInit ret(m_errors->warning_count, ArrayInit::Map{});
+      for(int i = 0; i < m_errors->warning_count; i++) {
+        timelib_error_message *em = m_errors->warning_messages + i;
+        ret.set(em->position, String(em->message, CopyString));
       }
-      void set(timelib_error_container *ec) {
-        requestShutdown();
-        m_errors = ec;
+      return ret.toArray();
+    }
+    Array getLastErrors() const {
+      if (!m_errors) return empty_array();
+      ArrayInit ret(m_errors->error_count, ArrayInit::Map{});
+      for(int i = 0; i < m_errors->error_count; i++) {
+        timelib_error_message *em = m_errors->error_messages + i;
+        ret.set(em->position, String(em->message, CopyString));
       }
-      Array getLastWarnings() {
-        Array ret = Array::Create();
-        if (!m_errors) return ret;
-        for(int i = 0; i < m_errors->warning_count; i++) {
-          timelib_error_message *em = m_errors->warning_messages + i;
-          ret.set(em->position, String(em->message, CopyString));
-        }
-        return ret;
-      }
-      Array getLastErrors() {
-        Array ret = Array::Create();
-        if (!m_errors) return ret;
-        for(int i = 0; i < m_errors->error_count; i++) {
-          timelib_error_message *em = m_errors->error_messages + i;
-          ret.set(em->position, String(em->message, CopyString));
-        }
-        return ret;
-      }
-    private:
-      timelib_error_container *m_errors;
+      return ret.toArray();
+    }
+
+  private:
+    timelib_error_container *m_errors;
   };
   DECLARE_STATIC_REQUEST_LOCAL(LastErrors, s_lastErrors);
 
@@ -343,7 +352,7 @@ private:
       timelib_time_dtor(t);
     }
   };
-  typedef boost::shared_ptr<timelib_time> TimePtr;
+  typedef std::shared_ptr<timelib_time> TimePtr;
 
   TimePtr m_time;
   SmartResource<TimeZone> m_tz;
@@ -351,9 +360,11 @@ private:
   mutable bool m_timestampSet;
 
   // helpers
+  static Array ParseTime(timelib_time* time,
+                         struct timelib_error_container* error);
   void update();
-  String rfcFormat(CStrRef format) const;
-  String stdcFormat(CStrRef format) const;
+  String rfcFormat(const String& format) const;
+  String stdcFormat(const String& format) const;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

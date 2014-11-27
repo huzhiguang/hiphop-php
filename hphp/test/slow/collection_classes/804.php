@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 try {
   $v = new Vector();
@@ -25,15 +25,6 @@ try {
     }
  catch (Exception $e) {
       echo 'C';
-    }
-    $s = new StableMap();
-    $s->$method(1);
-    $s->$method('foo');
-    try {
-      $s->$method(1.0);
-    }
- catch (Exception $e) {
-      echo 'D';
     }
     echo "\n";
   }

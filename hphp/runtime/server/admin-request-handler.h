@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -29,20 +29,26 @@ public:
 
 public:
   explicit AdminRequestHandler(int timeout);
+
   // implementing RequestHandler
-  virtual void handleRequest(Transport *transport);
+  void setupRequest(Transport* transport) override;
+  void teardownRequest(Transport* transport) noexcept override;
+  void handleRequest(Transport *transport) override;
+  void abortRequest(Transport *transport) override;
+  void logToAccessLog(Transport* transport) override;
 
 private:
   bool handleCheckRequest  (const std::string &cmd, Transport *transport);
   bool handleStatusRequest (const std::string &cmd, Transport *transport);
+  bool handleMemoryRequest (const std::string &cmd, Transport *transport);
   bool handleStatsRequest  (const std::string &cmd, Transport *transport);
   bool handleProfileRequest(const std::string &cmd, Transport *transport);
-  bool handleAPCSizeRequest (const std::string &cmd, Transport *transport);
   bool handleDumpCacheRequest (const std::string &cmd, Transport *transport);
   bool handleConstSizeRequest (const std::string &cmd, Transport *transport);
   bool handleStaticStringsRequest(const std::string &cmd,
                                   Transport *transport);
-  bool handleVMRequest      (const std::string &cnd, Transport *transport);
+  bool handleVMRequest      (const std::string &cmd, Transport *transport);
+  bool handleRandomApcRequest (const std::string &cmd, Transport *transport);
 
 #ifdef GOOGLE_CPU_PROFILER
   bool handleCPUProfilerRequest (const std::string &cmd, Transport *transport);

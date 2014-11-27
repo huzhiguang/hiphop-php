@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -16,11 +16,112 @@
 */
 
 #include "hphp/runtime/ext/ext_datetime.h"
+#include "hphp/runtime/base/ini-setting.h"
 
+#include "hphp/system/constants.h"
 #include "hphp/system/systemlib.h"
 
 namespace HPHP {
-IMPLEMENT_DEFAULT_EXTENSION(date);
+
+static int check_id_allowed(const String& id, long bf) {
+  if (bf & q_DateTimeZone$$AFRICA && id.find("Africa/") == 0) return 1;
+  if (bf & q_DateTimeZone$$AMERICA && id.find("America/") == 0) return 1;
+  if (bf & q_DateTimeZone$$ANTARCTICA && id.find("Antarctica/") == 0) return 1;
+  if (bf & q_DateTimeZone$$ARCTIC && id.find("Arctic/") == 0) return 1;
+  if (bf & q_DateTimeZone$$ASIA && id.find("Asia/") == 0) return 1;
+  if (bf & q_DateTimeZone$$ATLANTIC && id.find("Atlantic/") == 0) return 1;
+  if (bf & q_DateTimeZone$$AUSTRALIA && id.find("Australia/") == 0) return 1;
+  if (bf & q_DateTimeZone$$EUROPE && id.find("Europe/") == 0) return 1;
+  if (bf & q_DateTimeZone$$INDIAN && id.find("Indian/") == 0) return 1;
+  if (bf & q_DateTimeZone$$PACIFIC && id.find("Pacific/") == 0) return 1;
+  if (bf & q_DateTimeZone$$UTC && id.find("UTC") == 0) return 1;
+  return 0;
+}
+
+const StaticString
+  s_formatOffset("P"),
+  s_formatID("e"),
+  s_formatAbbr("T");
+
+static String zone_type_to_string(int zoneType, SmartResource<DateTime> dt) {
+  switch (zoneType) {
+    case TIMELIB_ZONETYPE_OFFSET:
+      return dt->toString(s_formatOffset);
+    case TIMELIB_ZONETYPE_ID:
+      return dt->toString(s_formatID);
+    case TIMELIB_ZONETYPE_ABBR:
+      return dt->toString(s_formatAbbr);
+  }
+
+  always_assert(!"Bad zone type");
+}
+
+struct DateGlobals {
+  double default_latitude;
+  double default_longitude;
+  double sunset_zenith;
+  double sunrise_zenith;
+};
+IMPLEMENT_THREAD_LOCAL(DateGlobals, s_date_globals);
+
+static class DateExtension final : public Extension {
+ public:
+  DateExtension() : Extension("date", k_PHP_VERSION.c_str()) { }
+  void threadInit() override {
+    IniSetting::Bind(
+      this, IniSetting::PHP_INI_ALL,
+      "date.timezone",
+      g_context->getDefaultTimeZone().c_str(),
+      IniSetting::SetAndGet<std::string>(
+        dateTimezoneIniUpdate, dateTimezoneIniGet
+      )
+    );
+    IniSetting::Bind(
+      this, IniSetting::PHP_INI_ALL,
+      "date.default_latitude", "31.7667",
+      &s_date_globals->default_latitude
+    );
+    IniSetting::Bind(
+      this, IniSetting::PHP_INI_ALL,
+      "date.default_longitude", "35.2333",
+      &s_date_globals->default_longitude
+    );
+    IniSetting::Bind(
+      this, IniSetting::PHP_INI_ALL,
+      "date.sunset_zenith", "90.583333",
+      &s_date_globals->sunset_zenith
+    );
+    IniSetting::Bind(
+      this, IniSetting::PHP_INI_ALL,
+      "date.sunrise_zenith", "90.583333",
+      &s_date_globals->sunrise_zenith
+    );
+  }
+
+  double get_date_default_gmt_offset() {
+    SmartResource<TimeZone> tzi = TimeZone::Current();
+    // just get the offset form utc time
+    // set the timestamp 0 is ok
+    return tzi->offset(0) / 3600;
+  }
+
+ private:
+  static bool dateTimezoneIniUpdate(const std::string& value) {
+    if (value.empty()) {
+      return false;
+    }
+    return f_date_default_timezone_set(value);
+  }
+
+  static std::string dateTimezoneIniGet() {
+    auto ret = g_context->getTimeZone();
+    if (ret.isNull()) {
+      return "";
+    }
+    return ret.toCppString();
+  }
+} s_date_extension;
+
 ///////////////////////////////////////////////////////////////////////////////
 // constants
 
@@ -54,40 +155,83 @@ const int64_t q_DateTimeZone$$PER_COUNTRY = 4096;
 ///////////////////////////////////////////////////////////////////////////////
 // methods
 
-c_DateTime::c_DateTime(Class* cb)
-  : ExtObjectDataFlags<ObjectData::HasClone>(cb) {
-}
-
-c_DateTime::~c_DateTime() {
-}
-
-Object c_DateTime::t_add(CObjRef interval) {
+Object c_DateTime::t_add(const Object& interval) {
   m_dt->add(c_DateInterval::unwrap(interval));
   return this;
 }
 
-void c_DateTime::t___construct(CStrRef time /*= "now"*/,
-                               CObjRef timezone /*= null_object*/) {
-  m_dt = NEWOBJ(DateTime)(TimeStamp::Current());
+void c_DateTime::t___construct(const String& time /*= "now"*/,
+                               const Object& timezone /*= null_object*/) {
+  m_dt = newres<DateTime>(TimeStamp::Current(),
+                          c_DateTimeZone::unwrap(timezone));
   if (!time.empty()) {
     m_dt->fromString(time, c_DateTimeZone::unwrap(timezone));
+  } else if (!timezone.isNull()) {
+    // We still have to tell the underlying DateTime the timezone incase they
+    // call setTimestamp or something else later
+    m_dt->setTimezone(c_DateTimeZone::unwrap(timezone));
   }
 }
 
-Object c_DateTime::ti_createfromformat(CStrRef format, CStrRef time,
-                                       CObjRef timezone /*= null_object */) {
-  c_DateTime *datetime = NEWOBJ(c_DateTime);
-  datetime->m_dt = NEWOBJ(DateTime);
-  datetime->m_dt->fromString(time, c_DateTimeZone::unwrap(timezone), format.data());
+Variant c_DateTime::ti_createfromformat(const String& format,
+                                        const String& time,
+                                        const Object& timezone /*= null_object */) {
+  c_DateTime *datetime = newobj<c_DateTime>();
+  const auto curr = (format.find("!") != String::npos) ? 0 : f_time() ;
+  datetime->m_dt = newres<DateTime>(curr, false);
+  if (!datetime->m_dt->fromString(time, c_DateTimeZone::unwrap(timezone),
+                                 format.data(), false)) {
+    return false;
+  }
+
   return datetime;
 }
 
-Object c_DateTime::t_diff(CObjRef datetime2, bool absolute) {
-  return c_DateInterval::wrap(m_dt->diff(c_DateTime::unwrap(datetime2), absolute));
+Object c_DateTime::t_diff(const Object& datetime2, bool absolute) {
+  return c_DateInterval::wrap(m_dt->diff(c_DateTime::unwrap(datetime2),
+                                         absolute));
 }
 
-String c_DateTime::t_format(CStrRef format) {
+String c_DateTime::t_format(const String& format) {
   return m_dt->toString(format, false);
+}
+
+const StaticString s_data("data");
+const StaticString s_getTimestamp("getTimestamp");
+
+int64_t c_DateTime::GetTimestamp(const Object& obj) {
+  if (LIKELY(obj.is<c_DateTime>())) {
+    return obj.getTyped<c_DateTime>(true)->t_gettimestamp();
+  }
+  assert(obj->instanceof(SystemLib::s_DateTimeInterfaceClass));
+  Variant result = obj->o_invoke(s_getTimestamp, empty_array());
+  return result.toInt64();
+}
+
+int64_t c_DateTime::GetTimestamp(const ObjectData* od) {
+  return GetTimestamp(Object(const_cast<ObjectData*>(od)));
+}
+
+SmartResource<DateTime> c_DateTime::unwrap(const Object& datetime) {
+  if (LIKELY(datetime.is<c_DateTime>())) {
+    SmartObject<c_DateTime> cdt = datetime.getTyped<c_DateTime>(true);
+    if (cdt.get() == nullptr) {
+      return SmartResource<DateTime>();
+    }
+    return cdt->m_dt;
+  }
+  if (datetime->instanceof(SystemLib::s_DateTimeImmutableClass)) {
+    bool visible, accessible, unset;
+    TypedValue* tv = datetime->getProp(SystemLib::s_DateTimeImmutableClass,
+                                       s_data.get(),
+                                       visible,
+                                       accessible,
+                                       unset);
+    assert(tv->m_type == KindOfObject);
+    Object impl(tv->m_data.pobj);
+    return unwrap(impl);
+  }
+  return SmartResource<DateTime>();
 }
 
 const StaticString
@@ -99,14 +243,12 @@ const StaticString
 Array c_DateTime::ti_getlasterrors() {
   Array errors = DateTime::getLastErrors();
   Array warnings = DateTime::getLastWarnings();
-  Array ret = Array::Create();
-
-  ret.add(s_warning_count, warnings.size());
-  ret.add(s_warnings, warnings);
-  ret.add(s_error_count, errors.size());
-  ret.add(s_errors, errors);
-
-  return ret;
+  return make_map_array(
+    s_warning_count, warnings.size(),
+    s_warnings, warnings,
+    s_error_count, errors.size(),
+    s_errors, errors
+  );
 }
 
 int64_t c_DateTime::t_getoffset() {
@@ -114,6 +256,10 @@ int64_t c_DateTime::t_getoffset() {
 }
 
 int64_t c_DateTime::t_gettimestamp() {
+  return gettimestamp();
+}
+
+int64_t c_DateTime::gettimestamp() const {
   bool err = false;
   return m_dt->toTimeStamp(err);
 }
@@ -126,7 +272,7 @@ Variant c_DateTime::t_gettimezone() {
   return false;
 }
 
-Object c_DateTime::t_modify(CStrRef modify) {
+Object c_DateTime::t_modify(const String& modify) {
   m_dt->modify(modify);
   return this;
 }
@@ -136,12 +282,14 @@ Object c_DateTime::t_setdate(int64_t year, int64_t month, int64_t day) {
   return this;
 }
 
-Object c_DateTime::t_setisodate(int64_t year, int64_t week, int64_t day /*= 1*/) {
+Object c_DateTime::t_setisodate(int64_t year, int64_t week,
+                                int64_t day /*= 1*/) {
   m_dt->setISODate(year, week, day);
   return this;
 }
 
-Object c_DateTime::t_settime(int64_t hour, int64_t minute, int64_t second /*= 0*/) {
+Object c_DateTime::t_settime(int64_t hour, int64_t minute,
+                             int64_t second /*= 0*/) {
   m_dt->setTime(hour, minute, second);
   return this;
 }
@@ -151,14 +299,50 @@ Object c_DateTime::t_settimestamp(int64_t unixtimestamp) {
   return this;
 }
 
-Object c_DateTime::t_settimezone(CObjRef timezone) {
+Object c_DateTime::t_settimezone(const Object& timezone) {
   m_dt->setTimezone(c_DateTimeZone::unwrap(timezone));
   return this;
 }
 
-Object c_DateTime::t_sub(CObjRef interval) {
+Object c_DateTime::t_sub(const Object& interval) {
   m_dt->sub(c_DateInterval::unwrap(interval));
   return this;
+}
+
+const StaticString
+  s_date("date"),
+  s_timezone_type("timezone_type"),
+  s_timezone("timezone"),
+  s_ISOformat("Y-m-d H:i:s.u");
+
+Array c_DateTime::t___sleep() {
+  int zoneType = m_dt->zoneType();
+
+  o_set(s_date, t_format(s_ISOformat));
+  o_set(s_timezone_type, zoneType);
+  o_set(s_timezone, zone_type_to_string(zoneType, m_dt));
+  return make_packed_array(s_date, s_timezone_type, s_timezone);
+}
+
+void c_DateTime::t___wakeup() {
+  c_DateTimeZone *ctz = newobj<c_DateTimeZone>();
+  Object timezone(ctz);
+  ctz->t___construct(o_get(s_timezone).toString());
+
+  t___construct(o_get(s_date).toString(), timezone);
+
+  // cleanup
+  unsetProp(getVMClass(), s_date.get());
+  unsetProp(getVMClass(), s_timezone_type.get());
+  unsetProp(getVMClass(), s_timezone.get());
+}
+
+Array c_DateTime::t___debuginfo() {
+  return make_map_array(
+    s_date, t_format(s_ISOformat),
+    s_timezone_type, m_dt->zoneType(),
+    s_timezone, zone_type_to_string(m_dt->zoneType(), m_dt)
+  );
 }
 
 c_DateTime* c_DateTime::Clone(ObjectData* obj) {
@@ -167,15 +351,8 @@ c_DateTime* c_DateTime::Clone(ObjectData* obj) {
   return dt;
 }
 
-c_DateTimeZone::c_DateTimeZone(Class* cb) :
-    ExtObjectDataFlags<ObjectData::HasClone>(cb) {
-}
-
-c_DateTimeZone::~c_DateTimeZone() {
-}
-
-void c_DateTimeZone::t___construct(CStrRef timezone) {
-  m_tz = NEWOBJ(TimeZone)(timezone);
+void c_DateTimeZone::t___construct(const String& timezone) {
+  m_tz = newres<TimeZone>(timezone);
   if (!m_tz->isValid()) {
     std::string msg = "DateTimeZone::__construct(): Unknown or bad timezone (";
     msg += timezone.data();
@@ -192,7 +369,7 @@ String c_DateTimeZone::t_getname() {
   return m_tz->name();
 }
 
-int64_t c_DateTimeZone::t_getoffset(CObjRef datetime) {
+int64_t c_DateTimeZone::t_getoffset(const Object& datetime) {
   bool error;
   int64_t ts = c_DateTime::unwrap(datetime)->toTimeStamp(error);
   return m_tz->offset(ts);
@@ -206,8 +383,31 @@ Array c_DateTimeZone::ti_listabbreviations() {
   return TimeZone::GetAbbreviations();
 }
 
-Array c_DateTimeZone::ti_listidentifiers() {
-  return TimeZone::GetNames();
+Variant c_DateTimeZone::ti_listidentifiers(int64_t what,
+                                           const String& country) {
+  Array all = TimeZone::GetNamesToCountryCodes();
+
+  // This is the same check that PHP5 performs, no validation needed.
+  // See ext/date/php_date.c lines 4496-4499
+  if (what == q_DateTimeZone$$PER_COUNTRY && country.length() != 2) {
+    raise_notice("A two-letter ISO 3166-1 compatible country code is expected");
+    return false;
+  }
+
+  Array result = Array::Create();
+  for (ArrayIter iter(all); iter; ++iter) {
+    const Variant& tzid = iter.first();
+    const Variant& tzcountry = iter.second();
+
+    if (what == q_DateTimeZone$$PER_COUNTRY && equal(country, tzcountry)) {
+      result.append(tzid);
+    } else if (what == q_DateTimeZone$$ALL_WITH_BC ||
+               check_id_allowed(tzid.toStrNR(), what)) {
+      result.append(tzid);
+    }
+  }
+
+  return result;
 }
 
 c_DateTimeZone* c_DateTimeZone::Clone(ObjectData* obj) {
@@ -216,17 +416,8 @@ c_DateTimeZone* c_DateTimeZone::Clone(ObjectData* obj) {
   return dtz;
 }
 
-c_DateInterval::c_DateInterval(Class* cb)
-  : ExtObjectDataFlags<ObjectData::UseGet|
-                       ObjectData::UseSet|
-                       ObjectData::HasClone>(cb) {
-}
-
-c_DateInterval::~c_DateInterval() {
-}
-
-void c_DateInterval::t___construct(CStrRef interval_spec) {
-  m_di = NEWOBJ(DateInterval)(interval_spec);
+void c_DateInterval::t___construct(const String& interval_spec) {
+  m_di = newres<DateInterval>(interval_spec);
   if (!m_di->isValid()) {
     std::string msg = "DateInterval::__construct: Invalid interval (";
     msg += interval_spec.data();
@@ -272,35 +463,35 @@ Variant c_DateInterval::t___set(Variant member, Variant value) {
   if (member.isString()) {
     if (same(member, s_y)) {
       m_di->setYears(value.toInt64());
-      return uninit_null();
+      return init_null();
     }
     if (same(member, s_m)) {
       m_di->setMonths(value.toInt64());
-      return uninit_null();
+      return init_null();
     }
     if (same(member, s_d)) {
       m_di->setDays(value.toInt64());
-      return uninit_null();
+      return init_null();
     }
     if (same(member, s_h)) {
       m_di->setHours(value.toInt64());
-      return uninit_null();
+      return init_null();
     }
     if (same(member, s_i)) {
       m_di->setMinutes(value.toInt64());
-      return uninit_null();
+      return init_null();
     }
     if (same(member, s_s)) {
       m_di->setSeconds(value.toInt64());
-      return uninit_null();
+      return init_null();
     }
     if (same(member, s_invert)) {
       m_di->setInverted(value.toBoolean());
-      return uninit_null();
+      return init_null();
     }
     if (same(member, s_days)) {
       m_di->setTotalDays(value.toInt64());
-      return uninit_null();
+      return init_null();
     }
   }
 
@@ -310,12 +501,12 @@ Variant c_DateInterval::t___set(Variant member, Variant value) {
   throw Object(SystemLib::AllocExceptionObject(msg));
 }
 
-Object c_DateInterval::ti_createfromdatestring(CStrRef time) {
-  SmartResource<DateInterval> di(NEWOBJ(DateInterval)(time, true));
+Object c_DateInterval::ti_createfromdatestring(const String& time) {
+  SmartResource<DateInterval> di(newres<DateInterval>(time, true));
   return c_DateInterval::wrap(di);
 }
 
-String c_DateInterval::t_format(CStrRef format) {
+String c_DateInterval::t_format(const String& format) {
   return m_di->format(format);
 }
 
@@ -367,7 +558,8 @@ Variant f_gmmktime(int hour /* = INT_MAX */, int minute /* = INT_MAX */,
   return ts;
 }
 
-Variant f_idate(CStrRef format, int64_t timestamp /* = TimeStamp::Current() */) {
+Variant f_idate(const String& format,
+                int64_t timestamp /* = TimeStamp::Current() */) {
   if (format.size() != 1) {
     throw_invalid_argument("format: %s", format.data());
     return false;
@@ -377,28 +569,29 @@ Variant f_idate(CStrRef format, int64_t timestamp /* = TimeStamp::Current() */) 
   return ret;
 }
 
-Variant f_date(CStrRef format, int64_t timestamp /* = TimeStamp::Current() */) {
-  if (format.empty()) return "";
+Variant f_date(const String& format,
+               int64_t timestamp /* = TimeStamp::Current() */) {
+  if (format.empty()) return empty_string_variant();
   String ret = DateTime(timestamp, false).toString(format, false);
   if (ret.isNull()) return false;
   return ret;
 }
 
-Variant f_gmdate(CStrRef format,
+Variant f_gmdate(const String& format,
                  int64_t timestamp /* = TimeStamp::Current() */) {
   String ret = DateTime(timestamp, true).toString(format, false);
   if (ret.isNull()) return false;
   return ret;
 }
 
-Variant f_strftime(CStrRef format,
+Variant f_strftime(const String& format,
                    int64_t timestamp /* = TimeStamp::Current() */) {
   String ret = DateTime(timestamp, false).toString(format, true);
   if (ret.isNull()) return false;
   return ret;
 }
 
-String f_gmstrftime(CStrRef format,
+String f_gmstrftime(const String& format,
                     int64_t timestamp /* = TimeStamp::Current() */) {
   String ret = DateTime(timestamp, true).toString(format, true);
   if (ret.isNull()) return false;
@@ -417,22 +610,22 @@ Array f_localtime(int64_t timestamp /* = TimeStamp::Current() */,
   return DateTime(timestamp, false).toArray(format);
 }
 
-Variant f_strptime(CStrRef date, CStrRef format) {
-  Array ret = DateTime::Parse(date, format);
+Variant f_strptime(const String& date, const String& format) {
+  Array ret = DateTime::ParseAsStrptime(format, date);
   if (ret.empty()) {
     return false;
   }
   return ret;
 }
 
-Variant f_strtotime(CStrRef input,
+Variant f_strtotime(const String& input,
                     int64_t timestamp /* = TimeStamp::Current() */) {
   if (input.empty()) {
     return false;
   }
 
   DateTime dt(timestamp);
-  if (!dt.fromString(input, SmartResource<TimeZone>())) {
+  if (!dt.fromString(input, SmartResource<TimeZone>(), nullptr, false)) {
     return false;
   }
   bool error;
@@ -446,19 +639,19 @@ String f_date_default_timezone_get() {
   return TimeZone::Current()->name();
 }
 
-bool f_date_default_timezone_set(CStrRef name) {
+bool f_date_default_timezone_set(const String& name) {
   return TimeZone::SetCurrent(name);
 }
 
-Array f_timezone_identifiers_list() {
-  return c_DateTimeZone::ti_listidentifiers();
+Variant f_timezone_identifiers_list(int64_t what, const String& country) {
+  return c_DateTimeZone::ti_listidentifiers(what, country);
 }
 
 Array f_timezone_abbreviations_list() {
   return c_DateTimeZone::ti_listabbreviations();
 }
 
-Variant f_timezone_name_from_abbr(CStrRef abbr, int gmtoffset /* = -1 */,
+Variant f_timezone_name_from_abbr(const String& abbr, int gmtoffset /* = -1 */,
                                   bool isdst /* = true */) {
   String ret = TimeZone::AbbreviationToName(abbr, gmtoffset, isdst);
   if (ret.isNull()) {
@@ -467,26 +660,26 @@ Variant f_timezone_name_from_abbr(CStrRef abbr, int gmtoffset /* = -1 */,
   return ret;
 }
 
-Object f_timezone_open(CStrRef timezone) {
-  c_DateTimeZone *ctz = NEWOBJ(c_DateTimeZone)();
+Object f_timezone_open(const String& timezone) {
+  c_DateTimeZone *ctz = newobj<c_DateTimeZone>();
   Object ret(ctz);
   ctz->t___construct(timezone);
   return ret;
 }
 
-Array f_timezone_location_get(CObjRef timezone) {
+Array f_timezone_location_get(const Object& timezone) {
   return timezone.getTyped<c_DateTimeZone>()->t_getlocation();
 }
 
-String f_timezone_name_get(CObjRef object) {
+String f_timezone_name_get(const Object& object) {
   return object.getTyped<c_DateTimeZone>()->t_getname();
 }
 
-int64_t f_timezone_offset_get(CObjRef object, CObjRef dt) {
+int64_t f_timezone_offset_get(const Object& object, const Object& dt) {
   return object.getTyped<c_DateTimeZone>()->t_getoffset(dt);
 }
 
-Array f_timezone_transitions_get(CObjRef object) {
+Array f_timezone_transitions_get(const Object& object) {
   return object.getTyped<c_DateTimeZone>()->t_gettransitions();
 }
 
@@ -501,92 +694,110 @@ bool f_checkdate(int month, int day, int year) {
   return DateTime::IsValid(year, month, day);
 }
 
-Object f_date_add(CObjRef datetime, CObjRef interval) {
+Object f_date_add(const Object& datetime, const Object& interval) {
   return datetime.getTyped<c_DateTime>()->
     t_add(interval.getTyped<c_DateInterval>());
 }
 
-Object f_date_create_from_format(CStrRef format,
-                                 CStrRef time,
-                                 CObjRef timezone /* = null_object */) {
+Variant f_date_create_from_format(const String& format,
+                                 const String& time,
+                                 const Object& timezone /* = null_object */) {
   return c_DateTime::ti_createfromformat(format, time, timezone);
 }
 
-Object f_date_create(CStrRef time /* = null_string */,
-                     CObjRef timezone /* = null_object */) {
-  c_DateTime *cdt = NEWOBJ(c_DateTime)();
-  Object ret(cdt);
-  cdt->t___construct(time, timezone);
+Variant f_date_parse_from_format(const String& format, const String& date) {
+  Array ret = DateTime::Parse(format, date);
+  if (ret.empty()) {
+    return false;
+  }
   return ret;
 }
 
-void f_date_date_set(CObjRef object, int year, int month, int day) {
+Variant f_date_create(const String& time /* = null_string */,
+                      const Object& timezone /* = null_object */) {
+  c_DateTime *cdt = newobj<c_DateTime>();
+  Object ret(cdt);
+  // Don't set the time here because it will throw if it is bad
+  cdt->t___construct();
+  if (time.empty()) {
+    // zend does this, so so do we
+    return ret;
+  }
+  auto dt = c_DateTime::unwrap(ret);
+  if (!dt->fromString(time, c_DateTimeZone::unwrap(timezone), nullptr, false)) {
+    return false;
+  }
+  return ret;
+}
+
+void f_date_date_set(const Object& object, int year, int month, int day) {
   object.getTyped<c_DateTime>()->t_setdate(year, month, day);
 }
 
-Object f_date_diff(CObjRef datetime,
-                   CObjRef datetime2,
+Object f_date_diff(const Object& datetime,
+                   const Object& datetime2,
                    bool absolute /* = false */) {
   return datetime.getTyped<c_DateTime>()->
     t_diff(datetime2.getTyped<c_DateTime>(), absolute);
 }
 
-void f_date_isodate_set(CObjRef object, int year, int week,
+void f_date_isodate_set(const Object& object, int year, int week,
                         int day /* = 1 */) {
   object.getTyped<c_DateTime>()->t_setisodate(year, week, day);
 }
 
-String f_date_format(CObjRef object, CStrRef format) {
-  return object.getTyped<c_DateTime>()->t_format(format);
+String f_date_format(const Object& object, const String& format) {
+  return c_DateTime::unwrap(object.getTyped<c_DateTime>())->
+                            toString(format, false);
 }
 
 Array f_date_get_last_errors() {
   return c_DateTime::ti_getlasterrors();
 }
 
-Object f_date_interval_create_from_date_string(CStrRef time) {
+Object f_date_interval_create_from_date_string(const String& time) {
   return c_DateInterval::ti_createfromdatestring(time);
 }
 
-String f_date_interval_format(CObjRef interval, CStrRef format_spec) {
+String f_date_interval_format(const Object& interval, const String& format_spec) {
   return interval.getTyped<c_DateInterval>()->t_format(format_spec);
 }
 
-void f_date_modify(CObjRef object, CStrRef modify) {
+void f_date_modify(const Object& object, const String& modify) {
   object.getTyped<c_DateTime>()->t_modify(modify);
 }
 
-int64_t f_date_offset_get(CObjRef object) {
-  return object.getTyped<c_DateTime>()->t_getoffset();
+Variant f_date_parse(const String& date) {
+  Array ret = DateTime::Parse(date);
+  if (ret.empty()) {
+    return false;
+  }
+  return ret;
 }
 
-Variant f_date_parse(CStrRef date) {
-  return DateTime::Parse(date);
-}
-
-void f_date_time_set(CObjRef object, int hour, int minute,
+void f_date_time_set(const Object& object, int hour, int minute,
                      int second /* = 0 */) {
   object.getTyped<c_DateTime>()->t_settime(hour, minute, second);
 }
 
-int64_t f_date_timestamp_get(CObjRef datetime) {
+int64_t f_date_timestamp_get(const Object& datetime) {
   return datetime.getTyped<c_DateTime>()->t_gettimestamp();
 }
 
-Object f_date_timestamp_set(CObjRef datetime, int64_t timestamp) {
+Object f_date_timestamp_set(const Object& datetime, int64_t timestamp) {
   return datetime.getTyped<c_DateTime>()->
     t_settimestamp(timestamp);
 }
 
-Variant f_date_timezone_get(CObjRef object) {
+Variant f_date_timezone_get(const Object& object) {
   return object.getTyped<c_DateTime>()->t_gettimezone();
 }
 
-void f_date_timezone_set(CObjRef object, CObjRef timezone) {
+void f_date_timezone_set(const Object& object, const Object& timezone) {
   object.getTyped<c_DateTime>()->t_settimezone(timezone);
 }
 
-Object f_date_sub(CObjRef datetime, CObjRef interval) {
+Object f_date_sub(const Object& datetime, const Object& interval) {
   return datetime.getTyped<c_DateTime>()->
     t_sub(interval.getTyped<c_DateInterval>());
 }
@@ -594,23 +805,47 @@ Object f_date_sub(CObjRef datetime, CObjRef interval) {
 ///////////////////////////////////////////////////////////////////////////////
 // sun
 
+double get_date_default_latitude() {
+  return s_date_globals->default_latitude;
+}
+
+double get_date_default_longitude() {
+  return s_date_globals->default_longitude;
+}
+
+double get_date_default_sunset_zenith() {
+  return s_date_globals->sunset_zenith;
+}
+
+double get_date_default_sunrise_zenith() {
+  return s_date_globals->sunrise_zenith;
+}
+
+double get_date_default_gmt_offset() {
+  return s_date_extension.get_date_default_gmt_offset();
+}
+
 Array f_date_sun_info(int64_t ts, double latitude, double longitude) {
   return DateTime(ts, false).getSunInfo(latitude, longitude);
 }
 
-Variant f_date_sunrise(int64_t timestamp, int format /* = 0 */,
-                       double latitude /* = 0.0 */, double longitude /* = 0.0 */,
-                       double zenith /* = 0.0 */,
-                       double gmt_offset /* = 99999.0 */) {
+Variant f_date_sunrise(int64_t timestamp,
+                       int format,
+                       double latitude,
+                       double longitude,
+                       double zenith,
+                       double gmt_offset) {
   return DateTime(timestamp, false).getSunInfo
     (static_cast<DateTime::SunInfoFormat>(format), latitude, longitude,
      zenith, gmt_offset, false);
 }
 
-Variant f_date_sunset(int64_t timestamp, int format /* = 0 */,
-                      double latitude /* = 0.0 */, double longitude /* = 0.0 */,
-                      double zenith /* = 0.0 */,
-                      double gmt_offset /* = 99999.0 */) {
+Variant f_date_sunset(int64_t timestamp,
+                      int format,
+                      double latitude,
+                      double longitude,
+                      double zenith,
+                      double gmt_offset) {
   return DateTime(timestamp, false).getSunInfo
     (static_cast<DateTime::SunInfoFormat>(format), latitude, longitude,
      zenith, gmt_offset, true);

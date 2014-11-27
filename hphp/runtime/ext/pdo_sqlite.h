@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -19,6 +19,9 @@
 #define incl_HPHP_PDO_SQLITE_H_
 
 #include "hphp/runtime/ext/pdo_driver.h"
+#include <memory>
+#include <vector>
+#include "hphp/runtime/ext/sqlite3/ext_sqlite3.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -28,6 +31,48 @@ public:
   PDOSqlite();
 
   virtual PDOConnection *createConnectionObject();
+};
+
+struct PDOSqliteError {
+  const char *file;
+  int line;
+  unsigned int errcode;
+  char *errmsg;
+};
+
+class PDOSqliteConnection : public PDOConnection {
+public:
+  PDOSqliteConnection();
+  virtual ~PDOSqliteConnection();
+  virtual bool create(const Array& options);
+  virtual void sweep();
+
+  int handleError(const char *file, int line, PDOStatement *stmt = nullptr);
+
+  virtual bool support(SupportedMethod method);
+  virtual bool closer();
+  virtual bool preparer(const String& sql,
+                        sp_PDOStatement* stmt,
+                        const Variant& options);
+  virtual int64_t doer(const String& sql);
+  virtual bool quoter(const String& input,
+                      String& quoted,
+                      PDOParamType paramtype);
+  virtual bool begin();
+  virtual bool commit();
+  virtual bool rollback();
+  virtual bool setAttribute(int64_t attr, const Variant& value);
+  virtual String lastId(const char *name);
+  virtual bool fetchErr(PDOStatement *stmt, Array &info);
+  virtual int getAttribute(int64_t attr, Variant &value);
+  virtual void persistentShutdown();
+
+  bool createFunction(const String& name, const Variant& callback, int argcount);
+
+private:
+  sqlite3 *m_db;
+  PDOSqliteError m_einfo;
+  std::vector<std::shared_ptr<SQLite3::UserDefinedFunc>> m_udfs;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

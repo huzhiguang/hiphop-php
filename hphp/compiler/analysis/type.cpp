@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,7 +21,9 @@
 #include "hphp/compiler/analysis/file_scope.h"
 #include "hphp/compiler/expression/expression.h"
 #include "hphp/runtime/base/builtin-functions.h"
+#include "hphp/runtime/vm/runtime.h"
 #include <boost/format.hpp>
+#include <map>
 
 using namespace HPHP;
 
@@ -43,6 +45,7 @@ TypePtr Type::Numeric     (new Type(Type::KindOfNumeric     ));
 TypePtr Type::PlusOperand (new Type(Type::KindOfPlusOperand ));
 TypePtr Type::Primitive   (new Type(Type::KindOfPrimitive   ));
 TypePtr Type::Sequence    (new Type(Type::KindOfSequence    ));
+TypePtr Type::ArrayKey    (new Type(Type::KindOfArrayKey    ));
 
 TypePtr Type::AutoSequence(new Type(Type::KindOfAutoSequence));
 TypePtr Type::AutoObject  (new Type(Type::KindOfAutoObject  ));
@@ -58,19 +61,17 @@ void Type::InitTypeHintMap() {
   assert(s_HHTypeHintTypes.empty());
 
   s_TypeHintTypes["array"] = Type::Array;
-  s_TypeHintTypes["resource"] = Type::Resource;
   s_TypeHintTypes["callable"] = Type::Variant;
 
   s_HHTypeHintTypes["array"] = Type::Array;
-  s_HHTypeHintTypes["bool"]    = Type::Boolean;
-  s_HHTypeHintTypes["boolean"] = Type::Boolean;
-  s_HHTypeHintTypes["int"]     = Type::Int64;
-  s_HHTypeHintTypes["integer"] = Type::Int64;
-  s_HHTypeHintTypes["real"]    = Type::Double;
-  s_HHTypeHintTypes["double"]  = Type::Double;
-  s_HHTypeHintTypes["float"]   = Type::Double;
-  s_HHTypeHintTypes["string"]  = Type::String;
-  s_HHTypeHintTypes["resource"] = Type::Resource;
+  s_HHTypeHintTypes["HH\\bool"]    = Type::Boolean;
+  s_HHTypeHintTypes["HH\\int"]     = Type::Int64;
+  s_HHTypeHintTypes["HH\\float"]   = Type::Double;
+  s_HHTypeHintTypes["HH\\string"]  = Type::String;
+  // Type::Numeric doesn't include numeric strings; this is intentional
+  s_HHTypeHintTypes["HH\\num"]      = Type::Numeric;
+  s_HHTypeHintTypes["HH\\resource"] = Type::Resource;
+  s_HHTypeHintTypes["HH\\arraykey"] = Type::ArrayKey;
   s_HHTypeHintTypes["callable"] = Type::Variant;
 }
 
@@ -120,6 +121,7 @@ TypePtr Type::GetType(KindOf kindOf, const std::string &clsname /* = "" */) {
   case KindOfObject:      return Type::Object;
   case KindOfResource:    return Type::Resource;
   case KindOfNumeric:     return Type::Numeric;
+  case KindOfArrayKey:    return Type::ArrayKey;
   case KindOfPrimitive:   return Type::Primitive;
   case KindOfPlusOperand: return Type::PlusOperand;
   case KindOfSequence:    return Type::Sequence;
@@ -625,33 +627,6 @@ ClassScopePtr Type::getClass(AnalysisResultConstPtr ar,
   return cls;
 }
 
-DataType Type::getDataType() const {
-  switch (m_kindOf) {
-    case KindOfBoolean:     return HPHP::KindOfBoolean;
-    case KindOfInt32:
-    case KindOfInt64:       return HPHP::KindOfInt64;
-    case KindOfDouble:      return HPHP::KindOfDouble;
-    case KindOfString:      return HPHP::KindOfString;
-    case KindOfArray:       return HPHP::KindOfArray;
-    case KindOfObject:      return HPHP::KindOfObject;
-    case KindOfResource:    return HPHP::KindOfResource;
-    case KindOfNumeric:
-    case KindOfPrimitive:
-    case KindOfPlusOperand:
-    case KindOfSequence:
-    default:                return HPHP::KindOfUnknown;
-  }
-}
-
-// This is similar to getDataType() except that it returns
-// HPHP::KindOfNull for KindOfVoid;
-DataType Type::getHhvmDataType() const {
-  switch (m_kindOf) {
-    case KindOfVoid:        return HPHP::KindOfNull;
-    default:                return getDataType();
-  }
-}
-
 std::string Type::getPHPName() {
   switch (m_kindOf) {
   case KindOfArray:       return "array";
@@ -664,6 +639,7 @@ std::string Type::getPHPName() {
 
 std::string Type::toString() const {
   switch (m_kindOf) {
+  case KindOfVoid:        return "Null";
   case KindOfBoolean:     return "Boolean";
   case KindOfInt32:       return "Int32";
   case KindOfInt64:       return "Int64";
@@ -676,6 +652,7 @@ std::string Type::toString() const {
   case KindOfObject:      return string("Object - ") + m_name;
   case KindOfResource:    return "Resource";
   case KindOfNumeric:     return "Numeric";
+  case KindOfArrayKey:    return "ArrayKey";
   case KindOfPrimitive:   return "Primitive";
   case KindOfPlusOperand: return "PlusOperand";
   case KindOfSequence:    return "Sequence";
@@ -725,6 +702,7 @@ void Type::serialize(JSON::DocTarget::OutputStream &out) const {
   }
   case KindOfResource:    s = "resource"; break;
   case KindOfNumeric:     s = "numeric"; break;
+  case KindOfArrayKey:    s = "arraykey"; break;
   case KindOfPrimitive:   s = "primitive"; break;
   case KindOfPlusOperand: s = "any"; break;
   case KindOfSequence:    s = "sequence"; break;
@@ -777,7 +755,7 @@ TypePtr Type::InferredObject(AnalysisResultConstPtr ar,
     } else if (c2ok && cls2->derivesFrom(ar, type1->m_name, true, false)) {
       resultType = type2;
     } else if (c1ok && c2ok && cls1->derivedByDynamic() &&
-               cls2->derivesFromRedeclaring()) {
+               cls2->derivesFromRedeclaring() == Derivation::Redeclaring) {
       resultType = type2;
     } else {
       resultType = type1;

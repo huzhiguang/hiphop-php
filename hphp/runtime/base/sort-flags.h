@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -26,7 +26,8 @@ enum SortFlags {
   SORT_LOCALE_STRING = 5,
   SORT_NATURAL = 6,
   SORT_FLAG_CASE = 8,
-  SORT_NATURAL_CASE = SORT_NATURAL | SORT_FLAG_CASE
+  SORT_NATURAL_CASE = SORT_NATURAL | SORT_FLAG_CASE,
+  SORT_STRING_CASE = SORT_STRING | SORT_FLAG_CASE
 };
 
 }

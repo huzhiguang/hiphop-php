@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1998-2010 Zend Technologies Ltd. (http://www.zend.com) |
    +----------------------------------------------------------------------+
    | This source file is subject to version 2.00 of the Zend license,     |
@@ -20,6 +20,7 @@
 #include "hphp/runtime/base/zend-math.h"
 
 #include "hphp/util/lock.h"
+#include "hphp/util/overflow.h"
 #include <math.h>
 #include <monetary.h>
 
@@ -29,6 +30,7 @@
 #include "hphp/runtime/base/string-buffer.h"
 #include "hphp/runtime/base/runtime-error.h"
 #include "hphp/runtime/base/type-conversions.h"
+#include "hphp/runtime/base/string-util.h"
 #include "hphp/runtime/base/builtin-functions.h"
 
 #ifdef __APPLE__
@@ -54,7 +56,7 @@ namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 // helpers
 
-bool string_substr_check(int len, int &f, int &l, bool strict /* = true */) {
+bool string_substr_check(int len, int &f, int &l) {
   if (l < 0 && -l > len) {
     return false;
   } else if (l > len) {
@@ -78,7 +80,7 @@ bool string_substr_check(int len, int &f, int &l, bool strict /* = true */) {
       f = 0;
     }
   }
-  if (f > len || (f == len && strict)) {
+  if (f >= len) {
     return false;
   }
 
@@ -157,21 +159,6 @@ int string_copy(char *dst, const char *src, int siz) {
   }
 
   return(s - src - 1);  /* count does not include NUL */
-}
-
-///////////////////////////////////////////////////////////////////////////////
-
-char *string_concat(const char *s1, int len1, const char *s2, int len2,
-                    int &len) {
-  len = len1 + len2;
-  char *buf = (char *)malloc(len + 1);
-  if (buf == nullptr) {
-    throw FatalErrorException(0, "malloc failed: %d", len);
-  }
-  memcpy(buf, s1, len1);
-  memcpy(buf + len1, s2, len2);
-  buf[len] = 0;
-  return buf;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -302,102 +289,42 @@ int string_natural_cmp(char const *a, size_t a_len,
 
 ///////////////////////////////////////////////////////////////////////////////
 
-char *string_to_case(const char *s, int len, int (*tocase)(int)) {
-  assert(s);
+void string_to_case(String& s, int (*tocase)(int)) {
+  assert(!s.isNull());
   assert(tocase);
-  char *ret = (char *)malloc(len + 1);
+  auto data = s.bufferSlice().ptr;
+  auto len = s.size();
   for (int i = 0; i < len; i++) {
-    ret[i] = tocase(s[i]);
+    data[i] = tocase(data[i]);
   }
-  ret[len] = '\0';
-  return ret;
-}
-
-char *string_to_case_first(const char *s, int len, int (*tocase)(int)) {
-  assert(s);
-  assert(tocase);
-  char *ret = string_duplicate(s, len);
-  if (*ret) {
-    *ret = tocase(*ret);
-  }
-  return ret;
-}
-
-char *string_to_case_words(const char *s, int len, int (*tocase)(int)) {
-  assert(s);
-  assert(tocase);
-  char *ret = string_duplicate(s, len);
-  if (*ret) {
-    *ret = tocase(*ret);
-    for (int i = 1; i < len; i++) {
-      if (isspace(ret[i-1])) {
-        ret[i] = tocase(ret[i]);
-      }
-    }
-  }
-  return ret;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-
-char *string_trim(const char *s, int &len,
-                  const char *charlist, int charlistlen, int mode) {
-  assert(s);
-  char mask[256];
-  string_charmask(charlist, charlistlen, mask);
-
-  int trimmed = 0;
-  if (mode & 1) {
-    for (int i = 0; i < len; i++) {
-      if (mask[(unsigned char)s[i]]) {
-        trimmed++;
-      } else {
-        break;
-      }
-    }
-    len -= trimmed;
-    s += trimmed;
-  }
-  if (mode & 2) {
-    for (int i = len - 1; i >= 0; i--) {
-      if (mask[(unsigned char)s[i]]) {
-        len--;
-        trimmed++;
-      } else {
-        break;
-      }
-    }
-  }
-
-  if (trimmed == 0) {
-    return nullptr;
-  }
-  return string_duplicate(s, len);
-}
 
 #define STR_PAD_LEFT            0
 #define STR_PAD_RIGHT           1
 #define STR_PAD_BOTH            2
 
-char *string_pad(const char *input, int &len, int pad_length,
-                 const char *pad_string, int pad_str_len,
-                 int pad_type) {
+String string_pad(const char *input, int len, int pad_length,
+                  const char *pad_string, int pad_str_len,
+                  int pad_type) {
   assert(input);
   int num_pad_chars = pad_length - len;
 
   /* If resulting string turns out to be shorter than input string,
      we simply copy the input and return. */
   if (pad_length < 0 || num_pad_chars < 0) {
-    return string_duplicate(input, len);
+    return String(input, len, CopyString);
   }
 
   /* Setup the padding string values if specified. */
   if (pad_str_len == 0) {
     throw_invalid_argument("pad_string: (empty)");
-    return nullptr;
+    return String();
   }
 
-  char *result = (char *)malloc(pad_length + 1);
+  String ret(pad_length, ReserveString);
+  char *result = ret.bufferSlice().ptr;
 
   /* We need to figure out the left/right padding lengths. */
   int left_pad, right_pad;
@@ -416,7 +343,7 @@ char *string_pad(const char *input, int &len, int pad_length,
     break;
   default:
     throw_invalid_argument("pad_type: %d", pad_type);
-    return nullptr;
+    return String();
   }
 
   /* First we pad on the left. */
@@ -433,27 +360,11 @@ char *string_pad(const char *input, int &len, int pad_length,
   for (int i = 0; i < right_pad; i++) {
     result[result_len++] = pad_string[i % pad_str_len];
   }
-  result[result_len] = '\0';
-
-  len = result_len;
-  return result;
+  ret.setSize(result_len);
+  return ret;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-
-char *string_substr(const char *s, int &len, int start, int length,
-                    bool nullable) {
-  assert(s);
-  if (string_substr_check(len, start, length)) {
-    len = length;
-    return string_duplicate(s + start, length);
-  }
-  len = 0;
-  if (nullable) {
-    return nullptr;
-  }
-  return string_duplicate("", 0);
-}
 
 int string_find(const char *input, int len, char ch, int pos,
                 bool case_sensitive) {
@@ -530,13 +441,13 @@ int string_rfind(const char *input, int len, const char *s, int s_len,
     if (pos >= 0) {
       ptr = bstrrstr(input + pos, len - pos, s, s_len);
     } else {
-      ptr = bstrrstr(input, len + pos + 1, s, s_len);
+      ptr = bstrrstr(input, len + pos + s_len, s, s_len);
     }
   } else {
     if (pos >= 0) {
       ptr = bstrrcasestr(input + pos, len - pos, s, s_len);
     } else {
-      ptr = bstrrcasestr(input, len + pos + 1, s, s_len);
+      ptr = bstrrcasestr(input, len + pos + s_len, s, s_len);
     }
   }
   if (ptr != nullptr) {
@@ -565,16 +476,43 @@ const char *string_memnstr(const char *haystack, const char *needle,
   return nullptr;
 }
 
-char *string_replace(const char *s, int &len, int start, int length,
-                     const char *replacement, int len_repl) {
+String string_replace(const char *s, int len, int start, int length,
+                      const char *replacement, int len_repl) {
   assert(s);
   assert(replacement);
-  if (!string_substr_check(len, start, length, false)) {
-    len = 0;
-    return string_duplicate("", 0);
+  assert(len >= 0);
+
+  // if "start" position is negative, count start position from the end
+  // of the string
+  if (start < 0) {
+    start = len + start;
+    if (start < 0) {
+      start = 0;
+    }
+  }
+  if (start > len) {
+    start = len;
+  }
+  // if "length" position is negative, set it to the length
+  // needed to stop that many chars from the end of the string
+  if (length < 0) {
+    length = (len - start) + length;
+    if (length < 0) {
+      length = 0;
+    }
+  }
+  // check if length is too large
+  if (length > len) {
+    length = len;
+  }
+  // check if the length is too large adjusting for non-zero start
+  // Write this way instead of start + length > len to avoid overflow
+  if (length > len - start) {
+    length = len - start;
   }
 
-  char *ret = (char *)malloc(len + len_repl - length + 1);
+  String retString(len + len_repl - length, ReserveString);
+  char *ret = retString.bufferSlice().ptr;
 
   int ret_len = 0;
   if (start) {
@@ -590,24 +528,25 @@ char *string_replace(const char *s, int &len, int start, int length,
     memcpy(ret + ret_len, s + start + length, len);
     ret_len += len;
   }
-
-  len = ret_len;
-  ret[ret_len] = '\0';
-  return ret;
+  retString.setSize(ret_len);
+  return retString;
 }
 
-char *string_replace(const char *input, int &len,
-                     const char *search, int len_search,
-                     const char *replacement, int len_replace,
-                     int &count, bool case_sensitive) {
+String string_replace(const char *input, int len,
+                      const char *search, int len_search,
+                      const char *replacement, int len_replace,
+                      int &count, bool case_sensitive) {
   assert(input);
   assert(search && len_search);
+  assert(len >= 0);
+  assert(len_search >= 0);
+  assert(len_replace >= 0);
 
   if (len == 0) {
-    return nullptr;
+    return String();
   }
 
-  std::vector<int> founds;
+  smart::vector<int> founds;
   founds.reserve(16);
   if (len_search == 1) {
     for (int pos = string_find(input, len, *search, 0, case_sensitive);
@@ -628,10 +567,29 @@ char *string_replace(const char *input, int &len,
 
   count = founds.size();
   if (count == 0) {
-    return nullptr; // not found
+    return String(); // not found
   }
 
-  char *ret = (char *)malloc(len + (len_replace - len_search) * count + 1);
+  int reserve;
+
+  // Make sure the new size of the string wouldn't overflow int32_t. Don't
+  // bother if the replacement wouldn't make the string longer.
+  if (len_replace > len_search) {
+    auto raise = [&] { raise_error("String too large"); };
+    if (mul_overflow(len_replace - len_search, count)) {
+      raise();
+    }
+    int diff = (len_replace - len_search) * count;
+    if (add_overflow(len, diff)) {
+      raise();
+    }
+    reserve = len + diff;
+  } else {
+    reserve = len + (len_replace - len_search) * count;
+  }
+
+  String retString(reserve, ReserveString);
+  char *ret = retString.bufferSlice().ptr;
   char *p = ret;
   int pos = 0; // last position in input that hasn't been copied over yet
   int n;
@@ -657,75 +615,26 @@ char *string_replace(const char *input, int &len,
     memcpy(p, input, n);
     p += n;
   }
-  *p = '\0';
-
-  len = p - ret;
-  return ret;
+  retString.setSize(p - ret);
+  return retString;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 
-char *string_reverse(const char *s, int len) {
-  assert(s);
-  char *n = (char *)malloc(len + 1);
-  char *p = n;
-  const char *e = s + len;
-
-  while (--e >= s) {
-    *p++ = *e;
-  }
-
-  *p = '\0';
-  return n;
-}
-
-char *string_repeat(const char *s, int &len, int count) {
-  assert(s);
-
-  if (len == 0 || count <= 0) {
-    return nullptr;
-  }
-
-  char *ret = (char *)malloc(len * count + 1);
-  if (len == 1) {
-    memset(ret, *s, count);
-    len = count;
-  } else {
-    char *p = ret;
-    for (int i = 0; i < count; i++) {
-      memcpy(p, s, len);
-      p += len;
-    }
-    len = p - ret;
-  }
-  ret[len] = '\0';
-  return ret;
-}
-
-char *string_shuffle(const char *str, int len) {
-  assert(str);
-  if (len <= 1) {
-    return nullptr;
-  }
-
-  char *ret = string_duplicate(str, len);
-  int n_left = len;
-  while (--n_left) {
-    int rnd_idx = rand() % n_left;
-    char temp = ret[n_left];
-    ret[n_left] = ret[rnd_idx];
-    ret[rnd_idx] = temp;
-  }
-  return ret;
-}
-
-char *string_chunk_split(const char *src, int &srclen, const char *end,
-                         int endlen, int chunklen) {
+String string_chunk_split(const char *src, int srclen, const char *end,
+                          int endlen, int chunklen) {
   int chunks = srclen / chunklen; // complete chunks!
   int restlen = srclen - chunks * chunklen; /* srclen % chunklen */
 
-  int out_len = (chunks + 1) * endlen + srclen + 1;
-  char *dest = (char *)malloc(out_len);
+  String ret(
+    safe_address(
+      chunks + 1,
+      endlen,
+      srclen
+    ),
+    ReserveString
+  );
+  char *dest = ret.bufferSlice().ptr;
 
   const char *p; char *q;
   const char *pMax = src + srclen - chunklen + 1;
@@ -744,9 +653,8 @@ char *string_chunk_split(const char *src, int &srclen, const char *end,
     q += endlen;
   }
 
-  *q = '\0';
-  srclen = q - dest;
-  return(dest);
+  ret.setSize(q - dest);
+  return ret;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -761,7 +669,7 @@ char *string_chunk_split(const char *src, int &srclen, const char *end,
  * 0 start tag
  * 1 first non-whitespace char seen
  */
-static int string_tag_find(const char *tag, int len, char *set) {
+static int string_tag_find(const char *tag, int len, const char *set) {
   char c, *n;
   const char *t;
   int state=0, done=0;
@@ -771,7 +679,7 @@ static int string_tag_find(const char *tag, int len, char *set) {
     return 0;
   }
 
-  norm = (char *)malloc(len+1);
+  norm = (char *)smart_malloc(len+1);
 
   n = norm;
   t = tag;
@@ -812,7 +720,7 @@ static int string_tag_find(const char *tag, int len, char *set) {
   } else {
     done=0;
   }
-  free(norm);
+  smart_free(norm);
   return done;
 }
 
@@ -835,36 +743,49 @@ static int string_tag_find(const char *tag, int len, char *set) {
  * swm: Added ability to strip <?xml tags without assuming it PHP
  * code.
  */
-static size_t strip_tags_impl(char *rbuf, int len, int *stateptr,
-                              char *allow, int allow_len,
-                              bool allow_tag_spaces) {
-  char *tbuf, *buf, *p, *tp, *rp, c, lc;
+String string_strip_tags(const char *s, const int len,
+                         const char *allow, const int allow_len,
+                         bool allow_tag_spaces) {
+  const char *abuf, *p;
+  char *rbuf, *tbuf, *tp, *rp, c, lc;
+
   int br, i=0, depth=0, in_q = 0;
   int state = 0, pos;
 
-  if (stateptr)
-    state = *stateptr;
+  assert(s);
+  assert(allow);
 
-  buf = string_duplicate(rbuf, len);
-  c = *buf;
+  String retString(s, len, CopyString);
+  rbuf = retString.bufferSlice().ptr;
+  String allowString;
+
+  c = *s;
   lc = '\0';
-  p = buf;
+  p = s;
   rp = rbuf;
   br = 0;
-  if (allow) {
-    for (char *tmp = allow; *tmp; tmp++) {
-      *tmp = tolower((int)*(unsigned char *)tmp);
+  if (allow_len) {
+    assert(allow);
+
+    allowString = String(allow_len, ReserveString);
+    char *atmp = allowString.bufferSlice().ptr;
+    for (const char *tmp = allow; *tmp; tmp++, atmp++) {
+      *atmp = tolower((int)*(const unsigned char *)tmp);
     }
-    tbuf = (char *)malloc(PHP_TAG_BUF_SIZE+1);
+    allowString.setSize(allow_len);
+    abuf = allowString.data();
+
+    tbuf = (char *)smart_malloc(PHP_TAG_BUF_SIZE+1);
     tp = tbuf;
   } else {
+    abuf = nullptr;
     tbuf = tp = nullptr;
   }
 
   auto move = [&pos, &tbuf, &tp]() {
     if (tp - tbuf >= PHP_TAG_BUF_SIZE) {
       pos = tp - tbuf;
-      tbuf = (char*)realloc(tbuf, (tp - tbuf) + PHP_TAG_BUF_SIZE + 1);
+      tbuf = (char*)smart_realloc(tbuf, (tp - tbuf) + PHP_TAG_BUF_SIZE + 1);
       tp = tbuf + pos;
     }
   };
@@ -880,7 +801,7 @@ static size_t strip_tags_impl(char *rbuf, int len, int *stateptr,
       if (state == 0) {
         lc = '<';
         state = 1;
-        if (allow) {
+        if (allow_len) {
           move();
           *(tp++) = '<';
         }
@@ -895,7 +816,7 @@ static size_t strip_tags_impl(char *rbuf, int len, int *stateptr,
           lc = '(';
           br++;
         }
-      } else if (allow && state == 1) {
+      } else if (allow_len && state == 1) {
         move();
         *(tp++) = c;
       } else if (state == 0) {
@@ -909,7 +830,7 @@ static size_t strip_tags_impl(char *rbuf, int len, int *stateptr,
           lc = ')';
           br--;
         }
-      } else if (allow && state == 1) {
+      } else if (allow_len && state == 1) {
         move();
         *(tp++) = c;
       } else if (state == 0) {
@@ -931,11 +852,11 @@ static size_t strip_tags_impl(char *rbuf, int len, int *stateptr,
       case 1: /* HTML/XML */
         lc = '>';
         in_q = state = 0;
-        if (allow) {
+        if (allow_len) {
           move();
           *(tp++) = '>';
           *tp='\0';
-          if (string_tag_find(tbuf, tp-tbuf, allow)) {
+          if (string_tag_find(tbuf, tp-tbuf, abuf)) {
             memcpy(rp, tbuf, tp-tbuf);
             rp += tp-tbuf;
           }
@@ -956,7 +877,7 @@ static size_t strip_tags_impl(char *rbuf, int len, int *stateptr,
         break;
 
       case 4: /* JavaScript/CSS/etc... */
-        if (p >= buf + 2 && *(p-1) == '-' && *(p-2) == '-') {
+        if (p >= s + 2 && *(p-1) == '-' && *(p-2) == '-') {
           in_q = state = 0;
           tp = tbuf;
         }
@@ -981,11 +902,11 @@ static size_t strip_tags_impl(char *rbuf, int len, int *stateptr,
         }
       } else if (state == 0) {
         *(rp++) = c;
-      } else if (allow && state == 1) {
+      } else if (allow_len && state == 1) {
         move();
         *(tp++) = c;
       }
-      if (state && p != buf && *(p-1) != '\\' && (!in_q || *p == in_q)) {
+      if (state && p != s && *(p-1) != '\\' && (!in_q || *p == in_q)) {
         if (in_q) {
           in_q = 0;
         } else {
@@ -1002,7 +923,7 @@ static size_t strip_tags_impl(char *rbuf, int len, int *stateptr,
       } else {
         if (state == 0) {
           *(rp++) = c;
-        } else if (allow && state == 1) {
+        } else if (allow_len && state == 1) {
           move();
           *(tp++) = c;
         }
@@ -1010,7 +931,7 @@ static size_t strip_tags_impl(char *rbuf, int len, int *stateptr,
       break;
 
     case '-':
-      if (state == 3 && p >= buf + 2 && *(p-1) == '-' && *(p-2) == '!') {
+      if (state == 3 && p >= s + 2 && *(p-1) == '-' && *(p-2) == '!') {
         state = 4;
       } else {
         goto reg_char;
@@ -1028,7 +949,7 @@ static size_t strip_tags_impl(char *rbuf, int len, int *stateptr,
     case 'E':
     case 'e':
       /* !DOCTYPE exception */
-      if (state==3 && p > buf+6
+      if (state==3 && p > s+6
           && tolower(*(p-1)) == 'p'
           && tolower(*(p-2)) == 'y'
           && tolower(*(p-3)) == 't'
@@ -1046,7 +967,7 @@ static size_t strip_tags_impl(char *rbuf, int len, int *stateptr,
        * state == 2 (PHP). Switch back to HTML.
        */
 
-      if (state == 2 && p > buf+2 && *(p-1) == 'm' && *(p-2) == 'x') {
+      if (state == 2 && p > s+2 && *(p-1) == 'm' && *(p-2) == 'x') {
         state = 1;
         break;
       }
@@ -1056,7 +977,7 @@ static size_t strip_tags_impl(char *rbuf, int len, int *stateptr,
     reg_char:
       if (state == 0) {
         *(rp++) = c;
-      } else if (allow && state == 1) {
+      } else if (allow_len && state == 1) {
         move();
         *(tp++) = c;
       }
@@ -1068,271 +989,24 @@ static size_t strip_tags_impl(char *rbuf, int len, int *stateptr,
   if (rp < rbuf + len) {
     *rp = '\0';
   }
-  free(buf);
-  if (allow)
-    free(tbuf);
-  if (stateptr)
-    *stateptr = state;
+  if (allow_len) {
+    smart_free(tbuf);
+  }
 
-  return (size_t)(rp - rbuf);
-}
-
-char *string_strip_tags(const char *s, int &len, const char *allow,
-                        int allow_len, bool allow_tag_spaces) {
-  assert(s);
-  assert(allow);
-
-  char *ret = string_duplicate(s, len);
-  char *sallow = string_duplicate(allow, allow_len);
-  len = strip_tags_impl(ret, len, nullptr, sallow, allow_len, allow_tag_spaces);
-  free(sallow);
-  return ret;
+  retString.setSize(rp - rbuf);
+  return retString;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 
-char *string_wordwrap(const char *text, int &textlen, int linelength,
-                      const char *breakchar, int breakcharlen, bool docut) {
-  assert(text);
-  assert(breakchar);
-
-  char *newtext;
-  int newtextlen, chk;
-  size_t alloced;
-  long current = 0, laststart = 0, lastspace = 0;
-
-  if (textlen == 0) {
-    return strdup("");
-  }
-
-  if (breakcharlen == 0) {
-    throw_invalid_argument("wordbreak: (empty)");
-    return nullptr;
-  }
-
-  if (linelength == 0 && docut) {
-    throw_invalid_argument("width: can't force cut when width = 0");
-    return nullptr;
-  }
-
-  /* Special case for a single-character break as it needs no
-     additional storage space */
-  if (breakcharlen == 1 && !docut) {
-    newtext = string_duplicate(text, textlen);
-
-    laststart = lastspace = 0;
-    for (current = 0; current < textlen; current++) {
-      if (text[current] == breakchar[0]) {
-        laststart = lastspace = current;
-      } else if (text[current] == ' ') {
-        if (current - laststart >= linelength) {
-          newtext[current] = breakchar[0];
-          laststart = current + 1;
-        }
-        lastspace = current;
-      } else if (current - laststart >= linelength && laststart != lastspace) {
-        newtext[lastspace] = breakchar[0];
-        laststart = lastspace + 1;
-      }
-    }
-
-    return newtext;
-  }
-
-  /* Multiple character line break or forced cut */
-  if (linelength > 0) {
-    chk = (int)(textlen/linelength + 1);
-    alloced = textlen + chk * breakcharlen + 1;
-  } else {
-    chk = textlen;
-    alloced = textlen * (breakcharlen + 1) + 1;
-  }
-  newtext = (char *)malloc(alloced);
-
-  /* now keep track of the actual new text length */
-  newtextlen = 0;
-
-  laststart = lastspace = 0;
-  for (current = 0; current < textlen; current++) {
-    if (chk <= 0) {
-      alloced += (int) (((textlen - current + 1)/linelength + 1) *
-                        breakcharlen) + 1;
-      newtext = (char *)realloc(newtext, alloced);
-      chk = (int) ((textlen - current)/linelength) + 1;
-    }
-    /* when we hit an existing break, copy to new buffer, and
-     * fix up laststart and lastspace */
-    if (text[current] == breakchar[0]
-        && current + breakcharlen < textlen
-        && !strncmp(text+current, breakchar, breakcharlen)) {
-      memcpy(newtext+newtextlen, text+laststart,
-             current-laststart+breakcharlen);
-      newtextlen += current-laststart+breakcharlen;
-      current += breakcharlen - 1;
-      laststart = lastspace = current + 1;
-      chk--;
-    }
-    /* if it is a space, check if it is at the line boundary,
-     * copy and insert a break, or just keep track of it */
-    else if (text[current] == ' ') {
-      if (current - laststart >= linelength) {
-        memcpy(newtext+newtextlen, text+laststart, current-laststart);
-        newtextlen += current - laststart;
-        memcpy(newtext+newtextlen, breakchar, breakcharlen);
-        newtextlen += breakcharlen;
-        laststart = current + 1;
-        chk--;
-      }
-      lastspace = current;
-    }
-    /* if we are cutting, and we've accumulated enough
-     * characters, and we haven't see a space for this line,
-     * copy and insert a break. */
-    else if (current - laststart >= linelength
-             && docut && laststart >= lastspace) {
-      memcpy(newtext+newtextlen, text+laststart, current-laststart);
-      newtextlen += current - laststart;
-      memcpy(newtext+newtextlen, breakchar, breakcharlen);
-      newtextlen += breakcharlen;
-      laststart = lastspace = current;
-      chk--;
-    }
-    /* if the current word puts us over the linelength, copy
-     * back up until the last space, insert a break, and move
-     * up the laststart */
-    else if (current - laststart >= linelength
-             && laststart < lastspace) {
-      memcpy(newtext+newtextlen, text+laststart, lastspace-laststart);
-      newtextlen += lastspace - laststart;
-      memcpy(newtext+newtextlen, breakchar, breakcharlen);
-      newtextlen += breakcharlen;
-      laststart = lastspace = lastspace + 1;
-      chk--;
-    }
-  }
-
-  /* copy over any stragglers */
-  if (laststart != current) {
-    memcpy(newtext+newtextlen, text+laststart, current-laststart);
-    newtextlen += current - laststart;
-  }
-
-  textlen = newtextlen;
-  newtext[newtextlen] = '\0';
-  return newtext;
-}
-
-///////////////////////////////////////////////////////////////////////////////
-
-char *string_addcslashes(const char *str, int &length, const char *what,
-                         int wlength) {
-  assert(str);
-  assert(what);
-
-  char flags[256];
-  string_charmask(what, wlength, flags);
-
-  char *new_str = (char *)malloc((length << 2) + 1);
-  const char *source;
-  const char *end;
-  char *target;
-  for (source = str, end = source + length, target = new_str; source < end;
-       source++) {
-    char c = *source;
-    if (flags[(unsigned char)c]) {
-      if ((unsigned char) c < 32 || (unsigned char) c > 126) {
-        *target++ = '\\';
-        switch (c) {
-        case '\n': *target++ = 'n'; break;
-        case '\t': *target++ = 't'; break;
-        case '\r': *target++ = 'r'; break;
-        case '\a': *target++ = 'a'; break;
-        case '\v': *target++ = 'v'; break;
-        case '\b': *target++ = 'b'; break;
-        case '\f': *target++ = 'f'; break;
-        default: target += sprintf(target, "%03o", (unsigned char) c);
-        }
-        continue;
-      }
-      *target++ = '\\';
-    }
-    *target++ = c;
-  }
-  *target = 0;
-  length = target - new_str;
-  return new_str;
-}
-
-char *string_stripcslashes(const char *input, int &nlen) {
-  assert(input);
-  if (nlen == 0) {
-    return nullptr;
-  }
-
-  char *str = string_duplicate(input, nlen);
-
-  char *source, *target, *end;
-  int i;
-  char numtmp[4];
-
-  for (source=str, end=str+nlen, target=str; source < end; source++) {
-    if (*source == '\\' && source+1 < end) {
-      source++;
-      switch (*source) {
-      case 'n':  *target++='\n'; nlen--; break;
-      case 'r':  *target++='\r'; nlen--; break;
-      case 'a':  *target++='\a'; nlen--; break;
-      case 't':  *target++='\t'; nlen--; break;
-      case 'v':  *target++='\v'; nlen--; break;
-      case 'b':  *target++='\b'; nlen--; break;
-      case 'f':  *target++='\f'; nlen--; break;
-      case '\\': *target++='\\'; nlen--; break;
-      case 'x':
-        if (source+1 < end && isxdigit((int)(*(source+1)))) {
-          numtmp[0] = *++source;
-          if (source+1 < end && isxdigit((int)(*(source+1)))) {
-            numtmp[1] = *++source;
-            numtmp[2] = '\0';
-            nlen-=3;
-          } else {
-            numtmp[1] = '\0';
-            nlen-=2;
-          }
-          *target++=(char)strtol(numtmp, nullptr, 16);
-          break;
-        }
-        /* break is left intentionally */
-      default:
-        i=0;
-        while (source < end && *source >= '0' && *source <= '7' && i<3) {
-          numtmp[i++] = *source++;
-        }
-        if (i) {
-          numtmp[i]='\0';
-          *target++=(char)strtol(numtmp, nullptr, 8);
-          nlen-=i;
-          source--;
-        } else {
-          *target++=*source;
-          nlen--;
-        }
-      }
-    } else {
-      *target++=*source;
-    }
-  }
-  *target='\0';
-  nlen = target - str;
-  return str;
-}
-
-char *string_addslashes(const char *str, int &length) {
+String string_addslashes(const char *str, int length) {
   assert(str);
   if (length == 0) {
-    return nullptr;
+    return String();
   }
 
-  char *new_str = (char *)malloc((length << 1) + 1);
+  String retString((length << 1) + 1, ReserveString);
+  char *new_str = retString.bufferSlice().ptr;
   const char *source = str;
   const char *end = source + length;
   char *target = new_str;
@@ -1356,78 +1030,8 @@ char *string_addslashes(const char *str, int &length) {
     source++;
   }
 
-  *target = 0;
-  length = target - new_str;
-  return new_str;
-}
-
-char *string_stripslashes(const char *input, int &l) {
-  assert(input);
-  if (!*input) {
-    return nullptr;
-  }
-
-  char *str = string_duplicate(input, l);
-  char *s, *t;
-  s = str;
-  t = str;
-
-  while (l > 0) {
-    if (*t == '\\') {
-      t++;        /* skip the slash */
-      l--;
-      if (l > 0) {
-        if (*t == '0') {
-          *s++='\0';
-          t++;
-        } else {
-          *s++ = *t++;  /* preserve the next character */
-        }
-        l--;
-      }
-    } else {
-      *s++ = *t++;
-      l--;
-    }
-  }
-  if (s != t) {
-    *s = '\0';
-  }
-  l = s - str;
-  return str;
-}
-
-char *string_quotemeta(const char *input, int &len) {
-  assert(input);
-  if (len == 0) {
-    return nullptr;
-  }
-
-  char *ret = (char *)malloc((len << 1) + 1);
-  char *q = ret;
-  for (const char *p = input; *p; p++) {
-    char c = *p;
-    switch (c) {
-    case '.':
-    case '\\':
-    case '+':
-    case '*':
-    case '?':
-    case '[':
-    case '^':
-    case ']':
-    case '$':
-    case '(':
-    case ')':
-      *q++ = '\\';
-      /* break is missing _intentionally_ */
-    default:
-      *q++ = c;
-    }
-  }
-  *q = 0;
-  len = q - ret;
-  return ret;
+  retString.setSize(target - new_str);
+  return retString;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1445,26 +1049,37 @@ static char string_hex2int(int c) {
   return -1;
 }
 
-char *string_quoted_printable_encode(const char *input, int &len) {
-  const char *hex = "0123456789ABCDEF";
+String string_quoted_printable_encode(const char *input, int len) {
+  size_t length = len;
+  const unsigned char *str = (unsigned char*)input;
 
-  unsigned char *ret =
-    (unsigned char *)malloc(3 * len + 3 * (((3 * len)/PHP_QPRINT_MAXL) + 1));
-  unsigned char *d = ret;
-
-  int length = len;
-  unsigned char c;
   unsigned long lp = 0;
+  unsigned char c;
+  char *d, *buffer;
+  char *hex = "0123456789ABCDEF";
+
+  String ret(
+    safe_address(
+      3,
+      length + ((safe_address(3, length, 0)/(PHP_QPRINT_MAXL-9)) + 1),
+      1),
+    ReserveString
+  );
+  d = buffer = ret.bufferSlice().ptr;
+
   while (length--) {
-    if (((c = *input++) == '\015') && (*input == '\012') && length > 0) {
+    if (((c = *str++) == '\015') && (*str == '\012') && length > 0) {
       *d++ = '\015';
-      *d++ = *input++;
+      *d++ = *str++;
       length--;
       lp = 0;
     } else {
-      if (iscntrl (c) || (c == 0x7f) || (c & 0x80) || (c == '=') ||
-          ((c == ' ') && (*input == '\015'))) {
-        if ((lp += 3) > PHP_QPRINT_MAXL) {
+      if (iscntrl (c) || (c == 0x7f) || (c & 0x80) ||
+          (c == '=') || ((c == ' ') && (*str == '\015'))) {
+        if ((((lp+= 3) > PHP_QPRINT_MAXL) && (c <= 0x7f))
+            || ((c > 0x7f) && (c <= 0xdf) && ((lp + 3) > PHP_QPRINT_MAXL))
+            || ((c > 0xdf) && (c <= 0xef) && ((lp + 6) > PHP_QPRINT_MAXL))
+            || ((c > 0xef) && (c <= 0xf4) && ((lp + 9) > PHP_QPRINT_MAXL))) {
           *d++ = '=';
           *d++ = '\015';
           *d++ = '\012';
@@ -1484,20 +1099,22 @@ char *string_quoted_printable_encode(const char *input, int &len) {
       }
     }
   }
-  *d = '\0';
-  len = d - ret;
-  return (char*)ret;
+  len = d - buffer;
+
+  ret.setSize(len);
+  return ret;
 }
 
-char *string_quoted_printable_decode(const char *input, int &len, bool is_q) {
+String string_quoted_printable_decode(const char *input, int len, bool is_q) {
   assert(input);
   if (len == 0) {
-    return nullptr;
+    return String();
   }
 
   int i = 0, j = 0, k;
   const char *str_in = input;
-  char *str_out = (char *)malloc(len + 1);
+  String ret(len, ReserveString);
+  char *str_out = ret.bufferSlice().ptr;
   while (i < len && str_in[i]) {
     switch (str_in[i]) {
     case '=':
@@ -1543,44 +1160,8 @@ char *string_quoted_printable_decode(const char *input, int &len, bool is_q) {
       str_out[j++] = str_in[i++];
     }
   }
-  str_out[j] = '\0';
-  len = j;
-  return str_out;
-}
-
-char *string_hex2bin(const char *input, int &len) {
-  if (len % 2 != 0) {
-    throw InvalidArgumentException("hex2bin: odd length input");
-  }
-  len >>= 1;
-  char *str = (char *)malloc(len + 1);
-  int i, j;
-  for (i = j = 0; i < len; i++) {
-    char c = input[j++];
-    if (c >= '0' && c <= '9') {
-      str[i] = (c - '0') << 4;
-    } else if (c >= 'a' && c <= 'f') {
-      str[i] = (c - 'a' + 10) << 4;
-    } else if (c >= 'A' && c <= 'F') {
-      str[i] = (c - 'A' + 10) << 4;
-    } else {
-      free(str);
-      throw InvalidArgumentException("bad encoding at position", j);
-    }
-    c = input[j++];
-    if (c >= '0' && c <= '9') {
-      str[i] |= c - '0';
-    } else if (c >= 'a' && c <= 'f') {
-      str[i] |= c - 'a' + 10;
-    } else if (c >= 'A' && c <= 'F') {
-      str[i] |= c - 'A' + 10;
-    } else {
-      free(str);
-      throw InvalidArgumentException("bad encoding at position", j);
-    }
-  }
-  str[len] = '\0';
-  return str;
+  ret.setSize(j);
+  return ret;
 }
 
 Variant string_base_to_numeric(const char *s, int len, int base) {
@@ -1632,7 +1213,7 @@ Variant string_base_to_numeric(const char *s, int len, int base) {
   return num;
 }
 
-char *string_long_to_base(unsigned long value, int base) {
+String string_long_to_base(unsigned long value, int base) {
   static char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
   char buf[(sizeof(unsigned long) << 3) + 1];
   char *ptr, *end;
@@ -1640,22 +1221,21 @@ char *string_long_to_base(unsigned long value, int base) {
   assert(string_validate_base(base));
 
   end = ptr = buf + sizeof(buf) - 1;
-  *ptr = '\0';
 
   do {
     *--ptr = digits[value % base];
     value /= base;
   } while (ptr > buf && value);
 
-  return string_duplicate(ptr, end - ptr);
+  return String(ptr, end - ptr, CopyString);
 }
 
-char *string_numeric_to_base(CVarRef value, int base) {
+String string_numeric_to_base(const Variant& value, int base) {
   static char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
 
   assert(string_validate_base(base));
   if ((!value.isInteger() && !value.isDouble())) {
-    return string_duplicate("", 0);
+    return empty_string();
   }
 
   if (value.isDouble()) {
@@ -1666,18 +1246,17 @@ char *string_numeric_to_base(CVarRef value, int base) {
     /* Don't try to convert +/- infinity */
     if (fvalue == HUGE_VAL || fvalue == -HUGE_VAL) {
       raise_warning("Number too large");
-      return string_duplicate("", 0);
+      return empty_string();
     }
 
     end = ptr = buf + sizeof(buf) - 1;
-    *ptr = '\0';
 
     do {
       *--ptr = digits[(int) fmod(fvalue, base)];
       fvalue /= base;
     } while (ptr > buf && fabs(fvalue) >= 1);
 
-    return string_duplicate(ptr, end - ptr);
+    return String(ptr, end - ptr, CopyString);
   }
 
   return string_long_to_base(value.toInt64(), base);
@@ -1695,7 +1274,7 @@ char *string_numeric_to_base(CVarRef value, int base) {
 #define PHP_UU_DEC(c) \
   (((c) - ' ') & 077)
 
-char *string_uuencode(const char *src, int src_len, int &dest_len) {
+String string_uuencode(const char *src, int src_len) {
   assert(src);
   assert(src_len);
 
@@ -1705,7 +1284,8 @@ char *string_uuencode(const char *src, int src_len, int &dest_len) {
   char *dest;
 
   /* encoded length is ~ 38% greater then the original */
-  p = dest = (char *)malloc((int)ceil(src_len * 1.38) + 46);
+  String ret((int)ceil(src_len * 1.38) + 45, ReserveString);
+  p = dest = ret.bufferSlice().ptr;
   s = src;
   e = src + src_len;
 
@@ -1754,17 +1334,18 @@ char *string_uuencode(const char *src, int src_len, int &dest_len) {
   *p++ = '\n';
   *p = '\0';
 
-  dest_len = p - dest;
-  return dest;
+  ret.setSize(p - dest);
+  return ret;
 }
 
-char *string_uudecode(const char *src, int src_len, int &total_len) {
-  total_len = 0;
+String string_uudecode(const char *src, int src_len) {
+  int total_len = 0;
   int len;
   const char *s, *e, *ee;
   char *p, *dest;
 
-  p = dest = (char *)malloc((int)ceil(src_len * 0.75) + 1);
+  String ret(ceil(src_len * 0.75), ReserveString);
+  p = dest = ret.bufferSlice().ptr;
   s = src;
   e = src + src_len;
 
@@ -1786,6 +1367,8 @@ char *string_uudecode(const char *src, int src_len, int &total_len) {
     }
 
     while (s < ee) {
+      if (s + 4 > e) goto err;
+
       *p++ = PHP_UU_DEC(*s) << 2 | PHP_UU_DEC(*(s + 1)) >> 4;
       *p++ = PHP_UU_DEC(*(s + 1)) << 4 | PHP_UU_DEC(*(s + 2)) >> 2;
       *p++ = PHP_UU_DEC(*(s + 2)) << 6 | PHP_UU_DEC(*(s + 3));
@@ -1810,13 +1393,11 @@ char *string_uudecode(const char *src, int src_len, int &total_len) {
     }
   }
 
-  *(dest + total_len) = '\0';
-
-  return dest;
+  ret.setSize(total_len);
+  return ret;
 
  err:
-  free(dest);
-  return nullptr;
+  return String();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1851,21 +1432,17 @@ static const short base64_reverse_table[256] = {
   -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2
 };
 
-static unsigned char *php_base64_encode(const unsigned char *str, int length,
-                                        int *ret_length) {
+static String php_base64_encode(const unsigned char *str, int length) {
   const unsigned char *current = str;
   unsigned char *p;
   unsigned char *result;
 
   if ((length + 2) < 0 || ((length + 2) / 3) >= (1 << (sizeof(int) * 8 - 2))) {
-    if (ret_length != nullptr) {
-      *ret_length = 0;
-    }
-    return nullptr;
+    return String();
   }
 
-  result = (unsigned char *)malloc(((length + 2) / 3) * 4 + 1);
-  p = result;
+  String ret(((length + 2) / 3) * 4, ReserveString);
+  p = result = (unsigned char *)ret.bufferSlice().ptr;
 
   while (length > 2) { /* keep going until we have less than 24 bits */
     *p++ = base64_table[current[0] >> 2];
@@ -1890,22 +1467,17 @@ static unsigned char *php_base64_encode(const unsigned char *str, int length,
       *p++ = base64_pad;
     }
   }
-  if (ret_length != nullptr) {
-    *ret_length = (int)(p - result);
-  }
-  *p = '\0';
-  return result;
+  ret.setSize(p - result);
+  return ret;
 }
 
-static unsigned char *php_base64_decode(const unsigned char *str,
-                                        int length, int *ret_length,
-                                        bool strict) {
-  const unsigned char *current = str;
+static String php_base64_decode(const char *str, int length, bool strict) {
+  const unsigned char *current = (unsigned char*)str;
   int ch, i = 0, j = 0, k;
   /* this sucks for threaded environments */
-  unsigned char *result;
 
-  result = (unsigned char *)malloc(length + 1);
+  String retString(length, ReserveString);
+  unsigned char* result = (unsigned char*)retString.bufferSlice().ptr;
 
   /* run through the whole string, converting as we go */
   while ((ch = *current++) != '\0' && length-- > 0) {
@@ -1919,8 +1491,7 @@ static unsigned char *php_base64_decode(const unsigned char *str,
             continue;
           }
         }
-        free(result);
-        return nullptr;
+        return String();
       }
       continue;
     }
@@ -1930,8 +1501,7 @@ static unsigned char *php_base64_decode(const unsigned char *str,
       /* a space or some other separator character, we simply skip over */
       continue;
     } else if (ch == -2) {
-      free(result);
-      return nullptr;
+      return String();
     }
 
     switch(i % 4) {
@@ -1958,39 +1528,36 @@ static unsigned char *php_base64_decode(const unsigned char *str,
   if (ch == base64_pad) {
     switch(i % 4) {
     case 1:
-      free(result);
-      return nullptr;
+      return String();
     case 2:
       k++;
     case 3:
       result[k] = 0;
     }
   }
-  if(ret_length) {
-    *ret_length = j;
-  }
-  result[j] = '\0';
-  return result;
+  retString.setSize(j);
+  return retString;
 }
 
-char *string_base64_encode(const char *input, int &len) {
-  return (char *)php_base64_encode((unsigned char *)input, len, &len);
+String string_base64_encode(const char *input, int len) {
+  return php_base64_encode((unsigned char *)input, len);
 }
 
-char *string_base64_decode(const char *input, int &len, bool strict) {
-  return (char *)php_base64_decode((unsigned char *)input, len, &len, strict);
+String string_base64_decode(const char *input, int len, bool strict) {
+  return php_base64_decode(input, len, strict);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 
-char *string_escape_shell_arg(const char *str) {
+String string_escape_shell_arg(const char *str) {
   int x, y, l;
   char *cmd;
 
   y = 0;
   l = strlen(str);
 
-  cmd = (char *)malloc((l << 2) + 3); /* worst case */
+  String ret(safe_address(l, 4, 3), ReserveString); /* worst case */
+  cmd = ret.bufferSlice().ptr;
 
   cmd[y++] = '\'';
 
@@ -2006,17 +1573,18 @@ char *string_escape_shell_arg(const char *str) {
     }
   }
   cmd[y++] = '\'';
-  cmd[y] = '\0';
-  return cmd;
+  ret.setSize(y);
+  return ret;
 }
 
-char *string_escape_shell_cmd(const char *str) {
+String string_escape_shell_cmd(const char *str) {
   register int x, y, l;
   char *cmd;
   char *p = nullptr;
 
   l = strlen(str);
-  cmd = (char *)malloc((l << 1) + 1);
+  String ret(safe_address(l, 2, 1), ReserveString);
+  cmd = ret.bufferSlice().ptr;
 
   for (x = 0, y = 0; x < l; x++) {
     switch (str[x]) {
@@ -2058,40 +1626,8 @@ char *string_escape_shell_cmd(const char *str) {
       cmd[y++] = str[x];
     }
   }
-  cmd[y] = '\0';
-  return cmd;
-}
-
-std::string string_cplus_escape(const char *s, int len)
-{
-  std::string sb;
-  static const char digits[] = "01234567";
-
-  for (int i = 0; i < len; i++) {
-    unsigned char uc = *s++;
-    switch (uc) {
-      case '"':  sb.append("\\\"", 2); break;
-      case '\\': sb.append("\\\\", 2); break;
-      case '\b': sb.append("\\b", 2);  break;
-      case '\f': sb.append("\\f", 2);  break;
-      case '\n': sb.append("\\n", 2);  break;
-      case '\r': sb.append("\\r", 2);  break;
-      case '\t': sb.append("\\t", 2);  break;
-      case '?':  sb.append("\\?", 2);  break;
-      default:
-        if (uc >= ' ' && (uc & 127) == uc) {
-          sb += (char) uc;
-        } else {
-          sb += '\\';
-          sb += digits[(uc >> 6) & 7];
-          sb += digits[(uc >> 3) & 7];
-          sb += digits[(uc >> 0) & 7];
-        }
-        break;
-    }
-  }
-
-  return sb;
+  ret.setSize(y);
+  return ret;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -2158,16 +1694,16 @@ int string_levenshtein(const char *s1, int l1, const char *s2, int l2,
   int *p1, *p2, *tmp;
   int i1, i2, c0, c1, c2;
 
-  if(l1==0) return l2*cost_ins;
-  if(l2==0) return l1*cost_del;
+  if (l1==0) return l2*cost_ins;
+  if (l2==0) return l1*cost_del;
 
-  if((l1>LEVENSHTEIN_MAX_LENTH)||(l2>LEVENSHTEIN_MAX_LENTH)) {
+  if ((l1>LEVENSHTEIN_MAX_LENTH)||(l2>LEVENSHTEIN_MAX_LENTH)) {
     raise_warning("levenshtein(): Argument string(s) too long");
     return -1;
   }
 
-  p1 = (int*)malloc((l2+1) * sizeof(int));
-  p2 = (int*)malloc((l2+1) * sizeof(int));
+  p1 = (int*)smart_malloc((l2+1) * sizeof(int));
+  p2 = (int*)smart_malloc((l2+1) * sizeof(int));
 
   for(i2=0;i2<=l2;i2++) {
     p1[i2] = i2*cost_ins;
@@ -2177,22 +1713,22 @@ int string_levenshtein(const char *s1, int l1, const char *s2, int l2,
     p2[0]=p1[0]+cost_del;
     for(i2=0;i2<l2;i2++) {
       c0=p1[i2]+((s1[i1]==s2[i2])?0:cost_rep);
-      c1=p1[i2+1]+cost_del; if(c1<c0) c0=c1;
-      c2=p2[i2]+cost_ins; if(c2<c0) c0=c2;
+      c1=p1[i2+1]+cost_del; if (c1<c0) c0=c1;
+      c2=p2[i2]+cost_ins; if (c2<c0) c0=c2;
       p2[i2+1]=c0;
     }
     tmp=p1; p1=p2; p2=tmp;
   }
 
   c0=p1[l2];
-  free(p1);
-  free(p2);
+  smart_free(p1);
+  smart_free(p2);
   return c0;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 
-char *string_money_format(const char *format, double value) {
+String string_money_format(const char *format, double value) {
   bool check = false;
   const char *p = format;
   while ((p = strchr(p, '%'))) {
@@ -2204,25 +1740,26 @@ char *string_money_format(const char *format, double value) {
     } else {
       throw_invalid_argument
         ("format: Only a single %%i or %%n token can be used");
-      return nullptr;
+      return String();
     }
   }
 
   int format_len = strlen(format);
-  int str_len = format_len + 1024;
-  char *str = (char *)malloc(str_len);
+  int str_len = safe_address(format_len, 1, 1024);
+  String ret(str_len, ReserveString);
+  char *str = ret.bufferSlice().ptr;
   if ((str_len = strfmon(str, str_len, format, value)) < 0) {
-    free(str);
-    return nullptr;
+    return String();
   }
-  str[str_len] = 0;
-  return str;
+  ret.setSize(str_len);
+  return ret;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 
-char *string_number_format(double d, int dec, char dec_point,
-                           char thousand_sep) {
+String string_number_format(double d, int dec,
+                            const String& dec_point,
+                            const String& thousand_sep) {
   char *tmpbuf = nullptr, *resbuf;
   char *s, *t;  /* source, target */
   char *dp;
@@ -2240,11 +1777,22 @@ char *string_number_format(double d, int dec, char dec_point,
   d = php_math_round(d, dec);
 
   // departure from PHP: we got rid of dependencies on spprintf() here.
-  tmpbuf = (char *)malloc(64);
-  snprintf(tmpbuf, 64, "%.*F", dec, d);
-  tmplen = strlen(tmpbuf);
+  String tmpstr(63, ReserveString);
+  tmpbuf = tmpstr.bufferSlice().ptr;
+  tmplen = snprintf(tmpbuf, 64, "%.*F", dec, d);
   if (tmpbuf == nullptr || !isdigit((int)tmpbuf[0])) {
-    return tmpbuf;
+    tmpstr.setSize(tmplen);
+    return tmpstr;
+  }
+  if (tmplen >= 64) {
+    // Uncommon, asked for more than 64 chars worth of precision
+    tmpstr = String(tmplen, ReserveString);
+    tmpbuf = tmpstr.bufferSlice().ptr;
+    tmplen = snprintf(tmpbuf, tmplen + 1, "%.*F", dec, d);
+    if (tmpbuf == nullptr || !isdigit((int)tmpbuf[0])) {
+      tmpstr.setSize(tmplen);
+      return tmpstr;
+    }
   }
 
   /* find decimal point, if expected */
@@ -2263,8 +1811,8 @@ char *string_number_format(double d, int dec, char dec_point,
   }
 
   /* allow for thousand separators */
-  if (thousand_sep) {
-    integral += (integral-1) / 3;
+  if (!thousand_sep.empty()) {
+    integral += ((integral-1) / 3) * thousand_sep.size();
   }
 
   reslen = integral;
@@ -2272,8 +1820,8 @@ char *string_number_format(double d, int dec, char dec_point,
   if (dec) {
     reslen += dec;
 
-    if (dec_point) {
-      reslen++;
+    if (!dec_point.empty()) {
+      reslen += dec_point.size();
     }
   }
 
@@ -2281,11 +1829,11 @@ char *string_number_format(double d, int dec, char dec_point,
   if (is_negative) {
     reslen++;
   }
-  resbuf = (char *) malloc(reslen+1); /* +1 for NUL terminator */
+  String resstr(reslen, ReserveString);
+  resbuf = resstr.bufferSlice().ptr;
 
   s = tmpbuf+tmplen-1;
-  t = resbuf+reslen;
-  *t-- = '\0';
+  t = resbuf+reslen-1;
 
   /* copy the decimal places.
    * Take care, as the sprintf implementation may return less places than
@@ -2308,8 +1856,9 @@ char *string_number_format(double d, int dec, char dec_point,
     }
 
     /* add decimal point */
-    if (dec_point) {
-      *t-- = dec_point;
+    if (!dec_point.empty()) {
+      memcpy(t + (1 - dec_point.size()), dec_point.data(), dec_point.size());
+      t -= dec_point.size();
     }
   }
 
@@ -2318,7 +1867,10 @@ char *string_number_format(double d, int dec, char dec_point,
   while(s >= tmpbuf) {
     *t-- = *s--;
     if (thousand_sep && (++count%3)==0 && s>=tmpbuf) {
-      *t-- = thousand_sep;
+      memcpy(t + (1 - thousand_sep.size()),
+             thousand_sep.data(),
+             thousand_sep.size());
+      t -= thousand_sep.size();
     }
   }
 
@@ -2327,19 +1879,19 @@ char *string_number_format(double d, int dec, char dec_point,
     *t-- = '-';
   }
 
-  free(tmpbuf);
-  return resbuf;
+  resstr.setSize(reslen);
+  return resstr;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // soundex
 
 /* Simple soundex algorithm as described by Knuth in TAOCP, vol 3 */
-char *string_soundex(const char *str) {
-  assert(str);
-
+String string_soundex(const String& str) {
+  assert(!str.empty());
   int _small, code, last;
-  char soundex[4 + 1];
+  String retString(4, ReserveString);
+  char* soundex = retString.bufferSlice().ptr;
 
   static char soundex_table[26] = {
     0,              /* A */
@@ -2370,13 +1922,9 @@ char *string_soundex(const char *str) {
     '2'             /* Z */
   };
 
-  if (!*str) {
-    return nullptr;
-  }
-
   /* build soundex string */
   last = -1;
-  const char *p = str;
+  const char *p = str.slice().ptr;
   for (_small = 0; *p && _small < 4; p++) {
     /* convert chars to upper case and strip non-letter chars */
     /* BUG: should also map here accented letters used in non */
@@ -2406,8 +1954,8 @@ char *string_soundex(const char *str) {
   while (_small < 4) {
     soundex[_small++] = '0';
   }
-  soundex[_small] = '\0';
-  return strdup(soundex);
+  retString.setSize(4);
+  return retString;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -2465,17 +2013,17 @@ char _codes[26] = { 1,16,4,16,9,2,4,16,9,2,0,2,2,2,1,4,0,2,4,4,1,0,0,0,8,0};
  * accesssing the array directly... */
 
 /* Look at the next letter in the word */
-#define Next_Letter (toupper(word[w_idx+1]))
+#define Next_Letter ((char)toupper(word[w_idx+1]))
 /* Look at the current letter in the word */
-#define Curr_Letter (toupper(word[w_idx]))
+#define Curr_Letter ((char)toupper(word[w_idx]))
 /* Go N letters back. */
-#define Look_Back_Letter(n)  (w_idx >= n ? toupper(word[w_idx-n]) : '\0')
+#define Look_Back_Letter(n)  (w_idx >= n ? (char)toupper(word[w_idx-n]) : '\0')
 /* Previous letter.  I dunno, should this return null on failure? */
 #define Prev_Letter (Look_Back_Letter(1))
 /* Look two letters down.  It makes sure you don't walk off the string. */
-#define After_Next_Letter  (Next_Letter != '\0' ? toupper(word[w_idx+2]) \
+#define After_Next_Letter  (Next_Letter != '\0' ? (char)toupper(word[w_idx+2]) \
                            : '\0')
-#define Look_Ahead_Letter(n) (toupper(Lookahead(word+w_idx, n)))
+#define Look_Ahead_Letter(n) ((char)toupper(Lookahead(word+w_idx, n)))
 
 /* Allows us to safely look ahead an arbitrary # of letters */
 /* I probably could have just used strlen... */
@@ -2495,59 +2043,47 @@ static char Lookahead(unsigned char *word, int how_far) {
  * We don't know the buffers size in advance. On way to solve this is to just
  * re-allocate the buffer size. We're using an extra of 2 characters (this
  * could be one though; or more too). */
-#define Phonize(c)  {                                                   \
-    if (p_idx >= max_buffer_len) {                                      \
-      phoned_word = (char *)realloc(phoned_word, max_buffer_len + 2);   \
-      max_buffer_len += 2;                                              \
-    }                                                                   \
-    phoned_word[p_idx++] = c;                                           \
-  }
-/* Slap a null character on the end of the phoned word */
-#define End_Phoned_Word  {phoned_word[p_idx] = '\0';}
+#define Phonize(c)  { buffer.append(c); }
 /* How long is the phoned word? */
-#define Phone_Len  (p_idx)
+#define Phone_Len  (buffer.size())
 
 /* Note is a letter is a 'break' in the word */
 #define Isbreak(c)  (!isalpha(c))
 
-char *string_metaphone(const char *input, int word_len, long max_phonemes,
-                       int traditional) {
+String string_metaphone(const char *input, int word_len, long max_phonemes,
+                        int traditional) {
   unsigned char *word = (unsigned char *)input;
-  char *phoned_word;
 
   int w_idx = 0;        /* point in the phonization we're at. */
-  int p_idx = 0;        /* end of the phoned phrase */
   int max_buffer_len = 0;    /* maximum length of the destination buffer */
 
   /*-- Parameter checks --*/
   /* Negative phoneme length is meaningless */
 
   if (max_phonemes < 0)
-    return nullptr;
+    return String();
 
   /* Empty/null string is meaningless */
   /* Overly paranoid */
   /* always_assert(word != NULL && word[0] != '\0'); */
 
   if (word == nullptr)
-    return nullptr;
+    return String();
 
   /*-- Allocate memory for our phoned_phrase --*/
   if (max_phonemes == 0) {  /* Assume largest possible */
     max_buffer_len = word_len;
-    phoned_word = (char *)malloc(word_len + 1);
   } else {
     max_buffer_len = max_phonemes;
-    phoned_word = (char *)malloc(max_phonemes +1);
   }
+  StringBuffer buffer(max_buffer_len);
 
   /*-- The first phoneme has to be processed specially. --*/
   /* Find our first letter */
   for (; !isalpha(Curr_Letter); w_idx++) {
     /* On the off chance we were given nothing but crap... */
     if (Curr_Letter == '\0') {
-      End_Phoned_Word
-        return phoned_word;  /* For testing */
+      return buffer.detach();  /* For testing */
     }
   }
 
@@ -2807,8 +2343,7 @@ char *string_metaphone(const char *input, int word_len, long max_phonemes,
     w_idx += skip_letter;
   } /* END FOR */
 
-  End_Phoned_Word;
-  return phoned_word;
+  return buffer.detach();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -2982,12 +2517,12 @@ static const _cyr_charset_table _cyr_mac = {
  *    d - x-cp866
  *    m - x-mac-cyrillic
  */
-char *string_convert_cyrillic_string(const char *input, int length,
-                                     char from, char to) {
-  assert(input);
+String string_convert_cyrillic_string(const String& input, char from, char to) {
   const unsigned char *from_table, *to_table;
   unsigned char tmp;
-  unsigned char *str = (unsigned char *)string_duplicate(input, length);
+  const unsigned char *uinput = (unsigned char *)input.slice().ptr;
+  String retString(input.size(), ReserveString);
+  unsigned char *str = (unsigned char *)retString.bufferSlice().ptr;
 
   from_table = nullptr;
   to_table   = nullptr;
@@ -3018,15 +2553,12 @@ char *string_convert_cyrillic_string(const char *input, int length,
     break;
   }
 
-  if (!str) {
-    return (char *)str;
+  for (int i = 0; i < input.size(); i++) {
+    tmp = from_table == nullptr ? uinput[i] : from_table[uinput[i]];
+    str[i] = to_table == nullptr ? tmp : to_table[tmp + 256];
   }
-
-  for (int i = 0; i<length; i++) {
-    tmp = (from_table == nullptr)? str[i] : from_table[ str[i] ];
-    str[i] = (to_table == nullptr) ? tmp : to_table[tmp + 256];
-  }
-  return (char *)str;
+  retString.setSize(input.size());
+  return retString;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -3046,10 +2578,12 @@ char *string_convert_cyrillic_string(const char *input, int length,
  * Converts Logical Hebrew text (Hebrew Windows style) to Visual text
  * Cheers/complaints/flames - Zeev Suraski <zeev@php.net>
  */
-char *string_convert_hebrew_string(const char *str, int &str_len,
-                                   int max_chars_per_line,
-                                   int convert_newlines) {
-  assert(str);
+String string_convert_hebrew_string(const String& inStr,
+                                    int max_chars_per_line,
+                                    int convert_newlines) {
+  assert(!inStr.empty());
+  auto str = inStr.data();
+  auto str_len = inStr.size();
   const char *tmp;
   char *heb_str, *broken_str;
   char *target;
@@ -3057,14 +2591,11 @@ char *string_convert_hebrew_string(const char *str, int &str_len,
   long max_chars=0;
   int begin, end, char_count, orig_begin;
 
-  if (str_len == 0) {
-    return nullptr;
-  }
-
   tmp = str;
   block_start=block_end=0;
 
-  heb_str = (char *) malloc(str_len + 1);
+  heb_str = (char *) smart_malloc(str_len + 1);
+  SCOPE_EXIT { smart_free(heb_str); };
   target = heb_str+str_len;
   *target = 0;
   target--;
@@ -3128,8 +2659,8 @@ char *string_convert_hebrew_string(const char *str, int &str_len,
     block_start=block_end+1;
   } while (block_end < str_len-1);
 
-
-  broken_str = (char *) malloc(str_len+1);
+  String brokenStr(str_len, ReserveString);
+  broken_str = brokenStr.bufferSlice().ptr;
   begin=end=str_len-1;
   target = broken_str;
 
@@ -3187,18 +2718,17 @@ char *string_convert_hebrew_string(const char *str, int &str_len,
     begin--;
     end=begin;
   }
-  free((void*)heb_str);
 
   if (convert_newlines) {
     int count;
-    char *ret = string_replace(broken_str, str_len, "\n", strlen("\n"),
-                               "<br />\n", strlen("<br />\n"), count, true);
-    if (ret) {
-      free(broken_str);
+    auto ret = string_replace(broken_str, str_len, "\n", strlen("\n"),
+                              "<br />\n", strlen("<br />\n"), count, true);
+    if (!ret.isNull()) {
       return ret;
     }
   }
-  return broken_str;
+  brokenStr.setSize(str_len);
+  return brokenStr;
 }
 
 #if defined(__APPLE__)

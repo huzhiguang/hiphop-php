@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,11 +18,11 @@
 #define incl_HPHP_EVAL_DEBUGGER_CMD_BREAK_H_
 
 #include "hphp/runtime/debugger/debugger_command.h"
+#include <vector>
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
 
-DECLARE_BOOST_TYPES(CmdBreak);
 class CmdBreak : public DebuggerCommand {
 public:
   CmdBreak() : DebuggerCommand(KindOfBreak), m_breakpoints(nullptr) {
@@ -72,10 +72,10 @@ private:
   // memory. In the latter case the destructor for CmdBreak frees
   // the memory. (The base class destructor is only invoked for instances
   // that point to the collection in the client.)
-  BreakPointInfoPtrVec *m_breakpoints;
+  std::vector<BreakPointInfoPtr> *m_breakpoints;
 
   // Holds the breakpoint collection of a CmdBreak received via Thrift.
-  BreakPointInfoPtrVec m_bps;
+  std::vector<BreakPointInfoPtr> m_bps;
 
   // Uses the client to send this command to the server, which
   // will update its breakpoint list with the one in this command.

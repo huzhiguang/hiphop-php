@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,10 +17,10 @@
 #ifndef incl_HPHP_CPP_BASE_SHARED_SHARED_STRING_H_
 #define incl_HPHP_CPP_BASE_SHARED_SHARED_STRING_H_
 
-#include "hphp/util/base.h"
 #include "hphp/runtime/base/smart-ptr.h"
-#include "tbb/concurrent_hash_map.h"
-#include "tbb/atomic.h"
+#include "hphp/runtime/base/types.h"
+#include <tbb/concurrent_hash_map.h>
+#include <tbb/atomic.h>
 #include "hphp/util/atomic.h"
 #include "hphp/util/hash.h"
 
@@ -32,11 +32,11 @@ namespace HPHP {
 class SharedStringData {
 public:
   explicit SharedStringData(const std::string &data);
-  void incRefCount() const {
+  void incAtomicCount() const {
     m_count.fetch_and_increment();
   }
-  int decRefCount() const;
-  void release();
+  int decAtomicCount() const;
+  void atomicRelease();
   const std::string &getString() const;
 
   typedef tbb::concurrent_hash_map<std::string, SharedStringData*> InternMap;
@@ -47,13 +47,13 @@ protected:
   static InternMap s_intern;
 };
 
-class SharedString : public SmartPtr<SharedStringData> {
+class SharedString : public AtomicSmartPtr<SharedStringData> {
 public:
   SharedString() {}
   /* implicit */ SharedString(SharedStringData *px)
-    : SmartPtr<SharedStringData>(px) {}
+    : AtomicSmartPtr<SharedStringData>(px) {}
   /* implicit */ SharedString(const SharedString &src)
-    : SmartPtr<SharedStringData>(src) {}
+    : AtomicSmartPtr<SharedStringData>(src) {}
   /* implicit */ SharedString(const std::string &data) {
     operator=(data);
   }

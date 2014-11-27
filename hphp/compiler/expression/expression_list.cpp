@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,6 +15,8 @@
 */
 
 #include "hphp/compiler/expression/expression_list.h"
+#include <set>
+#include <vector>
 #include "hphp/compiler/expression/scalar_expression.h"
 #include "hphp/compiler/expression/simple_variable.h"
 #include "hphp/compiler/expression/unary_op_expression.h"
@@ -33,13 +35,14 @@ using namespace HPHP;
 ExpressionList::ExpressionList(EXPRESSION_CONSTRUCTOR_PARAMETERS,
                                ListKind kind)
   : Expression(EXPRESSION_CONSTRUCTOR_PARAMETER_VALUES(ExpressionList)),
-    m_outputCount(-1),
-    m_arrayElements(false), m_collectionType(0), m_kind(kind) {
+    m_arrayElements(false), m_collectionType(0), m_argUnpack(false),
+    m_kind(kind) {
 }
 
 ExpressionPtr ExpressionList::clone() {
   ExpressionListPtr exp(new ExpressionList(*this));
   Expression::deepCopy(exp);
+  assert(exp->m_argUnpack == this->m_argUnpack);
   exp->m_exps.clear();
   for (unsigned int i = 0; i < m_exps.size(); i++) {
     exp->m_exps.push_back(Clone(m_exps[i]));
@@ -56,7 +59,7 @@ void ExpressionList::toLower() {
 
 void ExpressionList::setContext(Context context) {
   Expression::setContext(context);
-  if (m_kind == ListKindParam && context & UnsetContext) {
+  if (m_kind == ListKindParam && (context & UnsetContext)) {
     for (unsigned int i = m_exps.size(); i--; ) {
       if (m_exps[i]) {
         m_exps[i]->setContext(UnsetContext);
@@ -194,7 +197,7 @@ ExpressionList::flattenLiteralStrings(vector<ExpressionPtr> &literals) const {
 bool ExpressionList::getScalarValue(Variant &value) {
   if (m_arrayElements) {
     if (isScalarArrayPairs()) {
-      ArrayInit init(m_exps.size());
+      ArrayInit init(m_exps.size(), ArrayInit::Mixed{});
       for (unsigned int i = 0; i < m_exps.size(); i++) {
         ArrayPairExpressionPtr exp =
           dynamic_pointer_cast<ArrayPairExpression>(m_exps[i]);
@@ -204,14 +207,14 @@ bool ExpressionList::getScalarValue(Variant &value) {
           Variant v;
           bool ret = val->getScalarValue(v);
           if (!ret) assert(false);
-          init.set(v);
+          init.append(v);
         } else {
           Variant n;
           Variant v;
           bool ret1 = name->getScalarValue(n);
           bool ret2 = val->getScalarValue(v);
           if (!(ret1 && ret2)) return false;
-          init.set(n, v);
+          init.setKeyUnconverted(n, v);
         }
       }
       value = Array(init.create());
@@ -240,26 +243,15 @@ void ExpressionList::stripConcat() {
       BinaryOpExpressionPtr b
         (static_pointer_cast<BinaryOpExpression>(e));
       if (b->getOp() == '.') {
-        e = b->getExp1();
-        el.insertElement(b->getExp2(), i + 1);
-        continue;
+        if (!b->getExp1()->isArray() && !b->getExp2()->isArray()) {
+          e = b->getExp1();
+          el.insertElement(b->getExp2(), i + 1);
+          continue;
+        }
       }
     }
     i++;
   }
-}
-
-void ExpressionList::setOutputCount(int count) {
-  assert(count >= 0 && count <= (int)m_exps.size());
-  m_outputCount = count;
-}
-
-int ExpressionList::getOutputCount() const {
-  return m_outputCount < 0 ? m_exps.size() : m_outputCount;
-}
-
-void ExpressionList::resetOutputCount() {
-  m_outputCount = -1;
 }
 
 void ExpressionList::markParam(int p, bool noRefWrapper) {
@@ -286,7 +278,7 @@ void ExpressionList::markParams(bool noRefWrapper) {
   }
 }
 
-void ExpressionList::setCollectionType(int cType) {
+void ExpressionList::setCollectionType(Collection::Type cType) {
   m_arrayElements = true;
   m_collectionType = cType;
 }
@@ -398,7 +390,8 @@ void ExpressionList::optimize(AnalysisResultConstPtr ar) {
     }
   } else {
     bool isUnset = hasContext(UnsetContext) &&
-      ar->getPhase() >= AnalysisResult::PostOptimize;
+      // This used to be gated on ar->getPhase() >= PostOptimize
+      false;
     int isGlobal = -1;
     while (i--) {
       ExpressionPtr &e = m_exps[i];
@@ -438,36 +431,6 @@ ExpressionPtr ExpressionList::preOptimize(AnalysisResultConstPtr ar) {
   return ExpressionPtr();
 }
 
-ExpressionPtr ExpressionList::postOptimize(AnalysisResultConstPtr ar) {
-  optimize(ar);
-  return ExpressionPtr();
-}
-
-TypePtr ExpressionList::inferTypes(AnalysisResultPtr ar, TypePtr type,
-                                   bool coerce) {
-  size_t size = m_exps.size();
-  bool commaList = size && (m_kind != ListKindParam);
-  size_t ix = m_kind == ListKindLeft ? 0 : size - 1;
-  TypePtr tmp = commaList ? Type::Some : type;
-  TypePtr ret = type;
-  for (size_t i = 0; i < size; i++) {
-    TypePtr t = i != ix ? tmp : type;
-    bool c = coerce && (!commaList || i == ix);
-    if (ExpressionPtr e = m_exps[i]) {
-      e->inferAndCheck(ar, t, c);
-      if (commaList && i == ix) {
-        e->setExpectedType(TypePtr());
-        ret = e->getActualType();
-        if (e->getImplementedType()) {
-          m_implementedType = e->getImplementedType();
-        }
-        if (!ret) ret = Type::Variant;
-      }
-    }
-  }
-  return ret;
-}
-
 bool ExpressionList::canonCompare(ExpressionPtr e) const {
   if (!Expression::canonCompare(e)) return false;
   ExpressionListPtr l =
@@ -476,6 +439,19 @@ bool ExpressionList::canonCompare(ExpressionPtr e) const {
   return m_arrayElements == l->m_arrayElements &&
          m_collectionType == l->m_collectionType &&
          m_kind == l->m_kind;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void ExpressionList::outputCodeModel(CodeGenerator &cg) {
+  for (unsigned int i = 0; i < m_exps.size(); i++) {
+    ExpressionPtr exp = m_exps[i];
+    if (exp) {
+      cg.printExpression(exp, exp->hasContext(RefParameter));
+    } else {
+      cg.printNull();
+    }
+  }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -507,10 +483,9 @@ unsigned int ExpressionList::checkLitstrKeys() const {
     if (!ret) return 0;
     if (!value.isString()) return 0;
     String str = value.toString();
-    if (str->isInteger()) return 0;
+    if (str.isInteger()) return 0;
     string s(str.data(), str.size());
     keys.insert(s);
   }
   return keys.size();
 }
-

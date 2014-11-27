@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,17 +13,19 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/util/network.h"
+
+#include <netinet/in.h>
+#include <arpa/nameser.h>
+#include <arpa/inet.h>
+#include <resolv.h>
+#include <sys/utsname.h>
+
+#include <folly/String.h>
+#include <folly/IPAddress.h>
+
 #include "hphp/util/lock.h"
 #include "hphp/util/process.h"
-#include "util.h"
-
-#include "folly/String.h"
-
-#include "netinet/in.h"
-#include "arpa/nameser.h"
-#include <resolv.h>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -45,15 +47,12 @@ static ResolverLibInitializer _resolver_lib_initializer;
 ///////////////////////////////////////////////////////////////////////////////
 // thread-safe network functions
 
-std::string Util::safe_inet_ntoa(struct in_addr &in) {
-  char buf[256];
-  memset(buf, 0, sizeof(buf));
-  inet_ntop(AF_INET, &in, buf, sizeof(buf)-1);
-  return buf;
-}
-
-bool Util::safe_gethostbyname(const char *address, HostEnt &result) {
-#if defined(__APPLE__)
+bool safe_gethostbyname(const char *address, HostEnt &result) {
+#if defined(__APPLE__) || defined(__CYGWIN__) || defined(__MINGW__) || \
+    defined(_MSC_VER)
+  // NOTE: on windows gethostbyname is "thread safe"
+  // the hostent is allocated once per thread by winsock2
+  // and cleaned up by winsock when the thread ends
   struct hostent *hp = gethostbyname(address);
 
   if (!hp) {
@@ -61,7 +60,9 @@ bool Util::safe_gethostbyname(const char *address, HostEnt &result) {
   }
 
   result.hostbuf = *hp;
+#ifdef __APPLE__
   freehostent(hp);
+#endif
   return true;
 #else
   struct hostent *hp;
@@ -79,22 +80,67 @@ bool Util::safe_gethostbyname(const char *address, HostEnt &result) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-
-std::string Util::GetPrimaryIP() {
+std::string GetPrimaryIPImpl(int af) {
+  const static std::string s_empty;
   struct utsname buf;
+  struct addrinfo hints;
+  struct addrinfo *res = nullptr;
+  int error;
+
+  SCOPE_EXIT {
+    if (res) {
+      freeaddrinfo(res);
+    }
+  };
+
   uname((struct utsname *)&buf);
 
-  HostEnt result;
-  if (!safe_gethostbyname(buf.nodename, result)) {
-    return buf.nodename;
+  memset(&hints, 0, sizeof(struct addrinfo));
+  hints.ai_family = af;
+
+  error = getaddrinfo(buf.nodename, nullptr, &hints, &res);
+  if (error) {
+    return s_empty;
   }
 
-  struct in_addr in;
-  memcpy(&in.s_addr, *(result.hostbuf.h_addr_list), sizeof(in.s_addr));
-  return safe_inet_ntoa(in);
+  try {
+    return folly::IPAddress(res->ai_addr).toFullyQualified();
+  } catch (folly::IPAddressFormatException &e) {
+    return s_empty;
+  }
 }
 
-Util::HostURL::HostURL(const std::string &hosturl, int port) :
+std::string GetPrimaryIPv4() {
+  return GetPrimaryIPImpl(AF_INET);
+}
+
+std::string GetPrimaryIPv6() {
+  return GetPrimaryIPImpl(AF_INET6);
+}
+
+std::string GetPrimaryIP() {
+  auto ipaddress = GetPrimaryIPv4();
+  if (ipaddress.empty()) {
+    ipaddress = GetPrimaryIPv6();
+  }
+  return ipaddress;
+}
+
+static std::string normalizeIPv6Address(const std::string& address) {
+  struct in6_addr addr;
+  if (inet_pton(AF_INET6, address.c_str(), &addr) <= 0) {
+    return std::string();
+  }
+
+  char ipPresentation[INET6_ADDRSTRLEN];
+  if (inet_ntop(AF_INET6, &addr, ipPresentation, INET6_ADDRSTRLEN) == nullptr) {
+    return std::string();
+  }
+
+  return ipPresentation;
+}
+
+HostURL::HostURL(const std::string &hosturl, int port) :
   m_ipv6(false), m_port(port) {
 
   // Find the scheme
@@ -107,12 +153,16 @@ Util::HostURL::HostURL(const std::string &hosturl, int port) :
     spos = 0;
   }
 
+  // strip off /EXTRA from prot://addr:port/EXTRA
+  auto extraPos = hosturl.find('/', spos);
+  auto validLen = extraPos != std::string::npos ? extraPos : hosturl.size();
+
   // IPv6 address?
   auto bpos = hosturl.find('[');
   if (bpos != std::string::npos) {
     // Extract out the IPAddress from [..]
     // Look for the ending position of ']'
-    auto epos = hosturl.rfind(']');
+    auto epos = hosturl.rfind(']', validLen - 1);
     if (epos == std::string::npos) {
       // This isn't a valid IPv6 address, so bail.
       m_valid = false;
@@ -121,20 +171,35 @@ Util::HostURL::HostURL(const std::string &hosturl, int port) :
     }
 
     // IPv6 address between '[' and ']'
-    m_host = hosturl.substr(bpos + 1, epos - bpos - 1);
-    m_hosturl += hosturl.substr(bpos, epos - bpos);
+    auto v6h = normalizeIPv6Address(hosturl.substr(bpos + 1, epos - bpos - 1));
+    if (v6h.empty()) {
+      m_valid = false;
+      m_hosturl = hosturl;
+      return;
+    }
+    m_host = v6h;
+    m_hosturl += '[';
+    m_hosturl += v6h;
+    m_hosturl += ']';
 
     // Colon for port.  Start after ']';
     auto cpos = hosturl.find(':', epos);
     if (cpos != std::string::npos) {
       try {
-        m_port = folly::to<uint16_t>(hosturl.substr(cpos + 1));
+        auto portLen = validLen - cpos - 1;
+        m_port = folly::to<uint16_t>(hosturl.substr(cpos + 1, portLen));
         m_hosturl += hosturl.substr(cpos);
       } catch (...) {
         m_port = 0;
       }
+    } else if (extraPos != std::string::npos) {
+      m_hosturl += hosturl.substr(extraPos);
     }
     m_ipv6 = true;
+  } else if (m_scheme == "unix") {
+    // unix socket
+    m_host = hosturl.substr(spos);
+    m_hosturl += m_host;
   } else {
     // IPv4 or hostname
     auto cpos = hosturl.find(':', spos);
@@ -142,14 +207,15 @@ Util::HostURL::HostURL(const std::string &hosturl, int port) :
       m_host = hosturl.substr(spos, cpos - spos);
       m_hosturl += m_host;
       try {
-        m_port = folly::to<uint16_t>(hosturl.substr(cpos + 1));
+        auto portLen = validLen - cpos - 1;
+        m_port = folly::to<uint16_t>(hosturl.substr(cpos + 1, portLen));
         m_hosturl += hosturl.substr(cpos);
       } catch (...) {
         m_port = 0;
       }
     } else {
-      m_host = hosturl.substr(spos);
-      m_hosturl += m_host;
+      m_host = hosturl.substr(spos, validLen - spos);
+      m_hosturl += hosturl.substr(spos);
     }
     m_ipv6 = false;
   }

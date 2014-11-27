@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,13 +15,21 @@
 */
 
 #include "hphp/runtime/debugger/debugger_base.h"
+
+#include <utility>
+#include <vector>
+#include <boost/algorithm/string/replace.hpp>
+
 #include "hphp/runtime/debugger/debugger_client.h"
 #include "hphp/runtime/debugger/break_point.h"
 #include "hphp/parser/scanner.h"
-#include "hphp/util/util.h"
+#include "hphp/util/text-util.h"
+#include "hphp/runtime/base/config.h"
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
+
+using std::string;
 
 TRACE_SET_MOD(debugger);
 
@@ -35,7 +43,7 @@ const std::string &DSandboxInfo::id() const {
 
 const std::string DSandboxInfo::desc() const {
   TRACE(2, "DSandboxInfo::desc\n");
-  string ret = m_user + "'s " + m_name + " sandbox";
+  std::string ret = m_user + "'s " + m_name + " sandbox";
   if (!m_path.empty()) {
     ret += " at " + m_path;
   }
@@ -56,8 +64,8 @@ void DSandboxInfo::set(const std::string &id) {
   m_name.clear();
   m_path.clear();
   if (!id.empty()) {
-    vector<string> tokens;
-    Util::split('\t', id.c_str(), tokens);
+    std::vector<std::string> tokens;
+    split('\t', id.c_str(), tokens);
     if (tokens.size() == 2) {
       m_user = tokens[0];
       m_name = tokens[1];
@@ -131,7 +139,7 @@ std::string DFunctionInfo::getName() const {
 
 std::string DFunctionInfo::site(std::string &preposition) const {
   TRACE(2, "DFunctionInfo::site\n");
-  string ret;
+  std::string ret;
   preposition = "at ";
   if (!m_class.empty()) {
     if (!m_namespace.empty()) {
@@ -160,7 +168,7 @@ std::string DFunctionInfo::site(std::string &preposition) const {
 
 std::string DFunctionInfo::desc(const BreakPointInfo *bpi) const {
   TRACE(2, "DFunctionInfo::desc\n");
-  string ret;
+  std::string ret;
   if (!m_class.empty()) {
     string cls;
     if (!m_namespace.empty()) {
@@ -189,7 +197,7 @@ std::string DFunctionInfo::desc(const BreakPointInfo *bpi) const {
 
 std::string Macro::desc(const char *indent) {
   TRACE(2, "Macro::desc\n");
-  string ret;
+  std::string ret;
   for (unsigned int i = 0; i < m_cmds.size(); i++) {
     if (indent) ret += indent;
     ret += m_cmds[i];
@@ -198,17 +206,19 @@ std::string Macro::desc(const char *indent) {
   return ret;
 }
 
-void Macro::load(Hdf node) {
+void Macro::load(const IniSetting::Map& ini, Hdf node) {
   TRACE(2, "Macro::load\n");
-  m_name = node["name"].getString();
-  node["cmds"].get(m_cmds);
+  Config::Bind(m_name, ini, node["name"]);
+  Config::Get(ini, node["cmds"], m_cmds);
 }
 
-void Macro::save(Hdf node) {
+void Macro::save(std::ostream &stream, int key) {
   TRACE(2, "Macro::save\n");
-  node["name"] = m_name;
+  stream << "hhvm.macros[" << key << "][name] = " << m_name << std::endl;
   for (unsigned int i = 0; i < m_cmds.size(); i++) {
-    node["cmds"][i] = m_cmds[i];
+    stream << "hhvm.macros[" << key << "][cmds][" << i << "] = "
+           << '"' << boost::replace_all_copy(m_cmds[i], "\"", "\\\"") << '"'
+           << std::endl;
   }
 }
 
@@ -317,6 +327,7 @@ static void get_color(int tokid, int prev, int next,
     COLOR_ENTRY(T_AND_EQUAL,                None        );
     COLOR_ENTRY(T_MOD_EQUAL,                None        );
     COLOR_ENTRY(T_CONCAT_EQUAL,             None        );
+    COLOR_ENTRY(T_POW_EQUAL,                None        );
     COLOR_ENTRY(T_DIV_EQUAL,                None        );
     COLOR_ENTRY(T_MUL_EQUAL,                None        );
     COLOR_ENTRY(T_MINUS_EQUAL,              None        );
@@ -335,6 +346,7 @@ static void get_color(int tokid, int prev, int next,
     COLOR_ENTRY(T_INC,                      None        );
     COLOR_ENTRY(T_LNUMBER,                  None        );
     COLOR_ENTRY(T_DNUMBER,                  None        );
+    COLOR_ENTRY(T_ONUMBER,                  None        );
     COLOR_ENTRY(T_STRING,                   None        );
     COLOR_ENTRY(T_STRING_VARNAME,           Variable    );
     COLOR_ENTRY(T_VARIABLE,                 Variable    );
@@ -358,7 +370,7 @@ static void get_color(int tokid, int prev, int next,
     COLOR_ENTRY(T_WHITESPACE,               None        );
     COLOR_ENTRY(T_DOLLAR_OPEN_CURLY_BRACES, None        );
     COLOR_ENTRY(T_CURLY_OPEN,               None        );
-    COLOR_ENTRY(T_PAAMAYIM_NEKUDOTAYIM,     None        );
+    COLOR_ENTRY(T_DOUBLE_COLON,             None        );
   }
 
   if (tokid == T_STRING) {
@@ -438,7 +450,12 @@ static void append_line_no(StringBuffer &sb, const char *text,
         sb.append('\n');
         if (colorLineNo) color_line_no(sb, line, lineFocus0, lineFocus1,
                                        colorLineNo);
-        sb.printf(DebuggerClient::LineNoFormat, line);
+        if ((line == lineFocus0 && lineFocus1 == 0) ||
+            (line >= lineFocus0 && line <= lineFocus1)) {
+          sb.printf(DebuggerClient::LineNoFormatWithStar, line);
+        } else {
+          sb.printf(DebuggerClient::LineNoFormat, line);
+        }
         if (endLineNo) sb.append(endLineNo);
         if (color) sb.append(color);
         begin = p + 1;
@@ -452,7 +469,7 @@ static void append_line_no(StringBuffer &sb, const char *text,
   if (end) sb.append(end);
 }
 
-String highlight_code(CStrRef source, int line /* = 0 */,
+String highlight_code(const String& source, int line /* = 0 */,
                       int lineFocus0 /* = 0 */, int charFocus0 /* = 0 */,
                       int lineFocus1 /* = 0 */, int charFocus1 /* = 0 */) {
   TRACE(7, "debugger_base:highlight_code\n");
@@ -478,7 +495,7 @@ string check_char_highlight(int lineFocus0, int charFocus0,
   return "";
 }
 
-String highlight_php(CStrRef source, int line /* = 0 */,
+String highlight_php(const String& source, int line /* = 0 */,
                      int lineFocus0 /* = 0 */, int charFocus0 /* = 0 */,
                      int lineFocus1 /* = 0 */, int charFocus1 /* = 0 */) {
   TRACE(7, "debugger_base:highlight_php\n");
@@ -486,7 +503,7 @@ String highlight_php(CStrRef source, int line /* = 0 */,
   Scanner scanner(source.data(), source.size(),
                   Scanner::AllowShortTags | Scanner::ReturnAllTokens);
   ScannerToken tok1, tok2;
-  std::vector<std::pair<int, string> > ahead_tokens;
+  std::vector<std::pair<int, std::string> > ahead_tokens;
   Location loc1, loc2;
 
   const char *colorComment = nullptr, *endComment = nullptr;

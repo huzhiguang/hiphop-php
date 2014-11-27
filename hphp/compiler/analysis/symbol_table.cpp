@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,6 +15,7 @@
 */
 
 #include "hphp/compiler/analysis/symbol_table.h"
+#include <map>
 #include "hphp/compiler/analysis/type.h"
 #include "hphp/compiler/analysis/analysis_result.h"
 #include "hphp/compiler/analysis/class_scope.h"
@@ -32,6 +33,7 @@
 #include "hphp/runtime/base/variable-serializer.h"
 
 #include "hphp/util/logger.h"
+#include "hphp/util/text-util.h"
 
 using namespace HPHP;
 
@@ -61,22 +63,7 @@ TypePtr Symbol::CoerceTo(AnalysisResultConstPtr ar,
 TypePtr Symbol::setType(AnalysisResultConstPtr ar, BlockScopeRawPtr scope,
                         TypePtr type, bool coerced) {
   if (!type) return type;
-  if (ar->getPhase() == AnalysisResult::FirstInference) {
-    // at this point, you *must* have a lock (if you are user scope)
-    if (scope->is(BlockScope::FunctionScope)) {
-      FunctionScopeRawPtr f =
-        static_pointer_cast<FunctionScope>(scope);
-      if (f->isUserFunction()) {
-        f->getInferTypesMutex().assertOwnedBySelf();
-      }
-    } else if (scope->is(BlockScope::ClassScope)) {
-      ClassScopeRawPtr c =
-        static_pointer_cast<ClassScope>(scope);
-      if (c->isUserClass()) {
-        c->getInferTypesMutex().assertOwnedBySelf();
-      }
-    }
-  }
+
   TypePtr oldType = m_coerced;
   if (!oldType) oldType = Type::Some;
   if (!coerced) return oldType;
@@ -546,19 +533,19 @@ void SymbolTable::canonicalizeSymbolOrder() {
 
 void SymbolTable::getSymbols(vector<Symbol*> &syms,
                              bool filterHidden /* = false */) const {
-  BOOST_FOREACH(Symbol *sym, m_symbolVec) {
+  for (Symbol *sym: m_symbolVec) {
     if (!filterHidden || !sym->isHidden()) syms.push_back(sym);
   }
 }
 
 void SymbolTable::getSymbols(vector<string> &syms) const {
-  BOOST_FOREACH(Symbol *sym, m_symbolVec) {
+  for (Symbol *sym: m_symbolVec) {
     syms.push_back(sym->getName());
   }
 }
 
 void SymbolTable::getCoerced(StringToTypePtrMap &coerced) const {
-  BOOST_FOREACH(Symbol *sym, m_symbolVec) {
+  for (Symbol *sym: m_symbolVec) {
     coerced[sym->getName()] = sym->getType();
   }
 }
@@ -587,6 +574,6 @@ string SymbolTable::getEscapedText(Variant v, int &len) {
   VariableSerializer vs(VariableSerializer::Type::Serialize);
   String str = vs.serialize(v, true);
   len = str.length();
-  string output = Util::escapeStringForCPP(str.data(), len);
+  string output = escapeStringForCPP(str.data(), len);
   return output;
 }

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -166,54 +166,56 @@ StatementPtr IfStatement::preOptimize(AnalysisResultConstPtr ar) {
   }
 }
 
-StatementPtr IfStatement::postOptimize(AnalysisResultConstPtr ar) {
-  // we cannot optimize away the code inside if statement, because
-  // there may be a goto that goes into if statement.
-  if (hasReachableLabel()) {
-    return StatementPtr();
-  }
+///////////////////////////////////////////////////////////////////////////////
 
-  bool changed = false;
-  for (int i = 0; i < m_stmts->getCount(); i++) {
+void IfStatement::outputCodeModel(CodeGenerator &cg) {
+  IfBranchStatementPtr elseBranch = nullptr;
+  auto count = m_stmts->getCount();
+  for (int i = 0; i < count; i++) {
     IfBranchStatementPtr branch =
       dynamic_pointer_cast<IfBranchStatement>((*m_stmts)[i]);
-    ExpressionPtr condition = branch->getCondition();
-    if (!branch->getStmt() || !branch->getStmt()->hasImpl()) {
-      if (!condition ||
-          (i == m_stmts->getCount() - 1 &&
-           !condition->hasEffect())) {
-        // remove else branch without C++ implementation.
-        m_stmts->removeElement(i);
-        changed = true;
-      } else if (condition->is(Expression::KindOfConstantExpression)) {
-        ConstantExpressionPtr exp =
-          dynamic_pointer_cast<ConstantExpression>(condition);
-        // Remove if (false) branch without C++ implementation.
-        // if (true) branch without C++ implementation is kept unless
-        // it is the last branch. In general we cannot let a if (true)
-        // branch short-circuit the rest branches which if removed may
-        // cause g++ to complain unreferenced variables.
-        if (exp->isBoolean()) {
-          if (!exp->getBooleanValue() ||
-              (exp->getBooleanValue() && i == m_stmts->getCount() - 1)) {
-            m_stmts->removeElement(i);
-            changed = true;
-            i--;
-          }
-        }
-      }
+    assert(branch != nullptr); // this cast always succeeds, by construction.
+    auto condition = branch->getCondition();
+    if (condition == nullptr) {
+      elseBranch = branch;
+      count--;
+      break;
     }
+    auto statements = branch->getStmt();
+    if (i > 0) {
+      // Not the first if in the if...else if...else if...else sequence
+      // so this is the false block of the preceding if
+      cg.printPropertyHeader("falseBlock");
+      cg.printObjectHeader("BlockStatement", 1);
+      cg.printPropertyHeader("statements");
+      cg.printf("V:9:\"HH\\Vector\":1:{");
+    }
+    cg.printObjectHeader("ConditionalStatement", 4);
+    cg.printPropertyHeader("condition");
+    condition->outputCodeModel(cg);
+    cg.printPropertyHeader("trueBlock");
+    cg.printAsBlock(statements);
+    cg.printPropertyHeader("sourceLocation");
+    cg.printLocation(this->getLocation());
+    // false block will be supplied by next iteration, or code following loop
   }
-  if (m_stmts->getCount() == 0) {
-    return NULL_STATEMENT();
+  // supply the false block for the else
+  cg.printPropertyHeader("falseBlock");
+  if (elseBranch != nullptr) {
+    elseBranch->outputCodeModel(cg);
   } else {
-    return changed ? static_pointer_cast<Statement>(shared_from_this())
-                   : StatementPtr();
+    cg.printAsBlock(nullptr);
   }
-}
 
-void IfStatement::inferTypes(AnalysisResultPtr ar) {
-  if (m_stmts) m_stmts->inferTypes(ar);
+  for (int i = 0; i < count-1; i++) {
+    cg.printObjectFooter(); //close the nested if
+    cg.printf("}"); //close the vector
+    cg.printObjectFooter(); //close falseBlock block
+  }
+
+  // Close the outermose ConditionalStatement
+  cg.printObjectFooter();
+
 }
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,16 +18,20 @@
 
 #include "hphp/runtime/vm/jit/translator.h"
 
-namespace HPHP {
-namespace Transl {
+namespace HPHP { namespace jit {
+
+//////////////////////////////////////////////////////////////////////
 
 /*
- * The annotation module is opaque to most of the translator, and maintains
- * per-instruction state that persists across tracelets.
+ * Note: the current name of this module/function is historical.  It
+ * use to record cross-tracelet global information ("annotations") to
+ * help bind call targets.  Now this information comes from static
+ * analysis in FCallD opcodes.
  */
 void annotate(NormalizedInstruction* instr);
-const StringData* fcallToFuncName(const NormalizedInstruction* fcall);
 
-} }
+//////////////////////////////////////////////////////////////////////
+
+}}
 
 #endif

@@ -1,1 +1,2 @@
-HipHop Fatal error: Stack overflow in %s on line 18
+
+Fatal error: Stack overflow in %s on line %d

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,15 +17,18 @@
 #ifndef incl_HPHP_RESOURCE_DATA_H_
 #define incl_HPHP_RESOURCE_DATA_H_
 
-#ifndef incl_HPHP_INSIDE_HPHP_COMPLEX_TYPES_H_
-#error Directly including 'resource_data.h' is prohibited. \
-       Include 'complex_types.h' instead.
-#endif
-
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/countable.h"
 #include "hphp/runtime/base/sweepable.h"
+#include "hphp/runtime/base/classname-is.h"
+
+#include "hphp/util/thread-local.h"
 
 namespace HPHP {
+
+class Array;
+class String;
+class VariableSerializer;
+
 ///////////////////////////////////////////////////////////////////////////////
 
 /**
@@ -33,9 +36,11 @@ namespace HPHP {
  */
 class ResourceData {
  private:
-  static DECLARE_THREAD_LOCAL_NO_CHECK(int, os_max_resource_id);
+  static __thread int os_max_resource_id;
 
  public:
+  static void resetMaxId() { os_max_resource_id = 0; }
+
   ResourceData();
 
  private:
@@ -45,73 +50,60 @@ class ResourceData {
  public:
   void setStatic() const { assert(false); }
   bool isStatic() const { return false; }
+  void setUncounted() const { assert(false); }
+  bool isUncounted() const { return false; }
   IMPLEMENT_COUNTABLENF_METHODS_NO_STATIC
 
   virtual ~ResourceData(); // all PHP resources need vtables
 
   void operator delete(void* p) { ::operator delete(p); }
+  virtual size_t heapSize() const {
+    always_assert(false); // better not be in the smart-heap
+    not_reached();
+  }
 
   void release() {
-    assert(getCount() == 0);
+    assert(!hasMultipleRefs());
     delete this;
-  }
-
-  Class* getVMClass() const {
-    return m_cls;
-  }
-
-  static size_t getVMClassOffset() {
-    // For assembly linkage.
-    size_t res = offsetof(ResourceData, m_cls);
-    assert(res == ObjectData::getVMClassOffset());
-    return res;
   }
 
   int32_t o_getId() const { return o_id; }
   void o_setId(int id); // only for BuiltinFiles
-  static int GetMaxResourceId() ATTRIBUTE_COLD;
 
-  CStrRef o_getClassName() const;
-  virtual CStrRef o_getClassNameHook() const;
-  virtual CStrRef o_getResourceName() const;
+  const String& o_getClassName() const;
+  virtual const String& o_getClassNameHook() const;
+  virtual const String& o_getResourceName() const;
   virtual bool isInvalid() const { return false; }
 
-  bool o_toBoolean() const { return 1; }
+  bool o_toBoolean() const { return true; }
   int64_t o_toInt64() const { return o_id; }
   double o_toDouble() const { return o_id; }
-  String o_toString() const {
-    return String("Resource id #") + String(o_id);
-  }
+  String o_toString() const;
   Array o_toArray() const;
 
   void serialize(VariableSerializer* serializer) const;
   void serializeImpl(VariableSerializer* serializer) const;
-  void dump() const;
 
  private:
-  static void compileTimeAssertions() {
-    static_assert(offsetof(ResourceData, m_count) == FAST_REFCOUNT_OFFSET, "");
-  }
+  static void compileTimeAssertions();
 
+ private:
   //============================================================================
   // ResourceData fields
+  union {
+    struct {
+      UNUSED char m_pad[3];
+      UNUSED HeaderKind m_kind;
+      mutable RefCount m_count;
+    };
+    uint64_t m_kind_count;
+  };
 
  protected:
   // Numeric identifier of resource object (used by var_dump() and other
   // output functions)
   int32_t o_id;
-  // Counter to keep track of the number of references to this resource
-  // (i.e. the resource's "refcount")
-  mutable RefCount m_count;
-  // Pointer to the __resource class; this field is needed (and must be at
-  // the same offset as ObjectData::m_cls) so that backup gc and other things
-  // that walk the SmartAllocator heaps can distinguish between objects and
-  // resources
-  Class* m_cls;
-  // Storage for dynamic properties
-  ArrNR o_properties;
-
-} __attribute__((aligned(16)));
+} __attribute__((__aligned__(16)));
 
 /**
  * Rules to avoid memory problems/leaks from ResourceData classes
@@ -125,11 +117,10 @@ class ResourceData {
  *       String str; // smart-allocated objects are fine
  *    };
  *
- *    Then, the best choice is to use these two macros to make sure the object
+ *    Then, the best choice is to use this macro to make sure the object
  *    is always collected during request shutdown time:
  *
- *       DECLARE_OBJECT_ALLOCATION(T);
- *       IMPLEMENT_OBJECT_ALLOCATION(T);
+ *       DECLARE_RESOURCE_ALLOCATION_NO_SWEEP(T);
  *
  *    This object doesn't participate in sweep(), as object allocator doesn't
  *    have any callback installed.
@@ -151,8 +142,8 @@ class ResourceData {
  *    When deriving from SweepableResourceData, either "new" or "NEW" can
  *    be used, but we prefer people use NEW with these macros:
  *
- *       DECLARE_OBJECT_ALLOCATION(T);
- *       IMPLEMENT_OBJECT_ALLOCATION(T);
+ *       DECLARE_RESOURCE_ALLOCATION(T);
+ *       IMPLEMENT_RESOURCE_ALLOCATION(T);
  *
  * 3. If a ResourceData is a mix of smart allocated data members and non-
  *    smart allocated data members, sweep() has to be overwritten to only
@@ -178,7 +169,6 @@ class ResourceData {
  *
  *       DECLARE_OBJECT_ALLOCATION(T);
  *    };
- *    IMPLEMENT_OBJECT_ALLOCATION_NO_DEFAULT_SWEEP(T);
  *    void MixedSmartAllocated::sweep() {
  *       delete stdstr;
  *       delete vec;
@@ -191,21 +181,49 @@ class ResourceData {
  *    can only be collected/deleted by sweep().
  *
  */
-class SweepableResourceData : public ResourceData, public Sweepable {};
-
-typedef std::map<std::string, ResourceData*> ResourceMap;
-typedef std::map<std::string, ResourceMap> ResourceMapMap;
+class SweepableResourceData : public ResourceData, public Sweepable {
+protected:
+  void sweep() override {
+    // ResourceData objects are non-smart allocated by default (see
+    // operator delete in ResourceData), so sweeping will destroy the
+    // object and deallocate its seat as well.
+    delete this;
+  }
+};
 
 ///////////////////////////////////////////////////////////////////////////////
 
-// Suppress the default implementation of the SmartPtr destructor so that
-// derived classes (ex. HPHP::Resource) can manually handle decReffing the
-// ResourceData.
-template<> inline SmartPtr<ResourceData>::~SmartPtr() {}
-
-ALWAYS_INLINE void decRefRes(ResourceData* res) {
-  if (res->decRefCount() == 0) res->release();
+ALWAYS_INLINE bool decRefRes(ResourceData* res) {
+  return res->decRefAndRelease();
 }
+
+template<class T, class... Args> T* newres(Args&&... args) {
+  static_assert(std::is_convertible<T*,ResourceData*>::value, "");
+  auto const mem = MM().smartMallocSizeLogged(sizeof(T));
+  try {
+    return new (mem) T(std::forward<Args>(args)...);
+  } catch (...) {
+    MM().smartFreeSizeLogged(mem, sizeof(T));
+    throw;
+  }
+}
+
+#define DECLARE_RESOURCE_ALLOCATION_NO_SWEEP(T)                         \
+  public:                                                               \
+  ALWAYS_INLINE void operator delete(void* p) {                         \
+    static_assert(std::is_base_of<ResourceData,T>::value, "");          \
+    assert(sizeof(T) <= kMaxSmartSize);                                 \
+    MM().smartFreeSizeLogged(p, sizeof(T));                             \
+  }\
+  virtual size_t heapSize() const { return sizeof(T); }
+
+#define DECLARE_RESOURCE_ALLOCATION(T)                                  \
+  DECLARE_RESOURCE_ALLOCATION_NO_SWEEP(T)                               \
+  void sweep() override;
+
+#define IMPLEMENT_RESOURCE_ALLOCATION(T) \
+  static_assert(std::is_base_of<ResourceData,T>::value, ""); \
+  void HPHP::T::sweep() { this->~T(); }
 
 ///////////////////////////////////////////////////////////////////////////////
 }

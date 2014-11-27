@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,27 +17,22 @@
 #ifndef incl_HPHP_FILE_H_
 #define incl_HPHP_FILE_H_
 
-#include "hphp/runtime/base/types.h"
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/request-event-handler.h"
 #include "hphp/runtime/base/request-local.h"
+#include "hphp/runtime/base/smart-containers.h"
+#include "hphp/runtime/base/type-array.h"
+#include "hphp/runtime/base/type-resource.h"
+#include "hphp/runtime/base/type-string.h"
+#include "hphp/runtime/base/type-variant.h"
+
+struct stat;
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class FileData : public RequestEventHandler {
-public:
-  FileData() : m_pcloseRet(0) {}
-  void clear() { m_pcloseRet = 0; }
-  virtual void requestInit() {
-    clear();
-  }
-  virtual void requestShutdown() {
-    clear();
-  }
-  int m_pcloseRet;
-};
+class StreamContext;
 
-DECLARE_EXTERN_REQUEST_LOCAL(FileData, s_file_data);
+extern int __thread s_pcloseRet;
 
 /**
  * This is PHP's "stream", base class of plain file, gzipped file, directory
@@ -47,30 +42,39 @@ DECLARE_EXTERN_REQUEST_LOCAL(FileData, s_file_data);
  */
 class File : public SweepableResourceData {
 public:
-  static String TranslatePath(CStrRef filename);
-  // Same as TranslatePath except doesn't make paths absolute
-  static String TranslatePathKeepRelative(CStrRef filename);
-  // Same as TranslatePath except checks the file cache on miss
-  static String TranslatePathWithFileCache(CStrRef filename);
-  static String TranslateCommand(CStrRef cmd);
-  static Variant Open(CStrRef filename, CStrRef mode,
-                      int options = 0, CVarRef context = uninit_null());
+  static const int CHUNK_SIZE;
 
-  static bool IsVirtualDirectory(CStrRef filename);
-  static bool IsPlainFilePath(CStrRef filename);
+  static String TranslatePath(const String& filename);
+  // Same as TranslatePath except doesn't make paths absolute
+  static String TranslatePathKeepRelative(const String& filename);
+  // Same as TranslatePath except checks the file cache on miss
+  static String TranslatePathWithFileCache(const String& filename);
+  static String TranslateCommand(const String& cmd);
+  static Resource Open(const String& filename, const String& mode,
+                       int options = 0, const Variant& context = uninit_null());
+
+  static bool IsVirtualDirectory(const String& filename);
+  static bool IsPlainFilePath(const String& filename) {
+    return filename.find("://") == String::npos;
+  }
 
 public:
   static const int USE_INCLUDE_PATH;
 
-  explicit File(bool nonblocking = true);
+  explicit File(bool nonblocking = true,
+                const String& wrapper_type = null_string,
+                const String& stream_type = empty_string_ref);
   virtual ~File();
 
-  static StaticString s_class_name;
+  static StaticString& classnameof() {
+    static StaticString result("File");
+    return result;
+  }
   static StaticString s_resource_name;
 
   // overriding ResourceData
-  CStrRef o_getClassNameHook() const { return s_class_name; }
-  CStrRef o_getResourceName() const { return s_resource_name; }
+  const String& o_getClassNameHook() const { return classnameof(); }
+  const String& o_getResourceName() const { return s_resource_name; }
   virtual bool isInvalid() const { return m_closed; }
 
   int fd() const { return m_fd;}
@@ -80,26 +84,57 @@ public:
   /**
    * How to open this type of file.
    */
-  virtual bool open(CStrRef filename, CStrRef mode) = 0;
+  virtual bool open(const String& filename, const String& mode) = 0;
 
   /**
    * How to close this type of file.
+   *
+   * Your implementaitn should call invokeFiltersOnClose() before anything else
+   * to make sure that any user-provided php_user_filter instances get to flush
+   * and clean up.
    */
   virtual bool close() = 0;
   virtual bool isClosed() const { return m_closed;}
+
+  /* Use:
+   * - read() when fetching data to return to PHP
+   * - readImpl() when you want raw unbuffered data; for example, if you use
+   *   the Socket class to implement a network-based extension, use readImpl
+   *   to avoid the internal buffer, stream filters, and so on
+   * - filteredRead() (wrapper around readImpl()) to call user-supplied stream
+   *   filters if you reimplement read()
+   *
+   * Stream filters are only supported for read() - the fgetc() and seek()
+   * behavior in Zend is undocumented, surprising, and not supported
+   * in HHVM.
+   */
 
   /**
    * Read one chunk of input. Returns a null string on failure or eof.
    */
   virtual int64_t readImpl(char *buffer, int64_t length) = 0;
   virtual int getc();
-  virtual String read(int64_t length = 0);
+  virtual String read(int64_t length);
+  virtual String read();
+
+  /* Use:
+   * - write() in response to a PHP code that is documented as writing to a
+   *   stream
+   * - writeImpl() if you want C-like behavior, instead of PHP-like behavior;
+   *   for example, if you write a network-based extension using Socket
+   * - filteredWrite() if you re-implement write() to provide support for PHP
+   *   user filters
+   *
+   * Stream filters are only supported for write() - the fputc() and seek()
+   * behavior in Zend is undocumented, surprising, and not supported
+   * in HHVM.
+   */
 
   /**
    * Write one chunk of output. Returns bytes written.
    */
   virtual int64_t writeImpl(const char *buffer, int64_t length) = 0;
-  virtual int64_t write(CStrRef str, int64_t length = 0);
+  virtual int64_t write(const String& str, int64_t length = 0);
   int putc(char c);
 
   /**
@@ -114,10 +149,21 @@ public:
   virtual bool truncate(int64_t size);
   virtual bool lock(int operation);
   virtual bool lock(int operation, bool &wouldblock);
+  virtual bool stat(struct stat *sb);
 
   virtual Array getMetaData();
-  virtual Array getWrapperMetaData() { return null_array; }
-  virtual const char *getStreamType() const { return "";}
+  virtual Variant getWrapperMetaData() { return Variant(); }
+  String getWrapperType() const;
+  String getStreamType() const { return m_streamType; }
+  Resource &getStreamContext() { return m_streamContext; }
+  void setStreamContext(Resource &context) { m_streamContext = context; }
+  void appendReadFilter(Resource &filter);
+  void appendWriteFilter(Resource &filter);
+  void prependReadFilter(Resource &filter);
+  void prependWriteFilter(Resource &filter);
+  bool removeFilter(Resource &filter);
+
+  int64_t bufferedLen() { return m_writepos - m_readpos; }
 
   std::string getMode() { return m_mode; }
 
@@ -127,9 +173,9 @@ public:
   String readLine(int64_t maxlen = 0);
 
   /**
-   * Read one record a time. Returns a null string on failure or eof.
+   * Read one record a time. Returns a false on failure or eof.
    */
-  String readRecord(CStrRef delimiter, int64_t maxlen = 0);
+  Variant readRecord(const String& delimiter, int64_t maxlen = 0);
 
   /**
    * Read entire file and print it out.
@@ -139,18 +185,18 @@ public:
   /**
    * Write to file with specified format and arguments.
    */
-  int64_t printf(CStrRef format, CArrRef args);
+  int64_t printf(const String& format, const Array& args);
 
   /**
    * Write one line of csv record.
    */
-  int64_t writeCSV(CArrRef fields, char delimiter = ',', char enclosure = '"');
+  int64_t writeCSV(const Array& fields, char delimiter = ',', char enclosure = '"');
 
   /**
    * Read one line of csv record.
    */
   Array readCSV(int64_t length = 0, char delimiter = ',', char enclosure = '"',
-                char escape = '\\');
+                char escape = '\\', const String* initial = nullptr);
 
   /**
    * Return the last error we know about
@@ -173,15 +219,38 @@ protected:
 
   // fields useful for both reads and writes
   int64_t m_position; // the current cursor position
+  bool m_eof;
 
   std::string m_name;
   std::string m_mode;
 
-  void closeImpl();
+  StringData* m_wrapperType;
+  StringData* m_streamType;
+  Resource m_streamContext;
+  smart::list<Resource> m_readFilters;
+  smart::list<Resource> m_writeFilters;
 
+  void invokeFiltersOnClose();
+  void closeImpl();
+  virtual void sweep() override;
+
+  /**
+   * call readImpl(m_buffer, CHUNK_SIZE), passing through stream filters if any.
+   */
+  int64_t filteredReadToBuffer();
+
+  /**
+   * call writeImpl, passing through stream filters if any.
+   */
+  int64_t filteredWrite(const char* buffer, int64_t length);
 private:
-  static const int CHUNK_SIZE = 8192;
   char *m_buffer;
+  int64_t m_bufferSize;
+
+  template<class ResourceList>
+  String applyFilters(const String& buffer,
+                      ResourceList& filters,
+                      bool closing);
 };
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -25,6 +25,10 @@ function bar($i) {
   $v9 = "undefined";
   $v10 = "undefined";
   $v11 = "undefined";
+  $v12 = "undefined";
+  $v13 = "undefined";
+  $v14 = "undefined";
+  $v15 = "undefined";
   if ($i >= 1) {
     $v1 = null;
     $v2 = false;
@@ -37,20 +41,47 @@ function bar($i) {
     $v9 = new C();
     $v10 = array();
     $v11 = array(1);
+
+    $empty_col_1 = Set {};
+    $empty_col_2 = Map {};
+    $empty_col_3 = Vector {};
+    $empty_col_4 = ImmVector {};
+    $empty_col_5 = ImmSet {};
+    $empty_col_6 = ImmMap {};
+
+    $filled_col_1 = Set {1};
+    $filled_col_2 = Map {'k' => 'v'};
+    $filled_col_3 = Vector {1};
+    $filled_col_4 = ImmVector {1};
+    $filled_col_5 = Set {1};
+    $filled_col_6 = Map {'k' => 'v'};
   }
-  var_dump((bool)$v1);
-  var_dump((bool)$v2);
-  var_dump((bool)$v3);
-  var_dump((bool)$v4);
-  var_dump((bool)$v5);
-  var_dump((bool)$v6);
-  var_dump((bool)$v7);
-  var_dump((bool)$v8);
-  var_dump((bool)$v9);
-  var_dump((bool)$v10);
-  var_dump((bool)$v11);
+  var_dump((bool) $v1);
+  var_dump((bool) $v2);
+  var_dump((bool) $v3);
+  var_dump((bool) $v4);
+  var_dump((bool) $v5);
+  var_dump((bool) $v6);
+  var_dump((bool) $v7);
+  var_dump((bool) $v8);
+  var_dump((bool) $v9);
+  var_dump((bool) $v10);
+  var_dump((bool) $v11);
+
+  echo "= collections =\n";
+  var_dump((bool) $empty_col_1);
+  var_dump((bool) $empty_col_2);
+  var_dump((bool) $empty_col_3);
+  var_dump((bool) $empty_col_4);
+  var_dump((bool) $empty_col_5);
+  var_dump((bool) $empty_col_6);
+  var_dump((bool) $filled_col_1);
+  var_dump((bool) $filled_col_2);
+  var_dump((bool) $filled_col_3);
+  var_dump((bool) $filled_col_4);
+  var_dump((bool) $filled_col_5);
+  var_dump((bool) $filled_col_6);
 }
 
 bar(1);
-
 ?>

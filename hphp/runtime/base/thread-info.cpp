@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,16 +13,28 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
+#include "hphp/runtime/base/thread-info.h"
+
+#include <atomic>
+
+#include <sys/time.h>
+#include <sys/mman.h>
+#include <sys/resource.h>
+#include <signal.h>
+#include <limits>
+#include <map>
+#include <set>
+
 #include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/hphp-system.h"
 #include "hphp/runtime/base/code-coverage.h"
-#include "hphp/runtime/base/smart-allocator.h"
-#include "hphp/runtime/vm/jit/target-cache.h"
+#include "hphp/runtime/base/ini-setting.h"
+#include "hphp/runtime/base/rds.h"
+#include "hphp/runtime/ext/string/ext_string.h"
 #include "hphp/util/lock.h"
 #include "hphp/util/alloc.h"
-#include "folly/String.h"
-
-#include <sys/mman.h>
+#include "hphp/util/logger.h"
+#include <folly/String.h>
 
 using std::map;
 
@@ -34,24 +46,19 @@ static std::set<ThreadInfo*> s_thread_infos;
 
 __thread char* ThreadInfo::t_stackbase = 0;
 
-IMPLEMENT_THREAD_LOCAL_NO_CHECK_HOT(ThreadInfo, ThreadInfo::s_threadInfo);
+IMPLEMENT_THREAD_LOCAL_NO_CHECK(ThreadInfo, ThreadInfo::s_threadInfo);
 
 ThreadInfo::ThreadInfo()
     : m_stacklimit(0), m_executing(Idling) {
   assert(!t_stackbase);
   t_stackbase = static_cast<char*>(stack_top_ptr());
 
-  m_mm = MemoryManager::TheMemoryManager();
+  m_mm = &MM();
 
   m_profiler = nullptr;
   m_pendingException = nullptr;
   m_coverage = new CodeCoverage();
-
-  Transl::TargetCache::threadInit();
-  onSessionInit();
-
-  Lock lock(s_thread_info_mutex);
-  s_thread_infos.insert(this);
+  m_debugHookHandler = nullptr;
 }
 
 ThreadInfo::~ThreadInfo() {
@@ -60,7 +67,17 @@ ThreadInfo::~ThreadInfo() {
   Lock lock(s_thread_info_mutex);
   s_thread_infos.erase(this);
   delete m_coverage;
-  Transl::TargetCache::threadExit();
+  RDS::threadExit();
+}
+
+void ThreadInfo::init() {
+  m_reqInjectionData.threadInit();
+  RDS::threadInit();
+  onSessionInit();
+
+  Lock lock(s_thread_info_mutex);
+  s_thread_infos.insert(this);
+  Sweepable::InitSweepableList();
 }
 
 bool ThreadInfo::valid(ThreadInfo* info) {
@@ -76,23 +93,30 @@ void ThreadInfo::GetExecutionSamples(std::map<Executing, int> &counts) {
   }
 }
 
+void ThreadInfo::ExecutePerThread(std::function<void(ThreadInfo*)> f) {
+  Lock lock(s_thread_info_mutex);
+  for (auto& thread : s_thread_infos) {
+    f(thread);
+  }
+}
+
 void ThreadInfo::onSessionInit() {
   m_reqInjectionData.onSessionInit();
 
   // Take the address of the cached per-thread stackLimit, and use this to allow
   // some slack for (a) stack usage above the caller of reset() and (b) stack
   // usage after the position gets checked.
-  // If we're not in a threaded environment, then Util::s_stackSize will be
+  // If we're not in a threaded environment, then s_stackSize will be
   // zero. Use getrlimit to figure out what the size of the stack is to
   // calculate an approximation of where the bottom of the stack should be.
-  if (Util::s_stackSize == 0) {
+  if (s_stackSize == 0) {
     struct rlimit rl;
 
     getrlimit(RLIMIT_STACK, &rl);
     m_stacklimit = t_stackbase - (rl.rlim_cur - StackSlack);
   } else {
-    m_stacklimit = (char *)Util::s_stackLimit + StackSlack;
-    assert(uintptr_t(m_stacklimit) < (Util::s_stackLimit + Util::s_stackSize));
+    m_stacklimit = (char *)s_stackLimit + StackSlack;
+    assert(uintptr_t(m_stacklimit) < s_stackLimit + s_stackSize);
   }
 }
 
@@ -109,189 +133,74 @@ void ThreadInfo::setPendingException(Exception* e) {
 }
 
 void ThreadInfo::onSessionExit() {
+  // Clear any timeout handlers to they don't fire when the request has already
+  // been destroyed
   m_reqInjectionData.setTimeout(0);
+
   m_reqInjectionData.reset();
-  Transl::TargetCache::requestExit();
+  RDS::requestExit();
 }
 
-RequestInjectionData::~RequestInjectionData() {
-#ifndef __APPLE__
-  if (m_hasTimer) {
-    timer_delete(m_timer_id);
+//////////////////////////////////////////////////////////////////////
+
+void throw_infinite_recursion_exception() {
+  if (!RuntimeOption::NoInfiniteRecursionDetection) {
+    // Reset profiler otherwise it might recurse further causing segfault
+    DECLARE_THREAD_INFO
+    info->m_profiler = nullptr;
+    raise_error("infinite recursion detected");
   }
-#endif
 }
 
-void RequestInjectionData::onSessionInit() {
-  Transl::TargetCache::requestInit();
-  cflagsPtr = Transl::TargetCache::conditionFlagsPtr();
-  reset();
-}
+ssize_t check_request_surprise(ThreadInfo* info) {
+  auto& p = info->m_reqInjectionData;
+  bool do_timedout, do_memExceeded, do_signaled;
 
-void RequestInjectionData::onTimeout() {
-  setTimedOutFlag();
-  m_timerActive.store(false, std::memory_order_relaxed);
-}
+  ssize_t flags = p.fetchAndClearFlags();
+  do_timedout = (flags & RequestInjectionData::TimedOutFlag) &&
+    !p.getDebuggerAttached();
+  do_memExceeded = (flags & RequestInjectionData::MemExceededFlag);
+  do_signaled = (flags & RequestInjectionData::SignaledFlag);
 
-void RequestInjectionData::setTimeout(int seconds) {
-#ifndef __APPLE__
-  m_timeoutSeconds = seconds > 0 ? seconds : 0;
-  if (!m_hasTimer) {
-    if (!m_timeoutSeconds) {
-      // we don't have a timer, and we don't have a timeout
-      return;
-    }
-    sigevent sev;
-    memset(&sev, 0, sizeof(sev));
-    sev.sigev_notify = SIGEV_SIGNAL;
-    sev.sigev_signo = SIGVTALRM;
-    sev.sigev_value.sival_ptr = this;
-    if (timer_create(CLOCK_REALTIME, &sev, &m_timer_id)) {
-      raise_error("Failed to set timeout: %s", folly::errnoStr(errno).c_str());
-    }
-    m_hasTimer = true;
-  }
+  // Start with any pending exception that might be on the thread.
+  Exception* pendingException = info->m_pendingException;
+  info->m_pendingException = nullptr;
 
-  /*
-   * There is a potential race here. Callers want to assume that
-   * if they cancel the timeout (seconds = 0), they *wont* get
-   * a signal after they call this (although they may get a signal
-   * during the call).
-   * So we need to clear the timeout, wait (if necessary) for a
-   * pending signal to be handled, and then set the new timeout
-   */
-  itimerspec ts = {};
-  itimerspec old;
-  timer_settime(m_timer_id, 0, &ts, &old);
-  if (!old.it_value.tv_sec && !old.it_value.tv_nsec) {
-    // the timer has gone off...
-    if (m_timerActive.load(std::memory_order_acquire)) {
-      // but m_timerActive is still set, so we haven't processed
-      // the signal yet.
-      // spin until its done.
-      while (m_timerActive.load(std::memory_order_relaxed)) {
-      }
+  if (do_timedout) {
+    if (pendingException) {
+      p.setTimedOutFlag();
+    } else {
+      pendingException = generate_request_timeout_exception();
     }
   }
-  if (m_timeoutSeconds) {
-    m_timerActive.store(true, std::memory_order_relaxed);
-    ts.it_value.tv_sec = m_timeoutSeconds;
-    timer_settime(m_timer_id, 0, &ts, nullptr);
-  } else {
-    m_timerActive.store(false, std::memory_order_relaxed);
-  }
-#endif
-}
-
-int RequestInjectionData::getRemainingTime() const {
-#ifndef __APPLE__
-  if (m_hasTimer) {
-    itimerspec ts;
-    if (!timer_gettime(m_timer_id, &ts)) {
-      int remaining = ts.it_value.tv_sec;
-      return remaining > 1 ? remaining : 1;
+  if (do_memExceeded) {
+    if (pendingException) {
+      p.setMemExceededFlag();
+    } else {
+      pendingException = generate_memory_exceeded_exception();
     }
   }
-#endif
-  return m_timeoutSeconds;
-}
-
-/*
- * If seconds == 0, reset the timeout to the last one set
- * If seconds  < 0, set the timeout to -seconds if there's less than
- *                  -seconds remaining.
- * If seconds  > 0, set the timeout to seconds.
- */
-void RequestInjectionData::resetTimer(int seconds /* = 0 */) {
-  auto data = &ThreadInfo::s_threadInfo->m_reqInjectionData;
-  if (seconds == 0) {
-    seconds = data->getTimeout();
-  } else if (seconds < 0) {
-    if (!data->getTimeout()) return;
-    seconds = -seconds;
-    if (seconds < data->getRemainingTime()) return;
+  if (do_signaled) {
+    extern bool HHVM_FN(pcntl_signal_dispatch)();
+    HHVM_FN(pcntl_signal_dispatch)();
   }
-  data->setTimeout(seconds);
-  data->clearTimedOutFlag();
+
+  if (pendingException) {
+    pendingException->throwException();
+  }
+  return flags;
 }
 
-void RequestInjectionData::reset() {
-  __sync_fetch_and_and(getConditionFlags(), 0);
-  m_coverage = RuntimeOption::RecordCodeCoverage;
-  m_debugger = false;
-  m_debuggerIntr = false;
-  updateJit();
-  while (!interrupts.empty()) interrupts.pop();
+ssize_t check_request_surprise_unlikely() {
+  auto info = ThreadInfo::s_threadInfo.getNoCheck();
+  auto flags = info->m_reqInjectionData.getConditionFlags()->load();
+
+  if (UNLIKELY(flags)) {
+    check_request_surprise(info);
+  }
+  return flags;
 }
 
-void RequestInjectionData::updateJit() {
-  m_jit = RuntimeOption::EvalJit &&
-    !(RuntimeOption::EvalJitDisabledByHphpd && m_debugger) &&
-    !m_debuggerIntr &&
-    !m_coverage &&
-    !shouldProfile();
-}
+//////////////////////////////////////////////////////////////////////
 
-void RequestInjectionData::setMemExceededFlag() {
-  __sync_fetch_and_or(getConditionFlags(),
-                      RequestInjectionData::MemExceededFlag);
-}
-
-void RequestInjectionData::setTimedOutFlag() {
-  __sync_fetch_and_or(getConditionFlags(),
-                      RequestInjectionData::TimedOutFlag);
-}
-
-void RequestInjectionData::clearTimedOutFlag() {
-  __sync_fetch_and_and(getConditionFlags(),
-                       ~RequestInjectionData::TimedOutFlag);
-}
-
-void RequestInjectionData::setSignaledFlag() {
-  __sync_fetch_and_or(getConditionFlags(),
-                      RequestInjectionData::SignaledFlag);
-}
-
-void RequestInjectionData::setEventHookFlag() {
-  __sync_fetch_and_or(getConditionFlags(),
-                      RequestInjectionData::EventHookFlag);
-}
-
-void RequestInjectionData::clearEventHookFlag() {
-  __sync_fetch_and_and(getConditionFlags(),
-                       ~RequestInjectionData::EventHookFlag);
-}
-
-void RequestInjectionData::setPendingExceptionFlag() {
-  __sync_fetch_and_or(getConditionFlags(),
-                      RequestInjectionData::PendingExceptionFlag);
-}
-
-void RequestInjectionData::clearPendingExceptionFlag() {
-  __sync_fetch_and_and(getConditionFlags(),
-                       ~RequestInjectionData::PendingExceptionFlag);
-}
-
-void RequestInjectionData::setInterceptFlag() {
-  __sync_fetch_and_or(getConditionFlags(),
-                      RequestInjectionData::InterceptFlag);
-}
-
-void RequestInjectionData::clearInterceptFlag() {
-  __sync_fetch_and_and(getConditionFlags(),
-                       ~RequestInjectionData::InterceptFlag);
-}
-
-void RequestInjectionData::setDebuggerSignalFlag() {
-  __sync_fetch_and_or(getConditionFlags(),
-                      RequestInjectionData::DebuggerSignalFlag);
-}
-
-ssize_t RequestInjectionData::fetchAndClearFlags() {
-  return __sync_fetch_and_and(getConditionFlags(),
-                              (RequestInjectionData::EventHookFlag |
-                               RequestInjectionData::InterceptFlag));
-}
-
-///////////////////////////////////////////////////////////////////////////////
 }

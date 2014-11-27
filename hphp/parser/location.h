@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,15 +17,17 @@
 #ifndef incl_HPHP_PARSER_LOCATION_H_
 #define incl_HPHP_PARSER_LOCATION_H_
 
-#include "hphp/util/base.h"
+#include <cstring>
+#include <memory>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-DECLARE_BOOST_TYPES(Location);
 class Location {
 public:
-  Location() : file(""), line0(1), char0(1), line1(1), char1(1), cursor(0) {}
+  Location() : Location(1, 1, 1, 1) {}
+  Location(int l0, int c0, int l1, int c1)
+    : file(""), line0(l0), char0(c0), line1(l1), char1(c1), cursor(0) {}
 
   const char *file;
   int line0;
@@ -60,6 +62,7 @@ public:
     return strcmp(file, loc->file);
   }
 };
+using LocationPtr = std::shared_ptr<Location>;
 
 ///////////////////////////////////////////////////////////////////////////////
 }

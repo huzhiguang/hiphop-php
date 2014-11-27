@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,8 +18,12 @@
 #define incl_HPHP_VARIABLE_TABLE_H_
 
 #include "hphp/compiler/analysis/symbol_table.h"
+#include <map>
+#include <set>
+#include <vector>
 #include "hphp/compiler/statement/statement.h"
 #include "hphp/compiler/analysis/class_scope.h"
+#include "hphp/util/hash-map-typedefs.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -57,6 +61,7 @@ public:
     ContainsDynamicStatic  = 512,
     ContainsGetDefinedVars = 1024,
     ContainsDynamicFunctionCall = 2048,
+    ContainsAssert = 4096,
   };
 
   enum JumpTableType {
@@ -129,7 +134,6 @@ public:
 
   bool needLocalCopy(const Symbol *sym) const;
   bool needLocalCopy(const std::string &name) const;
-  bool needGlobalPointer() const;
   bool isPseudoMainTable() const;
   bool hasPrivate() const;
   bool hasNonStaticPrivate() const;
@@ -272,43 +276,9 @@ public:
   bool isConvertibleSuperGlobal(const std::string &name) const;
 
   /**
-   * Canonicalize symbol order of static globals.
-   */
-  void canonicalizeStaticGlobals();
-
-  /**
    * Generate all variable declarations for this symbol table.
    */
   void outputPHP(CodeGenerator &cg, AnalysisResultPtr ar);
-  /**
-   * Whether or not the specified jump table is empty.
-   */
-  bool hasAllJumpTables() const {
-    return m_emptyJumpTables.empty();
-  }
-  bool hasJumpTable(JumpTableName name) const {
-    return m_emptyJumpTables.find(name) == m_emptyJumpTables.end();
-  }
-
-  /**
-   * These are static variables collected from different local scopes,
-   * as they have to be turned into global variables defined in
-   * GlobalVariables class to make ThreadLocal<GlobalVaribles> work.
-   * This data structure is only needed by global scope.
-   */
-  DECLARE_BOOST_TYPES(StaticGlobalInfo);
-  struct StaticGlobalInfo {
-    Symbol *sym;
-    VariableTable *variables; // where this variable was from
-    ClassScopeRawPtr cls;     // these need to be raw to avoid reference cycles
-    FunctionScopeRawPtr func;
-
-    // get unique identifier for this variable
-    static std::string GetId(ClassScopePtr cls,
-                             FunctionScopePtr func, const std::string &name);
-  };
-
-  bool hasStaticLocals() const { return !m_staticLocalsVec.empty(); }
 
 private:
   enum StaticSelection {
@@ -331,14 +301,6 @@ private:
   unsigned m_hasNonStaticPrivate : 1;
   unsigned m_forcedVariants : 4;
 
-  std::set<JumpTableName> m_emptyJumpTables;
-
-  StaticGlobalInfoPtrVec m_staticGlobalsVec;
-  StringToStaticGlobalInfoPtrMap m_staticGlobals;
-
-  /** static symbols local to this variable table (ie for closures) */
-  SymbolVec m_staticLocalsVec;
-
   bool isGlobalTable(AnalysisResultConstPtr ar) const;
 
   virtual TypePtr setType(AnalysisResultConstPtr ar, const std::string &name,
@@ -346,8 +308,6 @@ private:
   virtual TypePtr setType(AnalysisResultConstPtr ar, Symbol *sym,
                           TypePtr type, bool coerce);
   virtual void dumpStats(std::map<std::string, int> &typeCounts);
-
-  void checkSystemGVOrder(SymbolSet &variants, unsigned int max);
 };
 
 ///////////////////////////////////////////////////////////////////////////////

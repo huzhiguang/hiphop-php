@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,16 +17,12 @@
 #include "hphp/runtime/base/ssl-socket.h"
 #include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/base/runtime-error.h"
-#include "hphp/util/util.h"
-#include "folly/String.h"
+#include "hphp/runtime/base/string-util.h"
+#include <folly/String.h>
 #include <poll.h>
+#include <sys/time.h>
 
 namespace HPHP {
-///////////////////////////////////////////////////////////////////////////////
-
-StaticString SSLSocket::s_class_name("SSLSocket");
-StaticString Certificate::s_class_name("OpenSSL X.509");
-
 ///////////////////////////////////////////////////////////////////////////////
 
 Mutex SSLSocket::s_mutex;
@@ -198,8 +194,13 @@ SSLSocket::SSLSocket(int sockfd, int type, const char *address /* = NULL */,
 }
 
 SSLSocket::~SSLSocket() {
-  m_context.reset(); // for sweeping
-  closeImpl();
+  SSLSocket::closeImpl();
+}
+
+void SSLSocket::sweep() {
+  SSLSocket::closeImpl();
+  File::sweep();
+  SSLSocket::operator delete(this);
 }
 
 bool SSLSocket::onConnect() {
@@ -239,7 +240,7 @@ bool SSLSocket::onAccept() {
 
 bool SSLSocket::handleError(int64_t nr_bytes, bool is_init) {
   char esbuf[512];
-  string ebuf;
+  std::string ebuf;
   unsigned long ecode;
 
   bool retry = true;
@@ -308,7 +309,8 @@ bool SSLSocket::handleError(int64_t nr_bytes, bool is_init) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-SSLSocket *SSLSocket::Create(const Util::HostURL &hosturl, double timeout) {
+SSLSocket *SSLSocket::Create(int fd, int domain, const HostURL &hosturl,
+                             double timeout) {
   CryptoMethod method;
   const std::string scheme = hosturl.getScheme();
 
@@ -324,10 +326,7 @@ SSLSocket *SSLSocket::Create(const Util::HostURL &hosturl, double timeout) {
     return nullptr;
   }
 
-  int domain = hosturl.isIPv6() ? AF_INET6 : AF_INET;
-  int type = SOCK_STREAM;
-  SSLSocket *sock = new SSLSocket(socket(domain, type, 0), domain,
-                                  hosturl.getHost().c_str(),
+  SSLSocket *sock = new SSLSocket(fd, domain, hosturl.getHost().c_str(),
                                   hosturl.getPort());
   sock->m_method = method;
   sock->m_connect_timeout = timeout;
@@ -337,6 +336,7 @@ SSLSocket *SSLSocket::Create(const Util::HostURL &hosturl, double timeout) {
 }
 
 bool SSLSocket::close() {
+  invokeFiltersOnClose();
   return closeImpl();
 }
 
@@ -686,16 +686,19 @@ bool SSLSocket::checkLiveness() {
 ///////////////////////////////////////////////////////////////////////////////
 // Certificate
 
-const StaticString s_file("file://");
-
-BIO *Certificate::ReadData(CVarRef var, bool *file /* = NULL */) {
+BIO *Certificate::ReadData(const Variant& var, bool *file /* = NULL */) {
   if (var.isString() || var.isObject()) {
     String svar = var.toString();
-    if (svar.substr(0, 7) == s_file) {
+    if (StringUtil::IsFileUrl(svar)) {
+      String decoded = StringUtil::DecodeFileUrl(svar);
+      if (decoded.empty()) {
+        raise_warning("invalid file URL, %s", svar.data());
+        return nullptr;
+      }
       if (file) *file = true;
-      BIO *ret = BIO_new_file((char*)svar.substr(7).data(), "r");
+      BIO *ret = BIO_new_file(decoded.data(), "r");
       if (ret == nullptr) {
-        raise_warning("error opening the file, %s", svar.data());
+        raise_warning("error opening the file, %s", decoded.data());
       }
       return ret;
     }
@@ -707,7 +710,7 @@ BIO *Certificate::ReadData(CVarRef var, bool *file /* = NULL */) {
 }
 
 
-Resource Certificate::Get(CVarRef var) {
+Resource Certificate::Get(const Variant& var) {
   if (var.isResource()) {
     return var.toResource();
   }

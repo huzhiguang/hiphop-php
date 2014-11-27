@@ -27,6 +27,7 @@
 #ifndef VIXL_A64_INSTRUCTIONS_A64_H_
 #define VIXL_A64_INSTRUCTIONS_A64_H_
 
+#include "hphp/util/portability.h"
 #include "hphp/vixl/globals.h"
 #include "hphp/vixl/utils.h"
 #include "hphp/vixl/a64/constants-a64.h"
@@ -69,9 +70,14 @@ const int64_t kXMinInt = 0x8000000000000000L;
 const int32_t kWMaxInt = 0x7fffffff;
 const int32_t kWMinInt = 0x80000000;
 const unsigned kLinkRegCode = 30;
+// Register 31 in hardware is the stack pointer. But the zero register is also
+// encoded as register 31. Within vixl, we use SPRegInternalCode to distinguish
+// the stack pointer (to avoid accidentally emitting encodings where the
+// programmer means one and gets the other). It is converted to SPRegCode by the
+// assembler.
 const unsigned kZeroRegCode = 31;
-const unsigned kSPRegInternalCode = 63;
-const unsigned kRegCodeMask = 0x1f;
+const unsigned kSPRegCode = 31;
+const unsigned kSPRegInternalCode = 32;
 
 // AArch64 floating-point specifics. These match IEEE-754.
 const unsigned kDoubleMantissaBits = 52;
@@ -79,19 +85,21 @@ const unsigned kDoubleExponentBits = 11;
 const unsigned kFloatMantissaBits = 23;
 const unsigned kFloatExponentBits = 8;
 
-const float kFP32PositiveInfinity = rawbits_to_float(0x7f800000);
-const float kFP32NegativeInfinity = rawbits_to_float(0xff800000);
-const double kFP64PositiveInfinity = rawbits_to_double(0x7ff0000000000000UL);
-const double kFP64NegativeInfinity = rawbits_to_double(0xfff0000000000000UL);
+UNUSED const float kFP32PositiveInfinity = rawbits_to_float(0x7f800000);
+UNUSED const float kFP32NegativeInfinity = rawbits_to_float(0xff800000);
+UNUSED const double kFP64PositiveInfinity =
+                                   rawbits_to_double(0x7ff0000000000000UL);
+UNUSED const double kFP64NegativeInfinity =
+                                   rawbits_to_double(0xfff0000000000000UL);
 
 // This value is a signalling NaN as both a double and as a float (taking the
 // least-significant word).
-const double kFP64SignallingNaN = rawbits_to_double(0x7ff000007f800001);
-const float kFP32SignallingNaN = rawbits_to_float(0x7f800001);
+UNUSED const double kFP64SignallingNaN = rawbits_to_double(0x7ff000007f800001);
+UNUSED const float kFP32SignallingNaN = rawbits_to_float(0x7f800001);
 
 // A similar value, but as a quiet NaN.
-const double kFP64QuietNaN = rawbits_to_double(0x7ff800007fc00001);
-const float kFP32QuietNaN = rawbits_to_float(0x7fc00001);
+UNUSED const double kFP64QuietNaN = rawbits_to_double(0x7ff800007fc00001);
+UNUSED const float kFP32QuietNaN = rawbits_to_float(0x7fc00001);
 
 enum LSDataSize {
   LSByte        = 0,
@@ -337,6 +345,7 @@ class Instruction {
   inline int ImmBranch() const;
 
   void SetPCRelImmTarget(Instruction* target);
+  void SetPCRelLoadStoreTarget(Instruction* target);
   void SetBranchImmTarget(Instruction* target);
 };
 }  // namespace vixl

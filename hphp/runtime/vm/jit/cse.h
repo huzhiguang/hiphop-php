@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,13 +19,12 @@
 
 #include <unordered_map>
 
-#include "folly/Hash.h"
+#include <folly/Hash.h>
 
-#include "hphp/runtime/vm/jit/ir.h"
-#include "hphp/runtime/vm/jit/cfg.h"
+#include "hphp/runtime/vm/jit/ir-instruction.h"
 #include "hphp/runtime/vm/jit/ssa-tmp.h"
 
-namespace HPHP { namespace JIT {
+namespace HPHP { namespace jit {
 
 /*
  * Hashtable used for common subexpression elimination.  The table maps
@@ -33,12 +32,10 @@ namespace HPHP { namespace JIT {
  * by value (opcode and operands).
  */
 struct CSEHash {
-  SSATmp* lookup(IRInstruction* inst) {
-    MapType::iterator it = map.find(inst);
-    if (it == map.end()) {
-      return nullptr;
-    }
-    return (*it).second;
+  SSATmp* lookup(IRInstruction* inst) const {
+    auto const it = map.find(inst);
+    if (it == end(map)) return nullptr;
+    return it->second;
   }
   SSATmp* insert(SSATmp* opnd) {
     return insert(opnd, opnd->inst());
@@ -80,9 +77,7 @@ private:
     }
   };
 
-  typedef std::unordered_map<IRInstruction*, SSATmp*,
-                             HashOp, EqualsOp>  MapType;
-  MapType map;
+  std::unordered_map<IRInstruction*,SSATmp*,HashOp,EqualsOp> map;
 };
 
 }}

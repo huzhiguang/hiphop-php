@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,32 +19,41 @@
 #include "hphp/compiler/builtin_symbols.h"
 #include "hphp/compiler/code_generator.h"
 #include "hphp/compiler/analysis/analysis_result.h"
-#include "hphp/util/util.h"
 #include "hphp/util/process.h"
 #include "hphp/compiler/option.h"
 #include "hphp/util/async-func.h"
-#include "hphp/runtime/ext/ext_curl.h"
-#include "hphp/runtime/ext/ext_options.h"
+#include "hphp/runtime/ext/curl/ext_curl.h"
+#include "hphp/runtime/ext/std/ext_std_options.h"
 #include "hphp/runtime/server/http-request-handler.h"
 #include "hphp/runtime/base/http-client.h"
 #include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/server/libevent-server.h"
+#include "hphp/runtime/server/server.h"
 
-#include <boost/make_shared.hpp>
+#include <memory>
+#include <vector>
+
+#include <folly/Conv.h>
 
 using namespace HPHP;
 
-#define PORT_MIN 7300
-#define PORT_MAX 7400
+#define PORT_MIN 1024
+#define PORT_MAX 65535
 
 ///////////////////////////////////////////////////////////////////////////////
 
-TestServer::TestServer() { }
+TestServer::TestServer(const std::string serverType)
+    : m_serverType(serverType) { }
 
 static int s_server_port = 0;
 static int s_admin_port = 0;
 static int s_rpc_port = 0;
 static int inherit_fd = -1;
+static std::unique_ptr<AsyncFunc<TestServer>> s_func;
+static char s_pidfile[MAXPATHLEN];
+static char s_repoFile[MAXPATHLEN];
+static char s_logFile[MAXPATHLEN];
+static char s_filename[MAXPATHLEN];
+static int k_timeout = 30;
 
 bool TestServer::VerifyServerResponse(const char *input, const char **outputs,
                                       const char **urls, int nUrls,
@@ -73,34 +82,50 @@ bool TestServer::VerifyServerResponse(const char *input, const char **outputs,
   func.start();
 
   bool passed = true;
+  if (s_func) {
+    if (!s_func->waitForEnd(k_timeout)) {
+      // Takeover didn't complete in 30s, stop the old server
+      fprintf(stderr, "stopping HHVM\n");
+      AsyncFunc<TestServer> stopFunc(this, &TestServer::KillServer);
+      stopFunc.run();
+      fprintf(stderr, "Waiting for stop\n");
+      stopFunc.waitForEnd();
+      fprintf(stderr, "Waiting for old HHVM\n");
+      s_func->waitForEnd();
+      // Mark this test a failure
+      fprintf(stderr, "Proceeding to test\n");
+      passed = false;
+    }
+    s_func.reset();
+  }
 
   string actual;
 
   int url = 0;
   for (url = 0; url < nUrls; url++) {
     String server = "http://";
-    server += f_php_uname("n");
-    server += ":" + lexical_cast<string>(port) + "/";
+    server += HHVM_FN(php_uname)("n").toString();
+    server += ":" + folly::to<string>(port) + "/";
     server += urls[url];
     actual = "<No response from server>";
     string err;
     for (int i = 0; i < 10; i++) {
-      Variant c = f_curl_init();
-      f_curl_setopt(c.toResource(), k_CURLOPT_URL, server);
-      f_curl_setopt(c.toResource(), k_CURLOPT_RETURNTRANSFER, true);
+      Variant c = HHVM_FN(curl_init)();
+      HHVM_FN(curl_setopt)(c.toResource(), k_CURLOPT_URL, server);
+      HHVM_FN(curl_setopt)(c.toResource(), k_CURLOPT_RETURNTRANSFER, true);
       if (postdata) {
-        f_curl_setopt(c.toResource(), k_CURLOPT_POSTFIELDS, postdata);
-        f_curl_setopt(c.toResource(), k_CURLOPT_POST, true);
+        HHVM_FN(curl_setopt)(c.toResource(), k_CURLOPT_POSTFIELDS, postdata);
+        HHVM_FN(curl_setopt)(c.toResource(), k_CURLOPT_POST, true);
       }
       if (header) {
-        f_curl_setopt(c.toResource(), k_CURLOPT_HTTPHEADER,
-                      CREATE_VECTOR1(header));
+        HHVM_FN(curl_setopt)(c.toResource(), k_CURLOPT_HTTPHEADER,
+                      make_packed_array(header));
       }
       if (responseHeader) {
-        f_curl_setopt(c.toResource(), k_CURLOPT_HEADER, 1);
+        HHVM_FN(curl_setopt)(c.toResource(), k_CURLOPT_HEADER, 1);
       }
 
-      Variant res = f_curl_exec(c.toResource());
+      Variant res = HHVM_FN(curl_exec)(c.toResource());
       if (!same(res, false)) {
         actual = (std::string) res.toString();
         break;
@@ -137,44 +162,86 @@ bool TestServer::VerifyServerResponse(const char *input, const char **outputs,
 
 void TestServer::RunServer() {
   string out, err;
-  string portConfig = "-vServer.Port=" + lexical_cast<string>(s_server_port);
+  string portConfig = "-vServer.Port=" + folly::to<string>(s_server_port);
   string adminConfig = "-vAdminServer.Port=" +
-    lexical_cast<string>(s_admin_port);
+    folly::to<string>(s_admin_port);
   string rpcConfig = "-vSatellites.rpc.Port=" +
-    lexical_cast<string>(s_rpc_port);
-  string fd = lexical_cast<string>(inherit_fd);
+    folly::to<string>(s_rpc_port);
+  string fd = folly::to<string>(inherit_fd);
+  string option = (inherit_fd >= 0) ? (string("--port-fd=") + fd) :
+    (string("-vServer.TakeoverFilename=") + string(s_filename));
+  string serverType = string("-vServer.Type=") + m_serverType;
+  string pidFile = string("-vPidFile=") + string(s_pidfile);
+  string repoFile = string("-vRepo.Central.Path=") + string(s_repoFile);
+  string logFile = string("-vLog.File=") + string(s_logFile);
 
   const char *argv[] = {
-    "", "--mode=server", "--config=test/ext/config-server.hdf",
+    "__HHVM__", "--mode=server", "--config=test/ext/config-server.hdf",
     portConfig.c_str(), adminConfig.c_str(), rpcConfig.c_str(),
-    "--port-fd", fd.c_str(),
-    NULL
+    option.c_str(), serverType.c_str(), pidFile.c_str(), repoFile.c_str(),
+    logFile.c_str(),
+    nullptr
   };
 
+  // replace __HHVM__
   if (Option::EnableEval < Option::FullEval) {
     argv[0] = "runtime/tmp/TestServer/test";
   } else {
     argv[0] = HHVM_PATH;
   }
 
-  Process::Exec(argv[0], argv, NULL, out, &err);
+  Process::Exec(argv[0], argv, nullptr, out, &err);
 }
 
 void TestServer::StopServer() {
   for (int i = 0; i < 10; i++) {
-    string out, err;
-    Variant c = f_curl_init();
+    Variant c = HHVM_FN(curl_init)();
     String url = "http://";
-    url += f_php_uname("n");
-    url += ":" + lexical_cast<string>(s_admin_port) + "/stop";
-    f_curl_setopt(c.toResource(), k_CURLOPT_URL, url);
-    f_curl_setopt(c.toResource(), k_CURLOPT_RETURNTRANSFER, true);
-    Variant res = f_curl_exec(c.toResource());
+    url += HHVM_FN(php_uname)("n").toString();
+    url += ":" + folly::to<string>(s_admin_port) + "/stop";
+    HHVM_FN(curl_setopt)(c.toResource(), k_CURLOPT_URL, url);
+    HHVM_FN(curl_setopt)(c.toResource(), k_CURLOPT_RETURNTRANSFER, true);
+    HHVM_FN(curl_setopt)(c.toResource(), k_CURLOPT_TIMEOUT, 1);
+    HHVM_FN(curl_setopt)(c.toResource(), k_CURLOPT_CONNECTTIMEOUT, 1);
+    Variant res = HHVM_FN(curl_exec)(c.toResource());
     if (!same(res, false)) {
-      break;
+      return;
     }
     sleep(1); // wait until HTTP server is up and running
   }
+  KillServer();
+}
+
+void TestServer::KillServer() {
+  fprintf(stderr, "Have to kill HHVM\n");
+  // Getting more aggresive
+  char buf[1024];
+  int fd = open(s_pidfile, O_RDONLY);
+  int ret = read(fd, buf, sizeof(buf) - 1);
+  if (ret <= 0) {
+    printf("Can't read pid from pid file %s\n", s_pidfile);
+    return;
+  }
+  buf[ret] = 0;
+  string out, err;
+  const char *argv[] = {"kill", buf, nullptr};
+  for (int i = 0; i < 10; i++) {
+    auto ret = Process::Exec(argv[0], argv, nullptr, out, &err);
+    if (ret) {
+      return;
+    }
+  }
+
+  // Last resort
+  const char *argv9[] = {"kill", "-9", buf, nullptr};
+  for (int i = 0; i < 10; i++) {
+    auto ret = Process::Exec(argv9[0], argv9, nullptr, out, &err);
+    if (ret) {
+      return;
+    }
+  }
+
+  printf("Can't kill pid %s read from pid file %s\n", buf, s_pidfile);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -186,20 +253,24 @@ public:
   virtual void handleRequest(Transport *transport) {
     // do nothing
   }
+  virtual void abortRequest(Transport *transport) {
+    // do nothing
+  }
 };
 
-static int find_server_port(int port_min, int port_max) {
-  for (int port = port_min; ; port++) {
+static int find_server_port(const std::string &serverType) {
+  for (int tries = 0; true; tries++) {
+    auto port = (rand() % (PORT_MAX - PORT_MIN)) + PORT_MIN;
     try {
-      ServerPtr server = boost::make_shared<LibEventServer>(
-          "127.0.0.1", port, 50);
-      server->setRequestHandlerFactory<TestServerRequestHandler>(30);
+      ServerPtr server = ServerFactoryRegistry::createServer(
+        serverType, "127.0.0.1", port, 50);
+      server->setRequestHandlerFactory<TestServerRequestHandler>(k_timeout);
       server->start();
       server->stop();
       server->waitForEnd();
       return port;
     } catch (const FailedToListenException& e) {
-      if (port >= port_max) throw;
+      if (tries >= 100) throw;
     }
   }
 }
@@ -207,21 +278,28 @@ static int find_server_port(int port_min, int port_max) {
 bool TestServer::RunTests(const std::string &which) {
   bool ret = true;
 
-  {
-    // TestLibeventServer finds a good port to listen on, so it must
-    // always run.
-    std::string which = "TestLibeventServer";
-    RUN_TEST(TestLibeventServer);
-  }
-  s_admin_port = find_server_port(s_server_port + 1, PORT_MAX);
-  s_rpc_port = find_server_port(s_admin_port + 1, PORT_MAX);
+  srand(time(0));
+  s_server_port = find_server_port(m_serverType);
+  s_admin_port = find_server_port(m_serverType);
+  s_rpc_port = find_server_port(m_serverType);
+  snprintf(s_pidfile, MAXPATHLEN, "/tmp/test_server.hhvm.pid_XXXXXX");
+  int tmpfd = mkstemp(s_pidfile);
+  close(tmpfd);
+  snprintf(s_repoFile, MAXPATHLEN, "/tmp/test_server.hhvm.hhbc_XXXXXX");
+  tmpfd = mkstemp(s_repoFile);
+  close(tmpfd);
+  snprintf(s_logFile, MAXPATHLEN, "/tmp/test_server.hhvm.log_XXXXXX");
+  tmpfd = mkstemp(s_logFile);
+  close(tmpfd);
 
   RUN_TEST(TestInheritFdServer);
+  RUN_TEST(TestTakeoverServer);
   RUN_TEST(TestSanity);
   RUN_TEST(TestServerVariables);
   RUN_TEST(TestInteraction);
   RUN_TEST(TestGet);
   RUN_TEST(TestPost);
+  RUN_TEST(TestExpectContinue);
   RUN_TEST(TestCookie);
   RUN_TEST(TestResponseHeader);
   RUN_TEST(TestSetCookie);
@@ -259,7 +337,7 @@ bool TestServer::TestServerVariables() {
         "function clean($x) { return str_replace(getcwd(),'',$x); }",
 
         "string(13) \"/path/subpath\"\n"
-        "string(13) \"/path/subpath\"\n"
+        "string(20) \"/string/path/subpath\"\n"
         "string(7) \"/string\"\n"
         "string(28) \"/string/path/subpath?a=1&b=2\"\n"
         "string(7) \"/string\"\n"
@@ -295,7 +373,7 @@ bool TestServer::TestInteraction() {
   VSR2("<?php "
         "$a[] = new stdclass;"
         "var_dump(count(array_combine($a, $a)));",
-        "int(0)\n");
+        "");
 
   return true;
 }
@@ -345,6 +423,15 @@ bool TestServer::TestPost() {
 
   VSPOST("<?php print $HTTP_RAW_POST_DATA;",
          "name=value", "string", params);
+
+  return true;
+}
+
+bool TestServer::TestExpectContinue() {
+  const char *params = "name=value";
+
+  VSRX("<?php print $_POST['name'];",
+       "value", "string", "POST", "Expect: 100-continue", params);
 
   return true;
 }
@@ -428,10 +515,10 @@ public:
   }
 };
 
-typedef boost::shared_ptr<TestTransport> TestTransportPtr;
+typedef std::shared_ptr<TestTransport> TestTransportPtr;
 typedef std::vector<TestTransportPtr> TestTransportPtrVec;
 typedef AsyncFunc<TestTransport> TestTransportAsyncFunc;
-typedef boost::shared_ptr<TestTransportAsyncFunc> TestTransportAsyncFuncPtr;
+typedef std::shared_ptr<TestTransportAsyncFunc> TestTransportAsyncFuncPtr;
 typedef std::vector<TestTransportAsyncFuncPtr> TestTransportAsyncFuncPtrVec;
 
 #define TEST_SIZE 100
@@ -465,11 +552,6 @@ bool TestServer::TestRequestHandling() {
   return Count(true);
 }
 
-bool TestServer::TestLibeventServer() {
-  s_server_port = find_server_port(PORT_MIN, PORT_MAX);
-  return Count(true);
-}
-
 static bool PreBindSocketHelper(struct addrinfo *info) {
   if (info->ai_family != AF_INET && info->ai_family != AF_INET6) {
     printf("No IPV4/6 interface found.\n");
@@ -500,7 +582,7 @@ bool TestServer::PreBindSocket() {
   hints.ai_socktype = SOCK_STREAM;
   hints.ai_flags = AI_PASSIVE | AI_ADDRCONFIG;
 
-  if (getaddrinfo(nullptr, lexical_cast<string>(s_server_port).c_str(),
+  if (getaddrinfo(nullptr, folly::to<string>(s_server_port).c_str(),
                   &hints, &res0) < 0) {
     printf("Error in getaddrinfo(): %s\n", strerror(errno));
     return false;
@@ -525,6 +607,38 @@ void TestServer::CleanupPreBoundSocket() {
 bool TestServer::TestInheritFdServer() {
   WITH_PREBOUND_SOCKET(VSR("<?php print 'Hello, World!';",
       "Hello, World!"));
+  return true;
+}
+
+bool TestServer::TestTakeoverServer() {
+  // start a server
+  snprintf(s_filename, MAXPATHLEN, "/tmp/hphp_takeover_XXXXXX");
+  int tmpfd = mkstemp(s_filename);
+  close(tmpfd);
+
+  s_func.reset(new AsyncFunc<TestServer>(this, &TestServer::RunServer));
+  s_func->start();
+
+  // Wait for the server to actually start
+  HttpClient http;
+  StringBuffer response;
+  vector<String> responseHeaders;
+  string url = "http://127.0.0.1:" + folly::to<string>(s_server_port) +
+    "/status.php";
+  HeaderMap headers;
+  for (int i = 0; i < 10; i++) {
+    int code = http.get(url.c_str(), response, &headers, &responseHeaders);
+    if (code > 0) {
+      break;
+    }
+    sleep(1);
+  }
+
+  // will start a second server, which should takeover
+  VSR("<?php print 'Hello, World!';",
+      "Hello, World!");
+  unlink(s_filename);
+  s_filename[0] = 0;
   return true;
 }
 
@@ -555,7 +669,7 @@ public:
       response += iter->first;
       for (unsigned int i = 0; i < iter->second.size(); i++) {
         response += "\n";
-        response += lexical_cast<string>(i);
+        response += folly::to<string>(i);
         response += ": ";
         response += iter->second[i];
       }
@@ -564,14 +678,17 @@ public:
     transport->addHeader("Custom", "blah");
     transport->sendString(response);
   }
+  virtual void abortRequest(Transport *transport) {
+    transport->sendString("Service Unavailable", 503);
+  }
 };
 
 bool TestServer::TestHttpClient() {
   ServerPtr server;
   for (s_server_port = PORT_MIN; s_server_port <= PORT_MAX; s_server_port++) {
     try {
-      server = boost::make_shared<LibEventServer>(
-          "127.0.0.1", s_server_port, 50);
+      server = ServerFactoryRegistry::createServer(
+        m_serverType, "127.0.0.1", s_server_port, 50);
       server->setRequestHandlerFactory<EchoHandler>(0);
       server->start();
       break;
@@ -583,7 +700,7 @@ bool TestServer::TestHttpClient() {
   HeaderMap headers;
   headers["Cookie"].push_back("c1=v1;c2=v2;");
   headers["Cookie"].push_back("c3=v3;c4=v4;");
-  string url = "http://127.0.0.1:" + lexical_cast<string>(s_server_port) +
+  string url = "http://127.0.0.1:" + folly::to<string>(s_server_port) +
     "/echo?name=value";
 
   static const StaticString s_Custom_colon_blah("Custom: blah");
@@ -596,13 +713,13 @@ bool TestServer::TestHttpClient() {
     VS(code, 200);
     VS(response.data(),
        ("\nGET param: name = value"
-        "\nHeader: Accept"
-        "\n0: */*"
         "\nHeader: Cookie"
         "\n0: c1=v1;c2=v2;"
         "\n1: c3=v3;c4=v4;"
+        "\nHeader: Accept"
+        "\n0: */*"
         "\nHeader: Host"
-        "\n0: 127.0.0.1:" + lexical_cast<string>(s_server_port)).c_str());
+        "\n0: 127.0.0.1:" + folly::to<string>(s_server_port)).c_str());
 
     bool found = false;
     for (unsigned int i = 0; i < responseHeaders.size(); i++) {
@@ -622,17 +739,17 @@ bool TestServer::TestHttpClient() {
     VS(response.data(),
        ("\nGET param: name = value"
         "\nPOST data: postdata"
-        "\nHeader: Accept"
-        "\n0: */*"
-        "\nHeader: Content-Length"
-        "\n0: 8"
         "\nHeader: Content-Type"
         "\n0: application/x-www-form-urlencoded"
         "\nHeader: Cookie"
         "\n0: c1=v1;c2=v2;"
         "\n1: c3=v3;c4=v4;"
+        "\nHeader: Accept"
+        "\n0: */*"
+        "\nHeader: Content-Length"
+        "\n0: 8"
         "\nHeader: Host"
-        "\n0: 127.0.0.1:" + lexical_cast<string>(s_server_port)).c_str());
+        "\n0: 127.0.0.1:" + folly::to<string>(s_server_port)).c_str());
 
     bool found = false;
     for (unsigned int i = 0; i < responseHeaders.size(); i++) {

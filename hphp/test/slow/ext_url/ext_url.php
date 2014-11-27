@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 function VS($x, $y) {
   var_dump($x === $y);
@@ -21,15 +21,6 @@ function test_base64_encode() {
   VS(base64_encode("This is an encoded string"),
      "VGhpcyBpcyBhbiBlbmNvZGVkIHN0cmluZw==");
   VS(base64_encode("\006\0\030v9"), "BgAYdjk=");
-}
-
-function test_get_headers() {
-  $url = "http://www.example.com";
-  $ret = get_headers($url);
-  //VS(ret[0], "HTTP/1.1 200 OK");
-  VERIFY(count($ret) > 0);
-  $ret = get_headers($url, 1);
-  //VS(ret[s_Connection], "close");
 }
 
 function test_get_meta_tags() {
@@ -87,6 +78,8 @@ function test_http_build_query() {
   $obj->foo = 'bar';
   $obj->baz = 'boom';
   VS(http_build_query($obj), "foo=bar&baz=boom");
+
+  VS(http_build_query(Map { 'a' => 'b' }), "a=b");
 }
 
 function test_parse_url() {
@@ -123,7 +116,6 @@ function test_urlencode() {
 
 test_base64_decode();
 test_base64_encode();
-test_get_headers();
 test_get_meta_tags();
 test_http_build_query();
 test_parse_url();

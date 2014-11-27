@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,14 +14,25 @@
    +----------------------------------------------------------------------+
 */
 #include "hphp/runtime/debugger/debugger_proxy.h"
+
+#include <exception>
+#include <map>
+#include <stack>
+#include <vector>
+
+#include <folly/Conv.h>
+
 #include "hphp/runtime/debugger/cmd/cmd_interrupt.h"
 #include "hphp/runtime/debugger/cmd/cmd_flow_control.h"
 #include "hphp/runtime/debugger/cmd/cmd_signal.h"
 #include "hphp/runtime/debugger/cmd/cmd_machine.h"
 #include "hphp/runtime/debugger/debugger.h"
+#include "hphp/runtime/debugger/debugger_hook_handler.h"
 #include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/ext/ext_socket.h"
+#include "hphp/runtime/base/thread-info.h"
+#include "hphp/runtime/ext/sockets/ext_sockets.h"
 #include "hphp/runtime/vm/debugger-hook.h"
+#include "hphp/runtime/vm/vm-regs.h"
 #include "hphp/util/process.h"
 #include "hphp/util/logger.h"
 
@@ -136,7 +147,7 @@ std::string DebuggerProxy::getSandboxId() {
 // proxy. There is the thread currently processing an interrupt, plus
 // any other threads stacked up in blockUntilOwn() (represented in the
 // m_threads set).
-void DebuggerProxy::getThreads(DThreadInfoPtrVec &threads) {
+void DebuggerProxy::getThreads(std::vector<DThreadInfoPtr> &threads) {
   TRACE(2, "DebuggerProxy::getThreads\n");
   Lock lock(this);
   std::stack<void *> &interrupts =
@@ -221,6 +232,9 @@ void DebuggerProxy::switchThreadMode(ThreadMode mode,
 }
 
 void DebuggerProxy::startDummySandbox() {
+  Lock lock(this);
+  if (m_stopped) return;
+
   TRACE(2, "DebuggerProxy::startDummySandbox\n");
   m_dummySandbox =
     new DummySandbox(this, RuntimeOption::DebuggerDefaultSandboxPath,
@@ -233,7 +247,8 @@ void DebuggerProxy::notifyDummySandbox() {
   if (m_dummySandbox) m_dummySandbox->notifySignal(CmdSignal::SignalBreak);
 }
 
-void DebuggerProxy::setBreakPoints(BreakPointInfoPtrVec &breakpoints) {
+void DebuggerProxy::setBreakPoints(
+    std::vector<BreakPointInfoPtr> &breakpoints) {
   TRACE(2, "DebuggerProxy::setBreakPoints\n");
   // Hold the break mutex while we update the proxy's state. There's no need
   // to hold it over the longer operation to set breakpoints in each file later.
@@ -266,10 +281,11 @@ void DebuggerProxy::setBreakPoints(BreakPointInfoPtrVec &breakpoints) {
     m_breakpoints = breakpoints;
     m_hasBreakPoints = !m_breakpoints.empty();
   }
-  phpSetBreakPoints(this);
+  proxySetBreakPoints(this);
 }
 
-void DebuggerProxy::getBreakPoints(BreakPointInfoPtrVec &breakpoints) {
+void DebuggerProxy::getBreakPoints(
+    std::vector<BreakPointInfoPtr> &breakpoints) {
   TRACE(7, "DebuggerProxy::getBreakPoints\n");
   ReadLock lock(m_breakMutex);
   breakpoints = m_breakpoints;
@@ -374,6 +390,9 @@ void DebuggerProxy::disableSignalPolling() {
 }
 
 void DebuggerProxy::startSignalThread() {
+  Lock lock(this);
+  if (m_stopped) return;
+
   TRACE(2, "DebuggerProxy::startSignalThread\n");
   m_signalThread.start();
 }
@@ -438,7 +457,7 @@ void DebuggerProxy::pollSignal() {
       break;
     }
 
-    CmdSignalPtr sig = dynamic_pointer_cast<CmdSignal>(res);
+    auto sig = std::dynamic_pointer_cast<CmdSignal>(res);
     if (!sig) {
       TRACE_RB(2, "DebuggerProxy::pollSignal: "
                "bad response from signal polling: %d", res->getType());
@@ -468,8 +487,8 @@ void DebuggerProxy::pollSignal() {
 // Grab the ip address and port of the client that is connected to this proxy.
 bool DebuggerProxy::getClientConnectionInfo(VRefParam address,
                                             VRefParam port) {
-  Resource s(getSocket().get());
-  return f_socket_getpeername(s, address, port);
+  Resource s(m_thrift.getSocket().get());
+  return HHVM_FN(socket_getpeername)(s, address, port);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -676,9 +695,9 @@ void DebuggerProxy::processInterrupt(CmdInterrupt &cmd) {
     if (res) {
       TRACE_RB(2, "Proxy got cmd type %d\n", res->getType());
       Debugger::UsageLog("server", getSandboxId(),
-                         boost::lexical_cast<string>(res->getType()));
+                         folly::to<std::string>(res->getType()));
       // Any control flow command gets installed here and we continue execution.
-      m_flow = dynamic_pointer_cast<CmdFlowControl>(res);
+      m_flow = std::dynamic_pointer_cast<CmdFlowControl>(res);
       if (m_flow) {
         m_flow->onSetup(*this, cmd);
         if (!m_flow->complete()) {
@@ -774,7 +793,7 @@ Variant DebuggerProxy::ExecutePHP(const std::string &php, String &output,
     if (flags & ExecutePHPFlagsAtInterrupt) disableSignalPolling();
     switchThreadMode(origThreadMode, m_thread);
   };
-  failed = g_vmContext->evalPHPDebugger((TypedValue*)&ret, code.get(), frame);
+  failed = g_context->evalPHPDebugger((TypedValue*)&ret, code.get(), frame);
   g_context->setStdout(nullptr, nullptr);
   g_context->swapOutputBuffer(save);
   if (flags & ExecutePHPFlagsLog) {
@@ -787,12 +806,12 @@ Variant DebuggerProxy::ExecutePHP(const std::string &php, String &output,
 int DebuggerProxy::getRealStackDepth() {
   TRACE(2, "DebuggerProxy::getRealStackDepth\n");
   int depth = 0;
-  VMExecutionContext* context = g_vmContext;
-  ActRec *fp = context->getFP();
+  auto const context = g_context.getNoCheck();
+  auto fp = vmfp();
   if (!fp) return 0;
 
   while (fp != nullptr) {
-    fp = context->getPrevVMState(fp, nullptr, nullptr);
+    fp = context->getPrevVMStateUNSAFE(fp, nullptr, nullptr);
     depth++;
   }
   return depth;
@@ -801,13 +820,11 @@ int DebuggerProxy::getRealStackDepth() {
 int DebuggerProxy::getStackDepth() {
   TRACE(2, "DebuggerProxy::getStackDepth\n");
   int depth = 0;
-  VMExecutionContext* context = g_vmContext;
-  ActRec *fp = context->getFP();
+  auto fp = vmfp();
   if (!fp) return 0;
-  ActRec *prev = fp->arGetSfp();
-  while (fp != prev) {
-    fp = prev;
-    prev = fp->arGetSfp();
+  fp = fp->sfp();
+  while (fp) {
+    fp = fp->sfp();
     depth++;
   }
   return depth;

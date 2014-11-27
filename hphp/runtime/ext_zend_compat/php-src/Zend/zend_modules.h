@@ -26,6 +26,7 @@
 #include "zend_compile.h"
 #include "zend_build.h"
 
+
 #define INIT_FUNC_ARGS    int type, int module_number TSRMLS_DC
 #define INIT_FUNC_ARGS_PASSTHRU  type, module_number TSRMLS_CC
 #define SHUTDOWN_FUNC_ARGS  int type, int module_number TSRMLS_DC
@@ -34,7 +35,11 @@
 #define ZEND_MODULE_INFO_FUNC_ARGS_PASSTHRU zend_module TSRMLS_CC
 
 #define ZEND_MODULE_API_NO 20121212
+#ifdef ZTS
+#define USING_ZTS 1
+#else
 #define USING_ZTS 0
+#endif
 
 #define STANDARD_MODULE_HEADER_EX sizeof(zend_module_entry), ZEND_MODULE_API_NO, ZEND_DEBUG, USING_ZTS
 #define STANDARD_MODULE_HEADER \
@@ -48,15 +53,27 @@
 
 #define NO_MODULE_GLOBALS 0, NULL, NULL, NULL
 
-#define ZEND_MODULE_GLOBALS(module_name) sizeof(zend_##module_name##_globals), &module_name##_globals
+#ifdef ZTS
+# define ZEND_MODULE_GLOBALS(module_name) sizeof(zend_##module_name##_globals), &module_name##_globals_id
+#else
+# define ZEND_MODULE_GLOBALS(module_name) sizeof(zend_##module_name##_globals), &module_name##_globals
+#endif
 
 #define STANDARD_MODULE_PROPERTIES \
   NO_MODULE_GLOBALS, NULL, STANDARD_MODULE_PROPERTIES_EX
 
 #define NO_VERSION_YET NULL
 
+#define MODULE_PERSISTENT 1
+#define MODULE_TEMPORARY 2
+
+struct _zend_ini_entry;
 typedef struct _zend_module_entry zend_module_entry;
 typedef struct _zend_module_dep zend_module_dep;
+
+#ifdef HHVM
+#include "hphp/runtime/ext_zend_compat/hhvm/zend-extension.h"
+#endif
 
 struct _zend_module_entry {
   unsigned short size;
@@ -65,7 +82,11 @@ struct _zend_module_entry {
   unsigned char zts;
   const struct _zend_ini_entry *ini_entry;
   const struct _zend_module_dep *deps;
-  const char *name;
+#ifdef HHVM
+  HPHP::ZendExtension name;
+#else
+  const char* name;
+#endif
   const struct _zend_function_entry *functions;
   int (*module_startup_func)(INIT_FUNC_ARGS);
   int (*module_shutdown_func)(SHUTDOWN_FUNC_ARGS);
@@ -89,4 +110,47 @@ struct _zend_module_entry {
   const char *build_id;
 };
 
+#ifdef HHVM
+#include "hphp/runtime/ext_zend_compat/hhvm/zend-extension-inline.h"
 #endif
+
+#define MODULE_DEP_REQUIRED    1
+#define MODULE_DEP_CONFLICTS  2
+#define MODULE_DEP_OPTIONAL    3
+
+#define ZEND_MOD_REQUIRED_EX(name, rel, ver)  { name, rel, ver, MODULE_DEP_REQUIRED  },
+#define ZEND_MOD_CONFLICTS_EX(name, rel, ver)  { name, rel, ver, MODULE_DEP_CONFLICTS },
+#define ZEND_MOD_OPTIONAL_EX(name, rel, ver)  { name, rel, ver, MODULE_DEP_OPTIONAL  },
+
+#define ZEND_MOD_REQUIRED(name)    ZEND_MOD_REQUIRED_EX(name, NULL, NULL)
+#define ZEND_MOD_CONFLICTS(name)  ZEND_MOD_CONFLICTS_EX(name, NULL, NULL)
+#define ZEND_MOD_OPTIONAL(name)    ZEND_MOD_OPTIONAL_EX(name, NULL, NULL)
+
+#define ZEND_MOD_END { NULL, NULL, NULL, 0 }
+
+struct _zend_module_dep {
+  const char *name;    /* module name */
+  const char *rel;    /* version relationship: NULL (exists), lt|le|eq|ge|gt (to given version) */
+  const char *version;  /* version */
+  unsigned char type;    /* dependency type */
+};
+
+extern ZEND_API HashTable module_registry;
+
+void module_destructor(zend_module_entry *module);
+int module_registry_cleanup(zend_module_entry *module TSRMLS_DC);
+int module_registry_request_startup(zend_module_entry *module TSRMLS_DC);
+int module_registry_unload_temp(const zend_module_entry *module TSRMLS_DC);
+
+#define ZEND_MODULE_DTOR (void (*)(void *)) module_destructor
+
+
+#endif
+
+/*
+ * Local variables:
+ * tab-width: 4
+ * c-basic-offset: 4
+ * indent-tabs-mode: t
+ * End:
+ */

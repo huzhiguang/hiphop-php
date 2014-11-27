@@ -11,11 +11,11 @@ function highlight_file($filename, $return = false) {
 
 function highlight_string($data, $return = false) {
   $colors = [
-    'html' => '#000000',
-    'comment' => '#FF8000',
-    'default' => '#0000BB',
-    'string' => '#DD0000',
-    'keyword' => '#007700',
+    'html' => ini_get('highlight.html'),
+    'comment' => ini_get('highlight.comment'),
+    'default' => ini_get('highlight.default'),
+    'string' => ini_get('highlight.string'),
+    'keyword' => ini_get('highlight.keyword'),
   ];
 
   $output = '';
@@ -36,7 +36,9 @@ function highlight_string($data, $return = false) {
       $next_color = __HPHP_highlight_get_color($colors, $type);
     } else {
       $string = $token;
-      $next_color = $colors['keyword'];
+
+      $next_color = ($string === "\"") ?
+                    $colors['string'] : $colors['keyword'];
     }
 
     if ($last_color != $next_color) {
@@ -87,6 +89,7 @@ function __HPHP_highlight_get_color($colors, $type) {
     case T_STRING:
     case T_VARIABLE:
     case T_DNUMBER:
+    case T_ONUMBER:
     case T_LNUMBER:
       return $colors['default'];
 

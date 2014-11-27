@@ -9,8 +9,6 @@ ArrayObject Object
             [2] => img2.png
         )
 
-    [flags:ArrayObject:private] => 0
-    [iteratorClass:ArrayObject:private] => ArrayIterator
 )
 
 Natural order sorting
@@ -24,6 +22,4 @@ ArrayObject Object
             [0] => img12.png
         )
 
-    [flags:ArrayObject:private] => 0
-    [iteratorClass:ArrayObject:private] => ArrayIterator
 )

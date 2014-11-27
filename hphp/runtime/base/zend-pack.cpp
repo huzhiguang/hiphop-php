@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1998-2010 Zend Technologies Ltd. (http://www.zend.com) |
    +----------------------------------------------------------------------+
    | This source file is subject to version 2.00 of the Zend license,     |
@@ -19,6 +19,9 @@
 #include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/base/type-conversions.h"
 #include "hphp/runtime/base/builtin-functions.h"
+#include "hphp/util/tiny-vector.h"
+
+#include <algorithm>
 
 namespace HPHP {
 
@@ -97,7 +100,7 @@ ZendPack::ZendPack() {
   }
 }
 
-void ZendPack::pack(CVarRef val, int size, int *map, char *output) {
+void ZendPack::pack(const Variant& val, int size, int *map, char *output) {
   int32_t n = val.toInt32();
   char *v = (char*)&n;
   for (int i = 0; i < size; i++) {
@@ -105,10 +108,10 @@ void ZendPack::pack(CVarRef val, int size, int *map, char *output) {
   }
 }
 
-Variant ZendPack::pack(CStrRef fmt, CArrRef argv) {
+Variant ZendPack::pack(const String& fmt, const Array& argv) {
   /* Preprocess format into formatcodes and formatargs */
-  vector<char> formatcodes;
-  vector<int> formatargs;
+  TinyVector<char, 32> formatcodes; // up to 32 codes on the stack
+  TinyVector<int, 32> formatargs;
   int argc = argv.size();
 
   const char *format = fmt.c_str();
@@ -152,6 +155,7 @@ Variant ZendPack::pack(CStrRef fmt, CArrRef argv) {
     case 'A':
     case 'h':
     case 'H':
+    case 'Z':
       if (currentarg >= argc) {
         throw_invalid_argument("Type %c: not enough arguments", code);
         return false;
@@ -159,6 +163,10 @@ Variant ZendPack::pack(CStrRef fmt, CArrRef argv) {
 
       if (arg < 0) {
         arg = argv[currentarg].toString().size();
+        //add one, because Z is always NUL-terminated
+        if (code == 'Z') {
+          arg++;
+        }
       }
 
       currentarg++;
@@ -221,6 +229,7 @@ Variant ZendPack::pack(CStrRef fmt, CArrRef argv) {
     case 'c':
     case 'C':
     case 'x':
+    case 'Z':
       INC_OUTPUTPOS(arg,1);    /* 8 bit per arg */
       break;
 
@@ -271,7 +280,7 @@ Variant ZendPack::pack(CStrRef fmt, CArrRef argv) {
   }
 
   String s = String(outputsize, ReserveString);
-  char *output = s.mutableSlice().ptr;
+  char *output = s.bufferSlice().ptr;
   outputpos = 0;
   currentarg = 0;
 
@@ -286,13 +295,16 @@ Variant ZendPack::pack(CStrRef fmt, CArrRef argv) {
     switch ((int) code) {
     case 'a':
     case 'A':
-      memset(&output[outputpos], (code == 'a') ? '\0' : ' ', arg);
+    case 'Z': {
+      int arg_cp = (code != 'Z') ? arg : std::max(0, arg - 1);
+      memset(&output[outputpos], (code != 'A') ? '\0' : ' ', arg);
       val = argv[currentarg++].toString();
       s = val.c_str();
       slen = val.size();
-      memcpy(&output[outputpos], s, (slen < arg) ? slen : arg);
+      memcpy(&output[outputpos], s, (slen < arg_cp) ? slen : arg_cp);
       outputpos += arg;
-      break;
+    }
+    break;
 
     case 'h':
     case 'H': {
@@ -304,7 +316,7 @@ Variant ZendPack::pack(CStrRef fmt, CArrRef argv) {
       v = val.data();
       slen = val.size();
       outputpos--;
-      if(arg > slen) {
+      if (arg > slen) {
         throw_invalid_argument
           ("Type %c: not enough characters in string", code);
         arg = slen;
@@ -436,7 +448,8 @@ Variant ZendPack::pack(CStrRef fmt, CArrRef argv) {
     }
   }
 
-  return s.setSize(outputpos);
+  s.setSize(outputpos);
+  return s;
 }
 
 int32_t ZendPack::unpack(const char *data, int size, int issigned, int *map) {
@@ -453,7 +466,7 @@ int32_t ZendPack::unpack(const char *data, int size, int issigned, int *map) {
   return result;
 }
 
-Variant ZendPack::unpack(CStrRef fmt, CStrRef data) {
+Variant ZendPack::unpack(const String& fmt, const String& data) {
   const char *format = fmt.c_str();
   int formatlen = fmt.size();
   const char *input = data.c_str();
@@ -513,6 +526,7 @@ Variant ZendPack::unpack(CStrRef fmt, CStrRef data) {
 
     case 'a':
     case 'A':
+    case 'Z':
       size = arg;
       arg = 1;
       break;
@@ -588,8 +602,8 @@ Variant ZendPack::unpack(CStrRef fmt, CStrRef data) {
       if ((inputpos + size) <= inputlen) {
         switch ((int) type) {
         case 'a':
-        case 'A': {
-          char pad = (type == 'a') ? '\0' : ' ';
+        case 'A':
+        case 'Z': {
           int len = inputlen - inputpos; /* Remaining string */
 
           /* If size was given take minimum of len and size */
@@ -599,14 +613,37 @@ Variant ZendPack::unpack(CStrRef fmt, CStrRef data) {
 
           size = len;
 
-          /* Remove padding chars from unpacked data */
-          while (--len >= 0) {
-            if (input[inputpos + len] != pad)
-              break;
+          /* A will strip any trailing whitespace */
+          if (type == 'A')
+          {
+            char padn = '\0'; char pads = ' '; char padt = '\t';
+            char padc = '\r'; char padl = '\n';
+            while (--len >= 0) {
+               if (input[inputpos + len] != padn
+                   && input[inputpos + len] != pads
+                   && input[inputpos + len] != padt
+                   && input[inputpos + len] != padc
+                   && input[inputpos + len] != padl
+               )
+                       break;
+            }
+          }
+          /* Remove everything after the first null */
+          if (type=='Z') {
+            int s;
+            for (s=0 ; s < len ; s++) {
+                     if (input[inputpos + s] == '\0')
+                             break;
+            }
+            len = s;
           }
 
+          /*only A is \0 terminated*/
+          if (type=='A')
+            len++;
+
           ret.set(String(n, CopyString),
-                  String(input + inputpos, len + 1, CopyString));
+                  String(input + inputpos, len, CopyString));
           break;
         }
 
@@ -628,7 +665,7 @@ Variant ZendPack::unpack(CStrRef fmt, CStrRef data) {
           }
 
           String s = String(len, ReserveString);
-          buf = s.mutableSlice().ptr;
+          buf = s.bufferSlice().ptr;
 
           for (ipos = opos = 0; opos < len; opos++) {
             char c = (input[inputpos + ipos] >> nibbleshift) & 0xf;

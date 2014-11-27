@@ -1,34 +1,53 @@
-CMAKE_MINIMUM_REQUIRED(VERSION 2.8.5 FATAL_ERROR)
-PROJECT(hphp C CXX ASM)
+CMAKE_MINIMUM_REQUIRED(VERSION 2.8.7 FATAL_ERROR)
 
-IF("$ENV{HPHP_HOME}" STREQUAL "")
-	message(FATAL_ERROR "You should set the HPHP_HOME environmental")
-ENDIF()
-
-file(TO_CMAKE_PATH "$ENV{HPHP_HOME}" HPHP_HOME)
-
-IF(NOT IS_DIRECTORY ${HPHP_HOME})
-	message(FATAL_ERROR "The value of HPHP_HOME does not exist")
-ENDIF()
-
-IF(NOT EXISTS "${HPHP_HOME}/LICENSE.PHP")
-	message(FATAL_ERROR "The value of HPHP_HOME in incorrect")
-ENDIF()
-
+# includes
 SET(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/CMake" ${CMAKE_MODULE_PATH})
 
-include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/HPHPFunctions.cmake")
-include(CheckFunctionExists)
+# package information
+SET(PACKAGE_NAME      "hhvm")
+SET(PACKAGE_VERSION   "3.5.0-dev")
+SET(PACKAGE_STRING    "${PACKAGE_NAME} ${PACKAGE_VERSION}")
+SET(PACKAGE_TARNAME   "${PACKAGE_NAME}-${PACKAGE_VERSION}")
+SET(PACKAGE_BUGREPORT "https://github.com/facebook/hhvm/issues")
 
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/hphp)
+PROJECT(${PACKAGE_NAME} C CXX ASM)
 
-IF(CMAKE_SIZEOF_VOID_P EQUAL 4)
-	message(FATAL_ERROR "32-bit support is currently unsupported, check back with a later version of HipHop")
+MARK_AS_ADVANCED(CLEAR CMAKE_INSTALL_PREFIX)
+IF(APPLE)
+  MARK_AS_ADVANCED(CMAKE_OSX_ARCHITECTURES
+    CMAKE_OSX_DEPLOYMENT_TARGET
+    CMAKE_OSX_SYSROOT)
 ENDIF()
 
-if ("$ENV{USE_HHVM}" STREQUAL "1")
-	message("Building for HHVM")
-endif()
-if ("$ENV{USE_HPHPC}" STREQUAL "1")
-	message(FATAL_ERROR "Building HPHPc is no longer supported")
-endif()
+# Check architecture OS
+IF(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+  MESSAGE(FATAL_ERROR "HHVM requires a 64bit OS")
+ENDIF()
+
+# 3rd party library
+IF(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third-party/CMakeLists.txt")
+  MESSAGE(FATAL_ERROR "third-party/CMakeLists.txt missing. "
+                      "Try updating your submodule with:
+rm -r third-party
+git submodule update --init --recursive
+")
+ENDIF()
+
+INCLUDE("${CMAKE_CURRENT_SOURCE_DIR}/CMake/HPHPFunctions.cmake")
+INCLUDE(CheckFunctionExists)
+
+SET(HPHP_HOME ${CMAKE_CURRENT_SOURCE_DIR})
+SET(TP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third-party")
+
+ADD_SUBDIRECTORY(third-party)
+ADD_SUBDIRECTORY(hphp)
+
+# use GNU install dirs (e.g. lib64 instead of lib)
+INCLUDE(GNUInstallDirs)
+
+# modules / depends
+FILE(GLOB HHVM_CMAKE_FILES "CMake/*.cmake")
+INSTALL(
+  FILES ${HHVM_CMAKE_FILES}
+  DESTINATION "${CMAKE_INSTALL_LIBDIR}/hhvm/CMake"
+  COMPONENT dev)

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -15,64 +15,16 @@
    +----------------------------------------------------------------------+
 */
 
+#include "hphp/runtime/ext/asio/blockable_wait_handle.h"
+
 #include "hphp/runtime/base/smart-containers.h"
-#include "hphp/runtime/ext/ext_asio.h"
+#include "hphp/runtime/ext/asio/asio_blockable.h"
 #include "hphp/runtime/ext/asio/asio_context.h"
+#include "hphp/runtime/ext/asio/waitable_wait_handle.h"
 #include "hphp/system/systemlib.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
-
-c_BlockableWaitHandle::c_BlockableWaitHandle(Class* cb)
-    : c_WaitableWaitHandle(cb), m_nextParent(nullptr) {
-}
-
-c_BlockableWaitHandle::~c_BlockableWaitHandle() {
-}
-
-void c_BlockableWaitHandle::t___construct() {
-  throw NotSupportedException(__func__, "WTF? This is an abstract class");
-}
-
-// throws on cycle
-void c_BlockableWaitHandle::blockOn(c_WaitableWaitHandle* child) {
-  setState(STATE_BLOCKED);
-  assert(getChild() == child);
-
-  // detect complete cycles
-  if (UNLIKELY(hasCycle(child))) {
-    reportCycle(child);
-    assert(false);
-  }
-
-  // make sure the child is going to do some work
-  // throws if cross-context cycle found
-  if (isInContext()) {
-    child->enterContext(getContextIdx());
-  }
-
-  // extend the linked list of parents
-  m_nextParent = child->addParent(this);
-
-  // increment ref count so that we won't deallocated before child calls back
-  incRefCount();
-}
-
-c_BlockableWaitHandle* c_BlockableWaitHandle::getNextParent() {
-  return m_nextParent;
-}
-
-c_BlockableWaitHandle* c_BlockableWaitHandle::unblock() {
-  c_BlockableWaitHandle* next = m_nextParent;
-
-  // notify subclass that we are no longer blocked
-  onUnblocked();
-
-  // decrement ref count, we can't be called by child anymore
-  decRefObj(this);
-
-  return next;
-}
 
 void c_BlockableWaitHandle::exitContextBlocked(context_idx_t ctx_idx) {
   assert(getState() == STATE_BLOCKED);
@@ -88,40 +40,45 @@ void c_BlockableWaitHandle::exitContextBlocked(context_idx_t ctx_idx) {
   setContextIdx(getContextIdx() - 1);
 
   // recursively move all wait handles blocked by us
-  for (auto pwh = getFirstParent(); pwh; pwh = pwh->getNextParent()) {
-    pwh->exitContextBlocked(ctx_idx);
+  getParentChain().exitContext(ctx_idx);
+}
+
+// throws if establishing a dependency from this to child would form a cycle
+void c_BlockableWaitHandle::detectCycle(c_WaitableWaitHandle* child) const {
+  if (UNLIKELY(isDescendantOf(child))) {
+    Object e(createCycleException(child));
+    throw e;
   }
 }
 
-// always throws
-void c_BlockableWaitHandle::reportCycle(c_WaitableWaitHandle* start) {
-  assert(getState() == STATE_BLOCKED);
-  assert(getChild() == start);
+ObjectData*
+c_BlockableWaitHandle::createCycleException(c_WaitableWaitHandle* child) const {
+  assert(isDescendantOf(child));
 
   smart::vector<std::string> exception_msg_items;
   exception_msg_items.push_back("Encountered dependency cycle.\n");
   exception_msg_items.push_back("Existing stack:\n");
 
-  assert(dynamic_cast<c_BlockableWaitHandle*>(start));
-  auto current = static_cast<c_BlockableWaitHandle*>(start);
-  assert(current->getState() == STATE_BLOCKED);
+  exception_msg_items.push_back(folly::stringPrintf(
+    "  %s (%" PRId64 ")\n", child->getName().data(), child->t_getid()));
 
-  do {
-    exception_msg_items.push_back(folly::stringPrintf(
-        "  %s (%" PRId64 ")\n", current->getName()->data(), current->t_getid()));
+  assert(child->instanceof(c_BlockableWaitHandle::classof()));
+  auto current = static_cast<c_BlockableWaitHandle*>(child);
 
-    auto next = current->getChild();
-    assert(dynamic_cast<c_BlockableWaitHandle*>(next));
-    current = static_cast<c_BlockableWaitHandle*>(next);
+  while (current != this) {
     assert(current->getState() == STATE_BLOCKED);
-  } while (current != start);
+    assert(current->getChild()->instanceof(c_BlockableWaitHandle::classof()));
+    current = static_cast<c_BlockableWaitHandle*>(current->getChild());
+
+    exception_msg_items.push_back(folly::stringPrintf(
+      "  %s (%" PRId64 ")\n", current->getName().data(), current->t_getid()));
+  }
 
   exception_msg_items.push_back("Trying to introduce dependency on:\n");
   exception_msg_items.push_back(folly::stringPrintf(
-      "  %s (%" PRId64 ") (dupe)\n", start->getName()->data(), start->t_getid()));
-  Object e(SystemLib::AllocInvalidOperationExceptionObject(
-      folly::join("", exception_msg_items)));
-  throw e;
+    "  %s (%" PRId64 ") (dupe)\n", child->getName().data(), child->t_getid()));
+  return SystemLib::AllocInvalidOperationExceptionObject(
+      folly::join("", exception_msg_items));
 }
 
 ///////////////////////////////////////////////////////////////////////////////

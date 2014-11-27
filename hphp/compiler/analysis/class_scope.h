@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,15 +18,22 @@
 #define incl_HPHP_CLASS_SCOPE_H_
 
 #include "hphp/compiler/analysis/block_scope.h"
+#include <list>
+#include <map>
+#include <set>
+#include <utility>
+#include <vector>
 #include "hphp/compiler/analysis/function_container.h"
 #include "hphp/compiler/statement/class_statement.h"
 #include "hphp/compiler/statement/method_statement.h"
 #include "hphp/compiler/statement/trait_prec_statement.h"
 #include "hphp/compiler/statement/trait_alias_statement.h"
 #include "hphp/compiler/expression/user_attribute.h"
-#include "hphp/util/json.h"
-#include "hphp/util/case-insensitive.h"
+#include "hphp/compiler/json.h"
+#include "hphp/util/functional.h"
+#include "hphp/util/hash-map-typedefs.h"
 #include "hphp/compiler/option.h"
+#include "hphp/compiler/analysis/exceptions.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -38,6 +45,11 @@ DECLARE_BOOST_TYPES(FileScope);
 
 class Symbol;
 
+enum class Derivation {
+  Normal,
+  Redeclaring,    // At least one ancestor class or interface is redeclared.
+};
+
 /**
  * A class scope corresponds to a class declaration. We store all
  * inferred types and analyzed results here, so not to pollute syntax trees.
@@ -47,12 +59,14 @@ class ClassScope : public BlockScope, public FunctionContainer,
                    public JSON::DocTarget::ISerializable {
 
 public:
-  enum KindOf {
-    KindOfObjectClass,
-    KindOfAbstractClass,
-    KindOfFinalClass,
-    KindOfInterface,
-    KindOfTrait
+  enum class KindOf : int {
+    ObjectClass,
+    AbstractClass,
+    FinalClass,
+    UtilClass,
+    Enum,
+    Interface,
+    Trait,
   };
 
 #define DECLARE_MAGIC(prefix, prev)                                     \
@@ -89,11 +103,6 @@ public:
     Abstract = 16,
     Final = 32
   };
-  enum Derivation {
-    FromNormal = 0,
-    DirectFromRedeclared,
-    IndirectFromRedeclared
-  };
 
   enum JumpTableName {
     JumpTableCallInfo
@@ -120,8 +129,6 @@ public:
   const std::string &getOriginalName() const;
   std::string getDocName() const;
 
-  virtual std::string getId() const;
-
   void checkDerivation(AnalysisResultPtr ar, hphp_string_iset &seen);
   const std::string &getOriginalParent() const { return m_parent; }
 
@@ -140,6 +147,7 @@ public:
   bool isExtensionClass() const { return getAttribute(Extension); }
   bool isDynamic() const { return m_dynamic; }
   bool isBaseClass() const { return m_bases.empty(); }
+  bool isBuiltin() const { return !getStmt(); }
 
   /**
    * Whether this class name was declared twice or more.
@@ -173,6 +181,7 @@ public:
    * Get/set attributes.
    */
   void setSystem();
+  bool isSystem() const { return m_attribute & System; }
   void setAttribute(Attribute attr) { m_attribute |= attr;}
   void clearAttribute(Attribute attr) { m_attribute &= ~attr;}
   bool getAttribute(Attribute attr) const {
@@ -203,8 +212,7 @@ public:
    */
   void collectMethods(AnalysisResultPtr ar,
                       StringToFunctionScopePtrMap &func,
-                      bool collectPrivate = true,
-                      bool forInvoke = false);
+                      bool collectPrivate);
 
   /**
    * Whether or not we can directly call ObjectData::o_invoke() when lookup
@@ -301,16 +309,28 @@ public:
     }
   }
 
+  const boost::container::flat_set<std::string>& getClassRequiredExtends()
+    const {
+    return m_requiredExtends;
+  }
+
+  const boost::container::flat_set<std::string>& getClassRequiredImplements()
+    const {
+    return m_requiredImplements;
+  }
+
   const std::vector<std::string> &getUsedTraitNames() const {
     return m_usedTraitNames;
   }
 
-  const std::vector<std::pair<std::string, std::string> > &getTraitAliases()
+  const std::vector<std::pair<std::string, std::string>>& getTraitAliases()
     const {
     return m_traitAliases;
   }
 
   void addTraitAlias(TraitAliasStatementPtr aliasStmt);
+
+  void addClassRequirement(const std::string &requiredName, bool isExtends);
 
   void importUsedTraits(AnalysisResultPtr ar);
 
@@ -320,12 +340,17 @@ public:
   void serialize(JSON::CodeError::OutputStream &out) const;
   void serialize(JSON::DocTarget::OutputStream &out) const;
 
-  bool isInterface() const { return m_kindOf == KindOfInterface; }
-  bool isFinal() const { return m_kindOf == KindOfFinalClass ||
-                                m_kindOf == KindOfTrait; }
-  bool isAbstract() const { return m_kindOf == KindOfAbstractClass ||
-                                   m_kindOf == KindOfTrait; }
-  bool isTrait() const { return m_kindOf == KindOfTrait; }
+  bool isInterface() const { return m_kindOf == KindOf::Interface; }
+  bool isFinal() const { return m_kindOf == KindOf::FinalClass ||
+                                m_kindOf == KindOf::Trait ||
+                                m_kindOf == KindOf::UtilClass ||
+                                m_kindOf == KindOf::Enum; }
+  bool isAbstract() const { return m_kindOf == KindOf::AbstractClass ||
+                                   m_kindOf == KindOf::Trait ||
+                                   m_kindOf == KindOf::UtilClass; }
+  bool isTrait() const { return m_kindOf == KindOf::Trait; }
+  bool isEnum() const { return m_kindOf == KindOf::Enum; }
+  bool isStaticUtil() const { return m_kindOf == KindOf::UtilClass; }
   bool hasProperty(const std::string &name) const;
   bool hasConst(const std::string &name) const;
 
@@ -369,6 +394,16 @@ public:
   bool canSkipCreateMethod(AnalysisResultConstPtr ar) const;
   bool checkHasPropTable(AnalysisResultConstPtr ar);
 
+  const StringData* getFatalMessage() const {
+    return m_fatal_error_msg;
+  }
+
+  void setFatal(const AnalysisTimeFatalException& fatal) {
+    assert(m_fatal_error_msg == nullptr);
+    m_fatal_error_msg = makeStaticString(fatal.getMessage());
+    assert(m_fatal_error_msg != nullptr);
+  }
+
 private:
   // need to maintain declaration order for ClassInfo map
   FunctionScopePtrVec m_functionsVec;
@@ -378,6 +413,8 @@ private:
   UserAttributeMap m_userAttributes;
 
   std::vector<std::string> m_usedTraitNames;
+  boost::container::flat_set<std::string> m_requiredExtends;
+  boost::container::flat_set<std::string> m_requiredImplements;
   // m_traitAliases is used to support ReflectionClass::getTraitAliases
   std::vector<std::pair<std::string, std::string> > m_traitAliases;
 
@@ -427,6 +464,9 @@ private:
   // bases 32 through n are all known.
   unsigned m_knownBases;
 
+  // holds the fact that accessing this class declaration is a fatal error
+  const StringData* m_fatal_error_msg = nullptr;
+
   void addImportTraitMethod(const TraitMethod &traitMethod,
                             const std::string &methName);
   void informClosuresAboutScopeClone(ConstructPtr root,
@@ -446,6 +486,8 @@ private:
   void importTraitProperties(AnalysisResultPtr ar);
 
   void findTraitMethodsToImport(AnalysisResultPtr ar, ClassScopePtr trait);
+
+  void importClassRequirements(AnalysisResultPtr ar, ClassScopePtr trait);
 
   MethodStatementPtr findTraitMethod(AnalysisResultPtr ar,
                                      ClassScopePtr trait,

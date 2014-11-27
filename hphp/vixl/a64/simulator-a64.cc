@@ -25,6 +25,9 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "hphp/vixl/a64/simulator-a64.h"
+#include "hphp/util/thread-local.h"
+#include "hphp/util/compilation-flags.h"
+#include <folly/Format.h>
 #include <math.h>
 
 namespace vixl {
@@ -56,7 +59,9 @@ SimSystemRegister SimSystemRegister::DefaultValueFor(SystemRegister id) {
 }
 
 
-Simulator::Simulator(Decoder* decoder, FILE* stream) {
+Simulator::Simulator(Decoder* decoder, std::ostream& stream)
+    : stream_(stream)
+{
   // Ensure shift operations act as the simulator expects.
   assert((static_cast<int32_t>(-1) >> 1) == -1);
   assert((static_cast<uint32_t>(-1) >> 1) == 0x7FFFFFFF);
@@ -69,18 +74,18 @@ Simulator::Simulator(Decoder* decoder, FILE* stream) {
 
   // Allocate and setup the simulator stack.
   stack_ = reinterpret_cast<byte*>(malloc(stack_size_));
+  // Fill it with junk bytes
+  if (HPHP::debug) {
+    memset(stack_, kSimulatorStackJunk, stack_size_);
+  }
   stack_limit_ = stack_ + stack_protection_size_;
   byte* tos = stack_ + stack_size_ - stack_protection_size_;
   // The stack pointer must be 16 bytes aligned.
   set_sp(reinterpret_cast<int64_t>(tos) & ~0xfUL);
 
-  stream_ = stream;
   print_disasm_ = new PrintDisassembler(stream_);
   coloured_trace_ = false;
   disasm_trace_ = false;
-
-  // Set the sample period to 10, as the VIXL examples and tests are short.
-  instrumentation_ = new Instrument("vixl_stats.csv", 10);
 }
 
 
@@ -109,15 +114,13 @@ Simulator::~Simulator() {
   // The decoder may outlive the simulator.
   decoder_->RemoveVisitor(print_disasm_);
   delete print_disasm_;
-
-  decoder_->RemoveVisitor(instrumentation_);
-  delete instrumentation_;
 }
 
 
 void Simulator::Run() {
   while (pc_ != kEndOfSimAddress) {
     ExecuteInstruction();
+    ++instr_count_;
   }
 }
 
@@ -329,7 +332,7 @@ void Simulator::FPCompare(double val0, double val1) {
 
   // TODO: This assumes that the C++ implementation handles comparisons in the
   // way that we expect (as per AssertSupportedFPCR()).
-  if ((isnan(val0) != 0) || (isnan(val1) != 0)) {
+  if ((std::isnan(val0) != 0) || (std::isnan(val1) != 0)) {
     nzcv().SetRawValue(FPUnorderedFlag);
   } else if (val0 < val1) {
     nzcv().SetRawValue(FPLessThanFlag);
@@ -354,11 +357,12 @@ void Simulator::PrintSystemRegisters(bool print_all) {
 
   static SimSystemRegister last_nzcv;
   if (print_all || first_run || (last_nzcv.RawValue() != nzcv().RawValue())) {
-    fprintf(stream_, "# %sFLAGS: %sN:%d Z:%d C:%d V:%d%s\n",
-            clr_flag_name,
-            clr_flag_value,
-            N(), Z(), C(), V(),
-            clr_normal);
+    // Split up the call, to prevent template explosion
+    stream_ << folly::format("# {}FLAGS: {}N:{} Z:{} ",
+                             clr_flag_name,
+                             clr_flag_value,
+                             N(), Z());
+    stream_ << folly::format("C:{} V:{}{}\n", C(), V(), clr_normal);
   }
   last_nzcv = nzcv();
 
@@ -371,11 +375,17 @@ void Simulator::PrintSystemRegisters(bool print_all) {
       "0b11 (Round towards Zero)"
     };
     assert(fpcr().RMode() <= (sizeof(rmode) / sizeof(rmode[0])));
-    fprintf(stream_, "# %sFPCR: %sAHP:%d DN:%d FZ:%d RMode:%s%s\n",
-            clr_flag_name,
-            clr_flag_value,
-            fpcr().AHP(), fpcr().DN(), fpcr().FZ(), rmode[fpcr().RMode()],
-            clr_normal);
+    stream_ << folly::format(
+      "# {}FPCR: {}AHP:{} DN:{} ",
+      clr_flag_name,
+      clr_flag_value,
+      fpcr().AHP(), fpcr().DN()
+    );
+    stream_ << folly::format(
+      "FZ:{} RMode:{}{}\n",
+      fpcr().FZ(), rmode[fpcr().RMode()],
+      clr_normal
+    );
   }
   last_fpcr = fpcr();
 
@@ -395,13 +405,14 @@ void Simulator::PrintRegisters(bool print_all_regs) {
 
   for (unsigned i = 0; i < kNumberOfRegisters; i++) {
     if (print_all_regs || first_run || (last_regs[i] != registers_[i].x)) {
-      fprintf(stream_,
-              "# %s%4s:%s 0x%016" PRIx64 "%s\n",
-              clr_reg_name,
-              XRegNameForCode(i, Reg31IsStackPointer),
-              clr_reg_value,
-              registers_[i].x,
-              clr_normal);
+      stream_ << folly::format(
+        "# {}{:4}:{} {:#016x}{}\n",
+        clr_reg_name,
+        XRegNameForCode(i, Reg31IsStackPointer),
+        clr_reg_value,
+        registers_[i].x,
+        clr_normal
+      );
     }
     // Cache the new register value so the next run can detect any changes.
     last_regs[i] = registers_[i].x;
@@ -426,22 +437,30 @@ void Simulator::PrintFPRegisters(bool print_all_regs) {
   for (unsigned i = 0; i < kNumberOfFPRegisters; i++) {
     if (print_all_regs || first_run ||
         (last_regs[i] != double_to_rawbits(fpregisters_[i].d))) {
-      fprintf(stream_,
-              "# %s %4s:%s 0x%016" PRIx64 "%s (%s%s:%s %g%s %s:%s %g%s)\n",
-              clr_reg_name,
-              VRegNameForCode(i),
-              clr_reg_value,
-              double_to_rawbits(fpregisters_[i].d),
-              clr_normal,
-              clr_reg_name,
-              DRegNameForCode(i),
-              clr_reg_value,
-              fpregisters_[i].d,
-              clr_reg_name,
-              SRegNameForCode(i),
-              clr_reg_value,
-              fpregisters_[i].s,
-              clr_normal);
+      // Split up the call to prevent template explosion
+      stream_ << folly::format(
+        "# {} {:4}:{} {:#016x}{} ",
+        clr_reg_name,
+        VRegNameForCode(i),
+        clr_reg_value,
+        double_to_rawbits(fpregisters_[i].d),
+        clr_normal
+      );
+      stream_ << folly::format(
+        "({}{}:{} {}{} ",
+        clr_reg_name,
+        DRegNameForCode(i),
+        clr_reg_value,
+        fpregisters_[i].d,
+        clr_reg_name
+      );
+      stream_ << folly::format(
+        "{}:{} {}{})\n",
+        SRegNameForCode(i),
+        clr_reg_value,
+        fpregisters_[i].s,
+        clr_normal
+      );
     }
     // Cache the new register value so the next run can detect any changes.
     last_regs[i] = double_to_rawbits(fpregisters_[i].d);
@@ -897,6 +916,9 @@ uint8_t* Simulator::AddressModeHelper(unsigned addr_reg,
     // Misalignment will cause a stack alignment fault.
     ALIGNMENT_EXCEPTION();
   }
+  if (addr_reg == 31) {
+    assert(is_on_stack(reinterpret_cast<void*>(address + offset)));
+  }
   if ((addrmode == PreIndex) || (addrmode == PostIndex)) {
     assert(offset != 0);
     set_xreg(addr_reg, address + offset, Reg31IsStackPointer);
@@ -915,6 +937,7 @@ uint64_t Simulator::MemoryRead(const uint8_t* address, unsigned num_bytes) {
   assert((num_bytes > 0) && (num_bytes <= sizeof(uint64_t)));
   uint64_t read = 0;
   memcpy(&read, address, num_bytes);
+  ++load_count_;
   return read;
 }
 
@@ -955,6 +978,7 @@ void Simulator::MemoryWrite(uint8_t* address,
   assert(address != nullptr);
   assert((num_bytes > 0) && (num_bytes <= sizeof(uint64_t)));
   memcpy(address, &value, num_bytes);
+  ++store_count_;
 }
 
 
@@ -1416,7 +1440,7 @@ int32_t Simulator::FPToInt32(double value, FPRounding rmode) {
   } else if (value < kWMinInt) {
     return kWMinInt;
   }
-  return isnan(value) ? 0 : static_cast<int32_t>(value);
+  return std::isnan(value) ? 0 : static_cast<int32_t>(value);
 }
 
 
@@ -1427,7 +1451,7 @@ int64_t Simulator::FPToInt64(double value, FPRounding rmode) {
   } else if (value < kXMinInt) {
     return kXMinInt;
   }
-  return isnan(value) ? 0 : static_cast<int64_t>(value);
+  return std::isnan(value) ? 0 : static_cast<int64_t>(value);
 }
 
 
@@ -1438,7 +1462,7 @@ uint32_t Simulator::FPToUInt32(double value, FPRounding rmode) {
   } else if (value < 0.0) {
     return 0;
   }
-  return isnan(value) ? 0 : static_cast<uint32_t>(value);
+  return std::isnan(value) ? 0 : static_cast<uint32_t>(value);
 }
 
 
@@ -1449,7 +1473,7 @@ uint64_t Simulator::FPToUInt64(double value, FPRounding rmode) {
   } else if (value < 0.0) {
     return 0;
   }
-  return isnan(value) ? 0 : static_cast<uint64_t>(value);
+  return std::isnan(value) ? 0 : static_cast<uint64_t>(value);
 }
 
 
@@ -1782,7 +1806,7 @@ float Simulator::UFixedToFloat(uint64_t src, int fbits, FPRounding round) {
 
 double Simulator::FPRoundInt(double value, FPRounding round_mode) {
   if ((value == 0.0) || (value == kFP64PositiveInfinity) ||
-      (value == kFP64NegativeInfinity) || isnan(value)) {
+      (value == kFP64NegativeInfinity) || std::isnan(value)) {
     return value;
   }
 
@@ -1817,7 +1841,7 @@ double Simulator::FPRoundInt(double value, FPRounding round_mode) {
 
 
 double Simulator::FPToDouble(float value) {
-  switch (fpclassify(value)) {
+  switch (std::fpclassify(value)) {
     case FP_NAN: {
       // Convert NaNs as the processor would, assuming that FPCR.DN (default
       // NaN) is not set:
@@ -1857,7 +1881,7 @@ float Simulator::FPToFloat(double value, FPRounding round_mode) {
   assert(round_mode == FPTieEven);
   USE(round_mode);
 
-  switch (fpclassify(value)) {
+  switch (std::fpclassify(value)) {
     case FP_NAN: {
       // Convert NaNs as the processor would, assuming that FPCR.DN (default
       // NaN) is not set:
@@ -1892,7 +1916,7 @@ float Simulator::FPToFloat(double value, FPRounding round_mode) {
       int32_t exponent = unsigned_bitextract_64(62, 52, raw) - 1023;
       // Extract the mantissa and add the implicit '1' bit.
       uint64_t mantissa = unsigned_bitextract_64(51, 0, raw);
-      if (fpclassify(value) == FP_NORMAL) {
+      if (std::fpclassify(value) == FP_NORMAL) {
         mantissa |= (1UL << 52);
       }
       return FPRoundToFloat(sign, exponent, mantissa, round_mode);
@@ -1953,9 +1977,9 @@ void Simulator::VisitFPDataProcessing3Source(Instruction* instr) {
 
 
 double Simulator::FPMax(double a, double b) {
-  if (isnan(a)) {
+  if (std::isnan(a)) {
     return a;
-  } else if (isnan(b)) {
+  } else if (std::isnan(b)) {
     return b;
   }
 
@@ -1970,9 +1994,9 @@ double Simulator::FPMax(double a, double b) {
 
 
 double Simulator::FPMin(double a, double b) {
-  if (isnan(a)) {
+  if (std::isnan(a)) {
     return a;
-  } else if (isnan(b)) {
+  } else if (std::isnan(b)) {
     return b;
   }
 
@@ -1996,6 +2020,7 @@ void Simulator::VisitSystem(Instruction* instr) {
         switch (instr->ImmSystemRegister()) {
           case NZCV: set_xreg(instr->Rt(), nzcv().RawValue()); break;
           case FPCR: set_xreg(instr->Rt(), fpcr().RawValue()); break;
+          case TPIDR_EL0: set_xreg(instr->Rt(), HPHP::tlsBase()); break;
           default: not_implemented();
         }
         break;
@@ -2060,8 +2085,7 @@ void Simulator::DoPrintf(Instruction* instr) {
     result = printf(format, x1(), x2(), x3(), x4(), x5(), x6(), x7());
   } else if (type == CPURegister::kFPRegister) {
     result = printf(format, d0(), d1(), d2(), d3(), d4(), d5(), d6(), d7());
-  } else {
-    assert(type == CPURegister::kNoRegister);
+  } else if (type == CPURegister::kInvalid) {
     result = printf("%s", format);
   }
   set_x0(result);
@@ -2081,7 +2105,7 @@ void Simulator::DoHostCall(Instruction* instr) {
   uint32_t argc;
   assert(sizeof(*instr) == 1);
   memcpy(&argc, instr + kHostCallCountOffset, sizeof(argc));
-  assert(argc < 6);
+  assert(argc < 7);
 
   typedef intptr_t(*Native0Ptr)(void);
   typedef intptr_t(*Native1Ptr)(intptr_t);
@@ -2090,41 +2114,63 @@ void Simulator::DoHostCall(Instruction* instr) {
   typedef intptr_t(*Native4Ptr)(intptr_t, intptr_t, intptr_t, intptr_t);
   typedef intptr_t(*Native5Ptr)(intptr_t, intptr_t, intptr_t, intptr_t,
                                 intptr_t);
+  typedef intptr_t(*Native6Ptr)(intptr_t, intptr_t, intptr_t, intptr_t,
+                                intptr_t, intptr_t);
 
   intptr_t result;
 
-  switch (argc) {
-    case 0:
-      result = reinterpret_cast<Native0Ptr>(xreg(16))();
-      break;
-    case 1:
-      result = reinterpret_cast<Native1Ptr>(xreg(16))(xreg(0));
-      break;
-    case 2:
-      result = reinterpret_cast<Native2Ptr>(xreg(16))(xreg(0), xreg(1));
-      break;
-    case 3:
-      result = reinterpret_cast<Native3Ptr>(xreg(16))(
+  try {
+    switch (argc) {
+      case 0:
+        result = reinterpret_cast<Native0Ptr>(xreg(16))();
+        break;
+      case 1:
+        result = reinterpret_cast<Native1Ptr>(xreg(16))(xreg(0));
+        break;
+      case 2:
+        result = reinterpret_cast<Native2Ptr>(xreg(16))(xreg(0), xreg(1));
+        break;
+      case 3:
+        result = reinterpret_cast<Native3Ptr>(xreg(16))(
         xreg(0), xreg(1), xreg(2));
-      break;
-    case 4:
-      result = reinterpret_cast<Native4Ptr>(xreg(16))(
-        xreg(0), xreg(1), xreg(2), xreg(3));
-      break;
-    case 5:
-      result = reinterpret_cast<Native5Ptr>(xreg(16))(
-        xreg(0), xreg(1), xreg(2), xreg(3), xreg(4));
-      break;
-    default:
-      not_reached();
+        break;
+      case 4:
+        result = reinterpret_cast<Native4Ptr>(xreg(16))(
+          xreg(0), xreg(1), xreg(2), xreg(3));
+        break;
+      case 5:
+        result = reinterpret_cast<Native5Ptr>(xreg(16))(
+          xreg(0), xreg(1), xreg(2), xreg(3), xreg(4));
+        break;
+      case 6:
+        result = reinterpret_cast<Native6Ptr>(xreg(16))(
+          xreg(0), xreg(1), xreg(2), xreg(3), xreg(4), xreg(5));
+        break;
+      default:
+        not_reached();
+    }
+  } catch (...) {
+    if (exception_hook_) {
+      auto exn = std::current_exception();
+      auto exnPc = exception_hook_(this, exn);
+      if (exnPc) {
+        exns_in_flight_.push(exn);
+        set_pc(exnPc);
+        return;
+      }
+    }
+    throw;
   }
 
   // Trash all caller-saved registers
-  auto callerSaved = CPURegList::GetCallerSaved();
-  while (!callerSaved.IsEmpty()) {
-    auto reg = callerSaved.PopLowestIndex();
-    set_xreg(reg.code(), 0xf00dbeef);
+  for (auto code = 1; code < kFirstCalleeSavedRegisterIndex; code++) {
+    // Add the code to the magic number to leave a clue as to where a bogus
+    // value may have come from
+    set_xreg(code, 0xf00dbeeff00dbeef + code);
   }
+
+  // The link register, also caller-saved
+  set_xreg(30, 0xf00dbeeff00dbeef + 30);
 
   set_xreg(0, result);
 

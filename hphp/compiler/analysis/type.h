@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,8 +18,9 @@
 #define incl_HPHP_TYPE_H_
 
 #include "hphp/compiler/hphp.h"
-#include "hphp/util/json.h"
-#include "hphp/util/case-insensitive.h"
+#include <map>
+#include "hphp/compiler/json.h"
+#include "hphp/util/functional.h"
 #include "hphp/runtime/base/types.h"
 
 
@@ -68,6 +69,7 @@ public:
 
   static const KindOf KindOfInteger = (KindOf)(KindOfInt64 | KindOfInt32);
   static const KindOf KindOfNumeric = (KindOf)(KindOfDouble | KindOfInteger);
+  static const KindOf KindOfArrayKey = (KindOf)(KindOfString | KindOfInteger);
   static const KindOf KindOfPrimitive = (KindOf)(KindOfNumeric | KindOfString);
   static const KindOf KindOfPlusOperand = (KindOf)(KindOfNumeric | KindOfArray);
   static const KindOf KindOfSequence = (KindOf)(KindOfString | KindOfArray);
@@ -96,6 +98,7 @@ public:
   static TypePtr PlusOperand;
   static TypePtr Primitive;
   static TypePtr Sequence;
+  static TypePtr ArrayKey;
 
   static TypePtr AutoSequence;
   static TypePtr AutoObject;
@@ -117,6 +120,30 @@ public:
    */
   static TypePtr GetType(KindOf kindOf,
                          const std::string &clsname = "");
+
+  /**
+   * Map Runtime DataType to analysis Type
+   */
+  static TypePtr FromDataType(MaybeDataType dt, TypePtr unknown) {
+    if (!dt) return unknown;
+    switch (*dt) {
+      case DataType::KindOfNull:     return Type::Null;
+      case DataType::KindOfBoolean:  return Type::Boolean;
+      case DataType::KindOfInt64:    return Type::Int64;
+      case DataType::KindOfDouble:   return Type::Double;
+      case DataType::KindOfStaticString:
+      case DataType::KindOfString:   return Type::String;
+      case DataType::KindOfArray:    return Type::Array;
+      case DataType::KindOfObject:   return Type::Object;
+      case DataType::KindOfResource: return Type::Resource;
+
+      case DataType::KindOfUninit:
+      case DataType::KindOfRef:
+      case DataType::KindOfClass:
+        return unknown;
+    }
+    not_reached();
+  }
 
   /**
    * Whether a type can be used as another type.
@@ -226,9 +253,6 @@ public:
 
   ClassScopePtr getClass(AnalysisResultConstPtr ar,
                          BlockScopeRawPtr scope) const;
-
-  DataType getDataType() const;
-  DataType getHhvmDataType() const;
 
   /**
    * Type hint names in PHP.

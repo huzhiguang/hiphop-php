@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -26,7 +26,7 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-FORWARD_DECLARE_CLASS_BUILTIN(ExternalThreadEventWaitHandle);
+FORWARD_DECLARE_CLASS(ExternalThreadEventWaitHandle);
 
 /* This is not an optimal solution
  * This value is in principle a constexp, but the integer-to-pointer cast would
@@ -34,7 +34,7 @@ FORWARD_DECLARE_CLASS_BUILTIN(ExternalThreadEventWaitHandle);
  */
 #define K_CONSUMER_WAITING (static_cast<c_ExternalThreadEventWaitHandle*>((void*)1L))
 
-class AsioExternalThreadEventQueue {
+class AsioExternalThreadEventQueue final {
   public:
     AsioExternalThreadEventQueue();
 
@@ -43,6 +43,8 @@ class AsioExternalThreadEventQueue {
     bool abandonAllReceived(c_ExternalThreadEventWaitHandle* wait_handle);
 
     bool tryReceiveSome();
+    bool receiveSomeUntil(
+        std::chrono::time_point<std::chrono::steady_clock> waketime);
     void receiveSome();
     void send(c_ExternalThreadEventWaitHandle* wait_handle);
 

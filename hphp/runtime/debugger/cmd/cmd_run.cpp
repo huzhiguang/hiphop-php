@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,6 +15,8 @@
 */
 
 #include "hphp/runtime/debugger/cmd/cmd_run.h"
+#include <memory>
+#include <vector>
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
@@ -30,7 +32,7 @@ void CmdRun::sendImpl(DebuggerThriftBuffer &thrift) {
 void CmdRun::recvImpl(DebuggerThriftBuffer &thrift) {
   TRACE(2, "CmdRun::recvImpl\n");
   DebuggerCommand::recvImpl(thrift);
-  m_args = StringVecPtr(new StringVec());
+  m_args = std::make_shared<std::vector<std::string>>();
   thrift.read(*m_args);
 }
 
@@ -62,7 +64,8 @@ void CmdRun::onClient(DebuggerClient &client) {
   TRACE(2, "CmdRun::onClient\n");
   if (DebuggerCommand::displayedHelp(client)) return;
 
-  m_args = StringVecPtr(client.args(), null_deleter());
+  m_args = std::shared_ptr<std::vector<std::string>>(client.args(),
+    [] (const void*) {});
   client.sendToServer(this);
   client.clearCachedLocal();
   client.setFrame(0);

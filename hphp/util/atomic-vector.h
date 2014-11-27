@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,9 +19,8 @@
 
 #include <atomic>
 
-#include "folly/String.h"
+#include <folly/String.h>
 
-#include "hphp/util/util.h"
 #include "hphp/util/trace.h"
 
 namespace HPHP {
@@ -55,6 +54,8 @@ class AtomicVector {
   bool compare_exchange(size_t i, Value expect, const Value& val);
 
   Value get(size_t i) const;
+  template <typename F>
+  void foreach(F fun) const;
 
  private:
   static std::string typeName();
@@ -84,7 +85,7 @@ AtomicVector<Value>::AtomicVector(size_t size, const Value& def)
   assert(size > 0 && "size must be nonzero");
 
   for (size_t i = 0; i < size; ++i) {
-    m_vals[i] = def;
+    new (&m_vals[i]) std::atomic<Value>(def);
   }
 }
 
@@ -164,6 +165,18 @@ Value AtomicVector<Value>::get(size_t i) const {
 
   assert(m_next);
   return m_next.load(std::memory_order_acquire)->get(i - m_size);
+}
+
+template<typename Value>
+template<typename F>
+void AtomicVector<Value>::foreach(F fun) const {
+  auto size = m_size;
+
+  for (auto i = 0; i < size; i++) {
+    fun(m_vals[i].load(std::memory_order_acquire));
+  }
+  auto next = m_next.load(std::memory_order_acquire);
+  if (next) next->foreach(fun);
 }
 
 }

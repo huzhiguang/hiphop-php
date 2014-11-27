@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,15 +14,19 @@
    +----------------------------------------------------------------------+
 */
 
-#include <iomanip>
-#include <list>
-#include <cstdio>
-#include <limits>
-
 #include "hphp/runtime/vm/verifier/check.h"
+
+#include "hphp/runtime/base/mixed-array.h"
+
 #include "hphp/runtime/vm/verifier/cfg.h"
 #include "hphp/runtime/vm/verifier/util.h"
 #include "hphp/runtime/vm/verifier/pretty.h"
+
+#include <cstdio>
+#include <iomanip>
+#include <iostream>
+#include <limits>
+#include <list>
 
 namespace HPHP {
 namespace Verifier {
@@ -80,7 +84,7 @@ class FuncChecker {
   bool checkInputs(State* cur, PC, Block* b);
   bool checkOutputs(State* cur, PC, Block* b);
   bool checkSig(PC pc, int len, const FlavorDesc* args, const FlavorDesc* sig);
-  bool checkEmptyStack(const EHEnt&, Block* b);
+  bool checkEHStack(const EHEnt&, Block* b);
   bool checkTerminal(State* cur, PC pc);
   bool checkFpi(State* cur, PC pc, Block* b);
   bool checkIter(State* cur, PC pc);
@@ -196,7 +200,7 @@ bool FuncChecker::checkOffsets() {
   for (Range<FixedVector<Func::ParamInfo> > p(m_func->params()); !p.empty(); ) {
     const Func::ParamInfo& param = p.popFront();
     if (param.hasDefaultValue()) {
-      ok &= checkOffset("dv-entry", param.funcletOff(), "func body", base,
+      ok &= checkOffset("dv-entry", param.funcletOff, "func body", base,
                         funclets);
     }
   }
@@ -220,13 +224,7 @@ bool FuncChecker::checkOffsets() {
   // check EH regions and targets
   for (Range<FixedVector<EHEnt> > i(m_func->ehtab()); !i.empty(); ) {
     const EHEnt& eh = i.popFront();
-    checkRegion("EH", eh.m_base, eh.m_past, "func body", base, funclets);
-    if (eh.m_type == EHEnt::Type::Catch) {
-      for (Range<vector<CatchEnt> > c(eh.m_catches); !c.empty(); ) {
-        ok &= checkOffset("catch", c.popFront().second, "func body", base,
-                          funclets);
-      }
-    } else {
+    if (eh.m_type == EHEnt::Type::Fault) {
       ok &= checkOffset("fault", eh.m_fault, "funclets", funclets, past);
     }
   }
@@ -249,9 +247,10 @@ bool FuncChecker::checkSection(bool is_main, const char* name, Offset base,
     if (!checkImmediates(name, (Op*)i.front())) return false;
     PC pc = i.popFront();
     m_instrs.set(offset(pc) - m_func->base());
-    if (isSwitch(toOp(*pc)) ||
+    if (isSwitch(*reinterpret_cast<const Op*>(pc)) ||
         instrJumpTarget((Op*)bc, offset(pc)) != InvalidAbsoluteOffset) {
-      if (toOp(*pc) == OpSwitch && getImm((Op*)pc, 2).u_IVA != 0) {
+      if (*reinterpret_cast<const Op*>(pc) == OpSwitch &&
+          getImm((Op*)pc, 2).u_IVA != 0) {
         int64_t switchBase = getImm((Op*)pc, 1).u_I64A;
         int32_t len = getImmVector((Op*)pc).size();
         if (len <= 2) {
@@ -261,8 +260,8 @@ bool FuncChecker::checkSection(bool is_main, const char* name, Offset base,
         if (switchBase > std::numeric_limits<int64_t>::max() - len + 2) {
           error("Overflow in Switch bounds [%d:%d]\n", base, past);
         }
-      } else if (toOp(*pc) == OpSSwitch) {
-        foreachSwitchString((Opcode*)pc, [&](Id& id) {
+      } else if (*reinterpret_cast<const Op*>(pc) == Op::SSwitch) {
+        foreachSwitchString(reinterpret_cast<const Op*>(pc), [&](Id& id) {
           ok &= checkString(pc, id);
         });
       }
@@ -293,7 +292,7 @@ bool FuncChecker::checkSection(bool is_main, const char* name, Offset base,
   // within this region.
   for (Range<BranchList> i(branches); !i.empty();) {
     PC branch = i.popFront();
-    if (isSwitch(*branch)) {
+    if (isSwitch(*reinterpret_cast<const Op*>(branch))) {
       foreachSwitchTarget((Op*)branch, [&](Offset& o) {
         // TODO(#2464197): dce breaks switch for verify
         if (offset(branch + o) != -1) {
@@ -384,11 +383,7 @@ bool FuncChecker::checkLocal(PC pc, int k) {
 }
 
 bool FuncChecker::checkString(PC pc, Id id) {
-  if (id < 0 || unsigned(id) >= unit()->numLitstrs()) {
-    error("invalid string id %d at %d\n", id, offset(pc));
-    return false;
-  }
-  return true;
+  return unit()->isLitstrId(id);
 }
 
 /**
@@ -406,7 +401,7 @@ bool FuncChecker::checkImmediates(const char* name, const Op* instr) {
   for (int i = 0, n = numImmediates(*instr); i < n;
        pc += immSize(instr, i), i++) {
     switch (immType(*instr, i)) {
-    default: assert(false && "Unexpected immType");
+    case NA: always_assert(false && "Unexpected immType");
     case MA: { // member vector
       ImmVecRange vr(instr);
       if (vr.size() < 2) {
@@ -457,18 +452,22 @@ bool FuncChecker::checkImmediates(const char* name, const Op* instr) {
       PC iva_pc = pc;
       int32_t k = decodeVariableSizeImm(&iva_pc);
       switch (*instr) {
-      case OpStaticLoc:
-      case OpStaticLocInit:
-        ok &= checkLocal(pc, k);
-        break;
-      case OpVerifyParamType:
-        if (k >= numParams()) {
-          error("invalid parameter id %d at %d\n",
-                 k, offset((PC)instr));
-          ok = false;
-        }
-      default:
-        break;
+        case Op::ConcatN:
+          ok &= (k >= 2 && k <= kMaxConcatN);
+          break;
+        case Op::StaticLoc:
+        case Op::StaticLocInit:
+          ok &= checkLocal(pc, k);
+          break;
+        case Op::VerifyParamType:
+          if (k >= numParams()) {
+            error("invalid parameter id %d at %d\n",
+                   k, offset((PC)instr));
+            ok = false;
+          }
+          break;
+        default:
+          break;
       }
       break;
     }
@@ -493,6 +492,20 @@ bool FuncChecker::checkImmediates(const char* name, const Op* instr) {
       ok &= checkString(pc, id);
       break;
     }
+    case VSA: { // vector of litstr ids
+      auto len = *(uint32_t*)pc;
+      if (len < 1 || len > MixedArray::MaxMakeSize) {
+        error("invalid length of immedate VSA vector %d at offset %d\n",
+              len, offset(pc));
+        return false;
+      }
+      for (int i = 0; i < len; i++) {
+        PC sa_pc = pc + (i + 1) * sizeof(int);
+        Id id = decodeId(&sa_pc);
+        ok &= checkString(pc, id);
+      }
+      break;
+    }
     case AA: { // static array id
       PC aa_pc = pc;
       Id id = decodeId(&aa_pc);
@@ -512,26 +525,78 @@ bool FuncChecker::checkImmediates(const char* name, const Op* instr) {
       int op = int(*pc);
       switch (*instr) {
       default: assert(false && "Unexpected opcode with immType OA");
+      case Op::IsTypeC: case Op::IsTypeL:
+#define ISTYPE_OP(x)  if (op == static_cast<uint8_t>(IsTypeOp::x)) break;
+        ISTYPE_OPS
+#undef ISTYPE_OP
+        error("invalid operation for IsType*: %d\n", op);
+        ok = false;
+        break;
+      case Op::InitProp:
+#define INITPROP_OP(x) if (op == static_cast<uint8_t>(InitPropOp::x)) break;
+        INITPROP_OPS
+#undef INITPROP_OP
+        error("invalid operation for InitProp: %d\n", op);
+        ok = false;
+        break;
       case OpIncDecL: case OpIncDecN: case OpIncDecG: case OpIncDecS:
       case OpIncDecM:
-        if (op >= IncDec_invalid) {
-          error("invalid operation for IncDec*: %d\n", op);
-          ok = false;
-        }
+#define INCDEC_OP(x)   if (op == static_cast<uint8_t>(IncDecOp::x)) break;
+        INCDEC_OPS
+#undef INCDEC_OP
+        error("invalid operation for IncDec*: %d\n", op);
+        ok = false;
         break;
       case OpSetOpL: case OpSetOpN: case OpSetOpG: case OpSetOpS:
       case OpSetOpM:
-        if (op >= SetOp_invalid) {
-          error("invalid operation for SetOp*: %d\n", op);
-          ok = false;
-        }
+#define SETOP_OP(x, y) if (op == static_cast<uint8_t>(SetOpOp::x)) break;
+        SETOP_OPS
+#undef SETOP_OP
+        error("invalid operation for SetOp*: %d\n", op);
+        ok = false;
         break;
       case OpBareThis:
-        if (op > 1) ok = false;
+#define BARETHIS_OP(x) if (op == static_cast<uint8_t>(BareThisOp::x)) break;
+        BARETHIS_OPS
+#undef BARETHIS_OP
+        error("invalid BareThisOp: %d\n", op);
+        ok = false;
+        break;
+      case OpFatal:
+#define FATAL_OP(x)   if (op == static_cast<uint8_t>(FatalOp::x)) break;
+        FATAL_OPS
+#undef FATAL_OP
+        error("invalid error kind for Fatal: %d\n", op);
+        ok = false;
+        break;
+      case OpSilence:
+#define SILENCE_OP(x) if (op == static_cast<uint8_t>(SilenceOp::x)) break;
+        SILENCE_OPS
+#undef SILENCE_OP
+        error("invalid operation for Silence: %d\n", op);
+        ok = false;
+        break;
+      case OpOODeclExists:
+#define OO_DECL_EXISTS_OP(x) if (op == static_cast<uint8_t>(OODeclExistsOp::x)) break;
+        OO_DECL_EXISTS_OPS
+#undef OO_DECL_EXISTS_OP
+          error("invalid operation for OODeclExists: %d\n", op);
+        ok = false;
+        break;
+      case OpFPushObjMethodD:
+      case OpFPushObjMethod:
+#define OBJMETHOD_OP(x) if (op == static_cast<uint8_t>(ObjMethodOp::x)) break;
+        OBJMETHOD_OPS
+#undef OBJMETHOD_OP
+          error("invalid operation for FPushObjMethod*: %d\n", op);
+        ok = false;
         break;
       }
+    }
+    case RATA:
+      // Nothing to check at the moment.
       break;
-    }}
+    }
   }
   return ok;
 }
@@ -545,7 +610,9 @@ bool FuncChecker::checkSig(PC pc, int len, const FlavorDesc* args,
                            const FlavorDesc* sig) {
   for (int i = 0; i < len; ++i) {
     if (args[i] != (FlavorDesc)sig[i] &&
-        !((FlavorDesc)sig[i] == CVV && (args[i] == CV || args[i] == VV))) {
+        !((FlavorDesc)sig[i] == CVV && (args[i] == CV || args[i] == VV)) &&
+        !((FlavorDesc)sig[i] == CVUV && (args[i] == CV || args[i] == VV ||
+                                         args[i] == UV))) {
       error("flavor mismatch at %d, got %s expected %s\n",
              offset(pc), stkToString(len, args).c_str(),
              sigToString(len, sig).c_str());
@@ -594,68 +661,80 @@ const FlavorDesc* FuncChecker::sig(PC pc) {
   #define NOV { },
   #define FMANY { },
   #define CVMANY { },
+  #define CVUMANY { },
   #define CMANY { },
+  #define SMANY { },
   #define ONE(a) { a },
   #define TWO(a,b) { b, a },
   #define THREE(a,b,c) { c, b, a },
   #define FOUR(a,b,c,d) { d, c, b, a },
-  #define LMANY() { },
-  #define C_LMANY() { },
-  #define V_LMANY() { },
-  #define R_LMANY() { },
+  #define MMANY { },
+  #define C_MMANY { },
+  #define V_MMANY { },
+  #define R_MMANY { },
   #define O(name, imm, pop, push, flags) pop
     OPCODES
   #undef O
-  #undef C_LMANY
-  #undef V_LMANY
-  #undef R_LMANY
-  #undef LMANY
+  #undef C_MMANY
+  #undef V_MMANY
+  #undef R_MMANY
+  #undef MMANY
   #undef FMANY
   #undef CVMANY
+  #undef CVUMANY
   #undef CMANY
+  #undef SMANY
   #undef FOUR
   #undef THREE
   #undef TWO
   #undef ONE
   #undef NOV
   };
-  switch (toOp(*pc)) {
-  case OpCGetM:     // ONE(LA),      LMANY(), ONE(CV)
-  case OpVGetM:     // ONE(LA),      LMANY(), ONE(VV)
-  case OpIssetM:    // ONE(LA),      LMANY(), ONE(CV)
-  case OpEmptyM:    // ONE(LA),      LMANY(), ONE(CV)
-  case OpUnsetM:    // ONE(LA),      LMANY(), NOV
-  case OpFPassM:    // TWO(IVA,LA),  LMANY(), ONE(FV)
-  case OpIncDecM:   // TWO(OA,LA),   LMANY(), ONE(CV)
+  switch (*reinterpret_cast<const Op*>(pc)) {
+  case Op::CGetM:     // ONE(LA),      MMANY, ONE(CV)
+  case Op::VGetM:     // ONE(LA),      MMANY, ONE(VV)
+  case Op::IssetM:    // ONE(LA),      MMANY, ONE(CV)
+  case Op::EmptyM:    // ONE(LA),      MMANY, ONE(CV)
+  case Op::UnsetM:    // ONE(LA),      MMANY, NOV
+  case Op::FPassM:    // TWO(IVA,LA),  MMANY, ONE(FV)
+  case Op::IncDecM:   // TWO(OA,LA),   MMANY, ONE(CV)
     return vectorSig(pc, NOV);
-  case OpBindM:     // ONE(LA),    V_LMANY(), ONE(VV)
+  case Op::BindM:     // ONE(LA),    V_MMANY, ONE(VV)
     return vectorSig(pc, VV);
-  case OpSetM:      // ONE(LA),    C_LMANY(), ONE(CV)
-  case OpSetOpM:    // TWO(OA,LA), C_LMANY(), ONE(CV)
+  case Op::SetM:      // ONE(LA),    C_MMANY, ONE(CV)
+  case Op::SetOpM:    // TWO(OA,LA), C_MMANY, ONE(CV)
     return vectorSig(pc, CV);
-  case OpSetWithRefLM://TWO(MA, HA), LMANY(), NOV
+  case Op::SetWithRefLM://TWO(MA, HA), MMANY, NOV
     return vectorSig(pc, NOV);
-  case OpSetWithRefRM://ONE(MA),   R_LMANY(), NOV
+  case Op::SetWithRefRM://ONE(MA),   R_MMANY, NOV
     return vectorSig(pc, RV);
-  case OpFCall:     // ONE(IVA),     FMANY,   ONE(RV)
-  case OpFCallArray:// NA,           ONE(FV), ONE(RV)
+  case Op::FCall:       // ONE(IVA),     FMANY,   ONE(RV)
+  case Op::FCallD:      // THREE(IVA,SA,SA), FMANY,   ONE(RV)
+  case Op::FCallUnpack: // ONE(IVA), FMANY, ONE(RV)
+  case Op::FCallArray:  // NA,           ONE(FV), ONE(RV)
     for (int i = 0, n = instrNumPops((Op*)pc); i < n; ++i) {
       m_tmp_sig[i] = FV;
     }
     return m_tmp_sig;
-  case OpFCallBuiltin: //TWO(IVA, SA) CVMANY,  ONE(RV)
-  case OpCreateCl:  // TWO(IVA,SA),  CVMANY,   ONE(CV)
+  case Op::FCallBuiltin: //TWO(IVA, SA), CVUMANY,  ONE(RV)
+    for (int i = 0, n = instrNumPops((Op*)pc); i < n; ++i) {
+      m_tmp_sig[i] = CVUV;
+    }
+    return m_tmp_sig;
+  case Op::CreateCl:  // TWO(IVA,SA),  CVMANY,   ONE(CV)
     for (int i = 0, n = instrNumPops((Op*)pc); i < n; ++i) {
       m_tmp_sig[i] = CVV;
     }
     return m_tmp_sig;
-  case OpNewTuple:  // ONE(IVA),     CMANY,   ONE(CV)
+  case Op::NewPackedArray:  // ONE(IVA),     CMANY,   ONE(CV)
+  case Op::NewStructArray:  // ONE(VSA),     SMANY,   ONE(CV)
+  case Op::ConcatN:         // ONE(IVA),     CMANY,   ONE(CV)
     for (int i = 0, n = instrNumPops((Op*)pc); i < n; ++i) {
       m_tmp_sig[i] = CV;
     }
     return m_tmp_sig;
   default:
-    return &inputSigs[uint8_t(toOp(*pc))][0];
+    return &inputSigs[uint8_t(*pc)][0];
   }
 }
 
@@ -672,7 +751,7 @@ bool FuncChecker::checkInputs(State* cur, PC pc, Block* b) {
 }
 
 bool FuncChecker::checkTerminal(State* cur, PC pc) {
-  if (isRet(pc) || toOp(*pc) == OpUnwind) {
+  if (isRet(pc) || *reinterpret_cast<const Op*>(pc) == Op::Unwind) {
     if (cur->stklen != 0) {
       error("stack depth must equal 0 after Ret* and Unwind; got %d\n",
              cur->stklen);
@@ -689,9 +768,10 @@ bool FuncChecker::checkFpi(State* cur, PC pc, Block* b) {
   }
   bool ok = true;
   FpiState& fpi = cur->fpi[cur->fpilen - 1];
-  if (isFCallStar(toOp(*pc))) {
+  if (isFCallStar(*reinterpret_cast<const Op*>(pc))) {
     --cur->fpilen;
-    int call_params = toOp(*pc) == OpFCall ? getImmIva(pc) : 1;
+    auto const op = static_cast<Op>(*pc);
+    int call_params = op == Op::FCallArray ? 1 : getImmIva(pc);
     int push_params = getImmIva(at(fpi.fpush));
     if (call_params != push_params) {
       error("FCall* param_count (%d) doesn't match FPush* (%d)\n",
@@ -738,11 +818,11 @@ bool FuncChecker::checkIter(State* cur, PC const pc) {
   assert(isIter(pc));
   int id = getImmIva(pc);
   bool ok = true;
-  auto op = toOp(*pc);
-  if (op == OpIterInit || op == OpIterInitK ||
-      op == OpWIterInit || op == OpWIterInitK ||
-      op == OpMIterInit || op == OpMIterInitK ||
-      op == OpDecodeCufIter) {
+  auto op = *reinterpret_cast<const Op*>(pc);
+  if (op == Op::IterInit || op == Op::IterInitK ||
+      op == Op::WIterInit || op == Op::WIterInitK ||
+      op == Op::MIterInit || op == Op::MIterInitK ||
+      op == Op::DecodeCufIter) {
     if (cur->iters[id]) {
       error(
         "IterInit* or MIterInit* <%d> trying to double-initialize\n", id);
@@ -754,9 +834,9 @@ bool FuncChecker::checkIter(State* cur, PC const pc) {
       //error("Cannot access un-initialized iter %d\n", id);
       //ok = false;
     }
-    if (op == OpIterFree ||
-        op == OpMIterFree ||
-        op == OpCIterFree) {
+    if (op == Op::IterFree ||
+        op == Op::MIterFree ||
+        op == Op::CIterFree) {
       cur->iters[id] = false;
     }
   }
@@ -768,25 +848,27 @@ bool FuncChecker::checkOutputs(State* cur, PC pc, Block* b) {
   #define NOV { },
   #define FMANY { },
   #define CMANY { },
+  #define SMANY { },
   #define ONE(a) { a },
   #define TWO(a,b) { a, b },
   #define THREE(a,b,c) { a, b, c },
   #define FOUR(a,b,c,d) { a, b, c, d },
   #define INS_1(a) { a },
   #define INS_2(a) { a },
-  #define LMANY() { },
-  #define C_LMANY() { },
-  #define V_LMANY() { },
-  #define R_LMANY() { },
+  #define MMANY() { },
+  #define C_MMANY() { },
+  #define V_MMANY() { },
+  #define R_MMANY() { },
   #define O(name, imm, pop, push, flags) push
     OPCODES
   #undef O
-  #undef C_LMANY
-  #undef V_LMANY
-  #undef R_LMANY
-  #undef LMANY
+  #undef C_MMANY
+  #undef V_MMANY
+  #undef R_MMANY
+  #undef MMANY
   #undef FMANY
   #undef CMANY
+  #undef SMANY
   #undef INS_1
   #undef INS_2
   #undef FOUR
@@ -805,7 +887,7 @@ bool FuncChecker::checkOutputs(State* cur, PC pc, Block* b) {
     }
     memmove(&cur->stk[index + 1], &cur->stk[index],
            (info.pos + 1) * sizeof(*cur->stk));
-    cur->stk[index] = outputSigs[uint8_t(toOp(*pc))][0];
+    cur->stk[index] = outputSigs[uint8_t(*reinterpret_cast<const Op*>(pc))][0];
     cur->stklen++;
   } else {
     int pushes = info.numPushes;
@@ -813,8 +895,8 @@ bool FuncChecker::checkOutputs(State* cur, PC pc, Block* b) {
     FlavorDesc *outs = &cur->stk[cur->stklen];
     cur->stklen += pushes;
     for (int i = 0; i < pushes; ++i)
-      outs[i] = outputSigs[uint8_t(toOp(*pc))][i];
-    if (isFPush(toOp(*pc))) {
+      outs[i] = outputSigs[uint8_t(*reinterpret_cast<const Op*>(pc))][i];
+    if (isFPush(*reinterpret_cast<const Op*>(pc))) {
       if (cur->fpilen >= maxFpi()) {
         error("%s", "more FPush* instructions than FPI regions\n");
         return false;
@@ -927,11 +1009,11 @@ bool FuncChecker::checkFlow() {
     }
     ok &= checkSuccEdges(b, &cur);
   }
-  // Make sure eval stack is empty at start of each try region
+  // Make sure eval stack is correct at start of each try region
   for (Range<FixedVector<EHEnt> > i(m_func->ehtab()); !i.empty(); ) {
     const EHEnt& handler = i.popFront();
     if (handler.m_type == EHEnt::Type::Catch) {
-      ok &= checkEmptyStack(handler, builder.at(handler.m_base));
+      ok &= checkEHStack(handler, builder.at(handler.m_base));
     }
   }
   return ok;
@@ -986,14 +1068,9 @@ bool FuncChecker::checkSuccEdges(Block* b, State* cur) {
   return ok;
 }
 
-bool FuncChecker::checkEmptyStack(const EHEnt& handler, Block* b) {
+bool FuncChecker::checkEHStack(const EHEnt& handler, Block* b) {
   const State& state = m_info[b->id].state_in;
   if (!state.stk) return true; // ignore unreachable block
-  if (state.stklen != 0) {
-    error("EH region starts with non-empty stack at B%d\n",
-           b->id);
-    return false;
-  }
   if (state.fpilen != 0) {
     error("EH region starts with non-empty FPI stack at B%d\n",
            b->id);

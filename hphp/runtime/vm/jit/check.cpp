@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,17 +13,24 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
+
 #include "hphp/runtime/vm/jit/check.h"
 
-#include <boost/next_prior.hpp>
+#include <bitset>
+#include <iostream>
 #include <unordered_set>
 
-#include "hphp/runtime/vm/jit/ir.h"
-#include "hphp/runtime/vm/jit/ir-factory.h"
-#include "hphp/runtime/vm/jit/linear-scan.h"
+#include "hphp/runtime/vm/jit/ir-opcode.h"
+#include "hphp/runtime/vm/jit/ir-unit.h"
 #include "hphp/runtime/vm/jit/phys-reg.h"
+#include "hphp/runtime/vm/jit/block.h"
+#include "hphp/runtime/vm/jit/cfg.h"
+#include "hphp/runtime/vm/jit/id-set.h"
+#include "hphp/runtime/vm/jit/reg-alloc.h"
+#include "hphp/runtime/vm/jit/mc-generator.h"
+#include "hphp/runtime/vm/jit/analysis.h"
 
-namespace HPHP {  namespace JIT {
+namespace HPHP { namespace jit {
 
 namespace {
 
@@ -31,48 +38,10 @@ namespace {
 
 TRACE_SET_MOD(hhir);
 
-enum Limits : unsigned {
-  kNumRegisters = Transl::kNumRegs,
-  kNumSlots = NumPreAllocatedSpillLocs
-};
-
-struct RegState {
-  RegState();
-  SSATmp*& tmp(const RegisterInfo& info, int i);
-  void merge(const RegState& other);
-  SSATmp* regs[kNumRegisters];  // which tmp is in each register
-  SSATmp* slots[kNumSlots]; // which tmp is in each spill slot
-};
-
-RegState::RegState() {
-  memset(regs, 0, sizeof(regs));
-  memset(slots, 0, sizeof(slots));
-}
-
-SSATmp*& RegState::tmp(const RegisterInfo& info, int i) {
-  if (info.spilled()) {
-    auto slot = info.spillInfo(i).slot();
-    assert(unsigned(slot) < kNumSlots);
-    return slots[slot];
-  }
-  auto r = info.reg(i);
-  assert(r != Transl::InvalidReg && unsigned(int(r)) < kNumRegisters);
-  return regs[int(r)];
-}
-
-void RegState::merge(const RegState& other) {
-  for (unsigned i = 0; i < kNumRegisters; i++) {
-    if (regs[i] != other.regs[i]) regs[i] = nullptr;
-  }
-  for (unsigned i = 0; i < kNumSlots; i++) {
-    if (slots[i] != other.slots[i]) slots[i] = nullptr;
-  }
-}
-
 // Return the number of parameters required for this block
 DEBUG_ONLY static int numBlockParams(Block* b) {
-  return b->empty() || b->front()->op() != DefLabel ? 0 :
-         b->front()->numDsts();
+  return b->empty() || b->front().op() != DefLabel ? 0 :
+         b->front().numDsts();
 }
 
 /*
@@ -81,97 +50,75 @@ DEBUG_ONLY static int numBlockParams(Block* b) {
  *    BeginCatch.
  * 2. DefLabel and BeginCatch may not appear anywhere in a block other than
  *    where specified in #1.
- * 3. If the optional BeginCatch is present, the block must belong to an exit
- *    trace and must be the first block in its Trace's block list.
- * 4. If any instruction is isBlockEnd(), it must be last.
- * 5. If the last instruction isTerminal(), block->next must be null.
- * 6. If the DefLabel produces a value, all of its incoming edges must be from
- *    blocks listed in the block list for this block's Trace.
+ * 3. If this block is a catch block, it must have at most one predecessor.
+ * 4. The last instruction must be isBlockEnd() and the middle instructions
+ *    must not be isBlockEnd().  Therefore, blocks cannot be empty.
+ * 5. If the last instruction isTerminal(), block->next() must be null.
+ * 6. Every instruction must have a catch block attached to it if and only if it
+ *    has the MayRaiseError flag.
  * 7. Any path from this block to a Block that expects values must be
- *    from a Jmp_ instruciton.
+ *    from a Jmp instruciton.
  * 8. Every instruction's BCMarker must point to a valid bytecode instruction.
+ * 9. If a DefLabel defines a value of type StkPtr, it must appear as the first
+ *    dest. This is necessary for the state tracking in FrameStateMgr::update.
  */
 bool checkBlock(Block* b) {
   auto it = b->begin();
   auto end = b->end();
-  if (it == end) return true;
+  always_assert(!b->empty());
 
   // Invariant #1
-  if (it->op() == DefLabel) ++it;
+  if (it->op() == DefLabel) {
+    // Invariant #9
+    for (unsigned i = 0, n = it->numDsts(); i < n; ++i) {
+      always_assert(IMPLIES(it->dst(i)->isA(Type::StkPtr), i == 0));
+    }
+    ++it;
+  }
 
-  // Invariant #1, #3
+  // Invariant #1
   if (it != end && it->op() == BeginCatch) {
     ++it;
-    assert(!b->trace()->isMain());
-    assert(b == b->trace()->front());
   }
 
   // Invariants #2, #4
-  if (it == end) return true;
-  if (b->back()->isBlockEnd()) --end;
-  for (DEBUG_ONLY IRInstruction& inst : folly::makeRange(it, end)) {
-    assert(inst.op() != DefLabel);
-    assert(inst.op() != BeginCatch);
-    assert(!inst.isBlockEnd());
+  always_assert(it != end && b->back().isBlockEnd());
+  --end;
+  for (IRInstruction& inst : folly::range(it, end)) {
+    always_assert(inst.op() != DefLabel);
+    always_assert(inst.op() != BeginCatch);
+    always_assert(!inst.isBlockEnd());
   }
-  for (DEBUG_ONLY IRInstruction& inst : *b) {
+  for (IRInstruction& inst : *b) {
     // Invariant #8
-    assert(inst.marker().valid());
-    assert(inst.block() == b);
+    always_assert(inst.marker().valid());
+    always_assert(inst.block() == b);
+    // Invariant #6
+    always_assert_log(
+      inst.mayRaiseError() == (inst.taken() && inst.taken()->isCatch()),
+      [&]{ return inst.toString(); }
+    );
   }
 
   // Invariant #5
-  assert(IMPLIES(b->back()->isTerminal(), !b->next()));
+  always_assert(IMPLIES(b->back().isTerminal(), !b->next()));
 
   // Invariant #7
   if (b->taken()) {
-    // only Jmp_ can branch to a join block expecting values.
-    DEBUG_ONLY IRInstruction* branch = b->back();
-    DEBUG_ONLY auto numArgs = branch->op() == Jmp_ ? branch->numSrcs() : 0;
-    assert(numBlockParams(b->taken()) == numArgs);
+    // only Jmp can branch to a join block expecting values.
+    IRInstruction* branch = &b->back();
+    auto numArgs = branch->op() == Jmp ? branch->numSrcs() : 0;
+    always_assert(numBlockParams(b->taken()) == numArgs);
   }
 
-  // Invariant #6
-  if (b->front()->op() == DefLabel) {
-    for (int i = 0; i < b->front()->numDsts(); ++i) {
-      auto const traceBlocks = b->trace()->blocks();
-      b->forEachSrc(i, [&](IRInstruction* inst, SSATmp*) {
-        assert(std::find(traceBlocks.begin(), traceBlocks.end(),
-                         inst->block()) != traceBlocks.end());
-      });
-    }
+  // Invariant #3
+  if (b->isCatch()) {
+    // keyed off a tca, so there needs to be exactly one
+    always_assert(b->preds().size() <= 1);
   }
 
   return true;
 }
-
-/*
- * Check that every catch trace has at most one incoming branch and a single
- * block.
- */
-bool checkCatchTraces(IRTrace* trace, const IRFactory& irFactory) {
-  forEachTraceBlock(trace, [&](Block* b) {
-    auto trace = b->trace();
-    if (trace->isCatch()) {
-      assert(trace->blocks().size() == 1);
-      assert(b->preds().size() <= 1);
-    }
-  });
-  return true;
-}
-
-}
-
-const Edge* takenEdge(IRInstruction* inst) {
-  return inst->m_taken.to() ? &inst->m_taken : nullptr;
-}
-
-const Edge* takenEdge(Block* b) {
-  return takenEdge(b->back());
-}
-
-const Edge* nextEdge(Block* b) {
-  return b->m_next.to() ? &b->m_next : nullptr;
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -185,165 +132,121 @@ const Edge* nextEdge(Block* b) {
  * 4. Treat tmps defined by DefConst as always defined.
  * 5. Each predecessor of a reachable block must be reachable (deleted
  *    blocks must not have out-edges to reachable blocks).
+ * 6. The entry block must not have any predecessors.
+ * 7. The entry block starts with a DefFP instruction.
  */
-bool checkCfg(IRTrace* trace, const IRFactory& factory) {
-  forEachTraceBlock(trace, checkBlock);
+bool checkCfg(const IRUnit& unit) {
+  auto const blocksIds = rpoSortCfgWithIds(unit);
+  auto const& blocks = blocksIds.blocks;
+  jit::hash_set<const Edge*> edges;
+
+  // Entry block can't have predecessors.
+  always_assert(unit.entry()->numPreds() == 0);
+
+  // Entry block starts with DefFP
+  always_assert(!unit.entry()->empty() &&
+                unit.entry()->begin()->op() == DefFP);
 
   // Check valid successor/predecessor edges.
-  auto const blocks = rpoSortCfg(trace, factory);
-  std::unordered_set<const Edge*> edges;
   for (Block* b : blocks) {
     auto checkEdge = [&] (const Edge* e) {
-      assert(e->from() == b);
+      always_assert(e->from() == b);
       edges.insert(e);
       for (auto& p : e->to()->preds()) if (&p == e) return;
-      assert(false); // did not find edge.
+      always_assert(false); // did not find edge.
     };
-    if (auto *e = nextEdge(b))  checkEdge(e);
-    if (auto *e = takenEdge(b)) checkEdge(e);
+    checkBlock(b);
+    if (auto *e = b->nextEdge())  checkEdge(e);
+    if (auto *e = b->takenEdge()) checkEdge(e);
   }
   for (Block* b : blocks) {
-    for (DEBUG_ONLY auto const &e : b->preds()) {
-      assert(&e == takenEdge(e.from()) || &e == nextEdge(e.from()));
-      assert(e.to() == b);
+    for (auto const &e : b->preds()) {
+      always_assert(&e == e.inst()->takenEdge() || &e == e.inst()->nextEdge());
+      always_assert(e.to() == b);
     }
   }
 
-  checkCatchTraces(trace, factory);
-
-  // visit dom tree in preorder, checking all tmps
-  auto const children = findDomChildren(blocks);
-  StateVector<SSATmp, bool> defined0(factory, false);
-  forPreorderDoms(blocks.front(), children, defined0,
-                  [] (Block* block, StateVector<SSATmp, bool>& defined) {
-    for (IRInstruction& inst : *block) {
-      for (DEBUG_ONLY SSATmp* src : inst.srcs()) {
-        assert(src->inst() != &inst);
-        assert_log(src->inst()->op() == DefConst ||
-                   defined[src],
-                   [&]{ return folly::format(
-                       "src '{}' in '{}' came from '{}', which is not a "
-                       "DefConst and is not defined at this use site",
-                       src->toString(), inst.toString(),
-                       src->inst()->toString()).str();
-                   });
-      }
-      for (SSATmp& dst : inst.dsts()) {
-        assert(dst.inst() == &inst && inst.op() != DefConst);
-        assert(!defined[dst]);
-        defined[dst] = true;
-      }
+  // Visit every instruction and make sure their sources are defined in a block
+  // that dominates the block containing the instruction.
+  auto const idoms = findDominators(unit, blocksIds);
+  forEachInst(blocks, [&] (const IRInstruction* inst) {
+    for (auto src : inst->srcs()) {
+      if (src->inst()->is(DefConst)) continue;
+      auto const dom = findDefiningBlock(src);
+      always_assert_flog(
+        dom && dominates(dom, inst->block(), idoms),
+        "src '{}' in '{}' came from '{}', which is not a "
+        "DefConst and is not defined at this use site",
+        src->toString(), inst->toString(),
+        src->inst()->toString()
+      );
     }
   });
+
   return true;
 }
 
-bool checkTmpsSpanningCalls(IRTrace* trace, const IRFactory& irFactory) {
-  auto const blocks   = rpoSortCfg(trace, irFactory);
-  auto const children = findDomChildren(blocks);
-
+bool checkTmpsSpanningCalls(const IRUnit& unit) {
   // CallBuiltin is ok because it is not a php-level call.  (It will
   // call a C++ helper and we can push/pop around it normally.)
   auto isCall = [&] (Opcode op) {
-    return op == Call || op == CallArray;
+    return op == Call || op == CallArray || op == ContEnter;
   };
 
-  typedef StateVector<SSATmp,bool> State;
+  auto ignoreSrc = [&](IRInstruction& inst, SSATmp* src) {
+    /*
+     * ReDefSP, TakeStack, and FramePtr/StkPtr-typed tmps are used
+     * only for stack analysis in the simplifier and therefore may
+     * live across calls. In particular, ReDefSP are used to bridge
+     * the logical stack of the caller when a callee is inlined so
+     * that analysis does not scan into the callee stack when
+     * searching for a type of value in the caller.
+     *
+     * Tmps defined by DefConst are always available and may be
+     * assigned to registers if needed by the instructions using the
+     * const.
+     */
+    return (inst.is(ReDefSP) && src->isA(Type::StkPtr)) ||
+           inst.is(TakeStack) ||
+           src->isA(Type::StkPtr) ||
+           src->isA(Type::FramePtr) ||
+           src->inst()->is(DefConst);
+  };
 
+  StateVector<Block,IdSet<SSATmp>> livein(unit, IdSet<SSATmp>());
   bool isValid = true;
-  forPreorderDoms(
-    blocks.front(), children, State(irFactory, false),
-    [&] (Block* b, State& state) {
-      for (auto& inst : *b) {
-        for (auto& src : inst.srcs()) {
-          /*
-           * These SSATmp's are used only for stack analysis in the
-           * simplifier and therefore may live across calls.  In particular
-           * these instructions are used to bridge the logical stack of the
-           * caller when a callee is inlined so that analysis does not scan
-           * into the callee stack when searching for a type of value in the
-           * caller.
-           */
-          if (inst.op() == ReDefSP && src->isA(Type::StkPtr)) continue;
-          if (inst.op() == ReDefGeneratorSP && src->isA(Type::StkPtr)) {
-            continue;
-          }
-
-          if (src->isA(Type::FramePtr)) continue;
-          if (src->isConst()) continue;
-          if (!state[src]) {
-            auto msg = folly::format("checkTmpsSpanningCalls failed\n"
-                                     "  instruction: {}\n"
-                                     "  src:         {}\n",
-                                     inst.toString(),
-                                     src->toString()).str();
-            std::cerr << msg;
-            FTRACE(1, "{}", msg);
-            isValid = false;
-          }
-        }
-
-        /*
-         * Php calls kill all live temporaries.  We can't keep them
-         * alive across the call because we currently have no
-         * callee-saved registers in our abi, and all translations
-         * share the same spill slots.
-         */
-        if (isCall(inst.op())) state.reset();
-
-        for (auto& d : inst.dsts()) {
-          state[d] = true;
-        }
+  postorderWalk(unit, [&](Block* block) {
+    auto& live = livein[block];
+    if (auto taken = block->taken()) live = livein[taken];
+    if (auto next  = block->next()) live |= livein[next];
+    for (auto it = block->end(); it != block->begin();) {
+      auto& inst = *--it;
+      for (auto& dst : inst.dsts()) {
+        live.erase(dst);
+      }
+      if (isCall(inst.op())) {
+        live.forEach([&](uint32_t tmp) {
+          auto msg = folly::format("checkTmpsSpanningCalls failed\n"
+                                   "  instruction: {}\n"
+                                   "  src:         t{}\n"
+                                   "\n"
+                                   "Unit:\n"
+                                   "{}\n",
+                                   inst.toString(),
+                                   tmp,
+                                   unit.toString()).str();
+          std::cerr << msg;
+          FTRACE(1, "{}", msg);
+          isValid = false;
+        });
+      }
+      for (auto* src : inst.srcs()) {
+        if (!ignoreSrc(inst, src)) live.add(src);
       }
     }
-  );
+  });
 
   return isValid;
 }
 
-bool checkRegisters(IRTrace* trace, const IRFactory& factory,
-                    const RegAllocInfo& regs) {
-  assert(checkCfg(trace, factory));
-
-  auto blocks = rpoSortCfg(trace, factory);
-  StateVector<Block, RegState> states(factory, RegState());
-  StateVector<Block, bool> reached(factory, false);
-  for (auto* block : blocks) {
-    RegState state = states[block];
-    for (IRInstruction& inst : *block) {
-      for (SSATmp* src : inst.srcs()) {
-        auto const &info = regs[src];
-        if (!info.spilled() &&
-            (info.reg(0) == Transl::rVmSp ||
-             info.reg(0) == Transl::rVmFp)) {
-          // hack - ignore rbx and rbp
-          continue;
-        }
-        for (unsigned i = 0, n = info.numAllocatedRegs(); i < n; ++i) {
-          assert(state.tmp(info, i) == src);
-        }
-      }
-      for (SSATmp& dst : inst.dsts()) {
-        auto const &info = regs[dst];
-        for (unsigned i = 0, n = info.numAllocatedRegs(); i < n; ++i) {
-          state.tmp(info, i) = &dst;
-        }
-      }
-    }
-    // State contains register/spill info at current block end.
-    auto updateEdge = [&](Block* succ) {
-      if (!reached[succ]) {
-        states[succ] = state;
-      } else {
-        states[succ].merge(state);
-      }
-    };
-    if (auto* next = block->next()) updateEdge(next);
-    if (auto* taken = block->taken()) updateEdge(taken);
-  }
-
-  return true;
-}
-
 }}
-

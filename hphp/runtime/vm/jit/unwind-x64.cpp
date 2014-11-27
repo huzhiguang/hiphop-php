@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,29 +16,41 @@
 
 #include "hphp/runtime/vm/jit/unwind-x64.h"
 
-#include <libunwind.h>
 #include <vector>
 #include <memory>
 #include <cxxabi.h>
 #include <boost/mpl/identity.hpp>
 
+#include "hphp/util/abi-cxx.h"
 #include "hphp/runtime/vm/jit/abi-x64.h"
-#include "hphp/runtime/vm/jit/runtime-type.h"
-#include "hphp/runtime/vm/jit/target-cache.h"
-#include "hphp/runtime/vm/jit/translator-x64.h"
+#include "hphp/runtime/base/rds.h"
+#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/base/stats.h"
 #include "hphp/runtime/vm/runtime.h"
 #include "hphp/runtime/vm/member-operations.h"
 
+// on cygwin in 64 bit/SEH adding frame information needs to be
+// handled with rtladdfunctiontable and rtldeletefunctiontable
+// or use the rtlinstallfunctiontablecallback
+// register_frame and deregister_frame do not exist
+// this is a temp solution that provides empty placeholders for linking
+#ifdef __CYGWIN__
+void __register_frame(const void*) {}
+void __deregister_frame(const void*) {}
+#else
+
 // libgcc exports this for registering eh information for
 // dynamically-loaded objects.  The pointer is to data in the format
 // you find in a .eh_frame section.
-extern "C" void __register_frame(void*);
-extern "C" void __deregister_frame(void*);
+extern "C" void __register_frame(const void*);
+extern "C" void __deregister_frame(const void*);
+#endif
 
 TRACE_SET_MOD(unwind);
 
-namespace HPHP { namespace Transl {
+namespace HPHP { namespace jit {
+
+RDS::Link<UnwindRDS> unwindRdsInfo(RDS::kInvalidHandle);
 
 namespace {
 
@@ -68,40 +80,73 @@ void sync_regstate(_Unwind_Context* context) {
    * aren't allowed to throw, so this is ok.
    */
   ActRec fakeAr;
-  fakeAr.m_savedRbp = frameRbp;
+  fakeAr.m_sfp = reinterpret_cast<ActRec*>(frameRbp);
   fakeAr.m_savedRip = frameRip;
 
   Stats::inc(Stats::TC_SyncUnwind);
-  tx64->fixupMap().fixupWork(g_vmContext, &fakeAr);
+  mcg->fixupMap().fixupWork(g_context.getNoCheck(), &fakeAr);
   tl_regState = VMRegState::CLEAN;
 }
 
 bool install_catch_trace(_Unwind_Context* ctx, _Unwind_Exception* exn,
-                         InvalidSetMException* ism) {
-  const CTCA rip = (CTCA)_Unwind_GetIP(ctx);
-  TCA catchTrace = tx64->getCatchTrace(rip);
-  assert(IMPLIES(ism, catchTrace));
-  if (!catchTrace) return false;
+                         bool do_side_exit, TypedValue unwinder_tv) {
+  auto const rip = (TCA)_Unwind_GetIP(ctx);
+  auto catchTraceOpt = mcg->getCatchTrace(rip);
+  FTRACE(1, "No catch trace entry for ip {}; bailing\n", rip);
+  if (!catchTraceOpt) return false;
 
-  FTRACE(1, "installing catch trace {} for call {} with ism {}, "
+  auto catchTrace = *catchTraceOpt;
+  if (!catchTrace) {
+    // A few of our optimization passes must be aware of every path out of the
+    // trace, so throwing through jitted code without a catch block is very
+    // bad. This is indicated with a present but nullptr entry in the catch
+    // trace map.
+    const size_t kCallSize = 5;
+    const uint8_t kCallOpcode = 0xe8;
+
+    auto callAddr = rip - kCallSize;
+    TCA helperAddr = nullptr;
+    std::string helperName;
+    if (*callAddr == kCallOpcode) {
+      helperAddr = rip + *reinterpret_cast<int32_t*>(callAddr + 1);
+    }
+
+    always_assert_flog(false,
+                       "Translated call to {} threw '{}' without "
+                       "catch block, return address: {}\n",
+                       getNativeFunctionName(helperAddr),
+                       exceptionFromUnwindException(exn)->what(),
+                       rip);
+    return false;
+  }
+
+  FTRACE(1, "installing catch trace {} for call {} with tv {}, "
          "returning _URC_INSTALL_CONTEXT\n",
-         catchTrace, rip, ism);
+         catchTrace, rip, unwinder_tv.pretty());
 
-  // In theory the unwind api will let us set registers in the frame before
-  // executing our landing pad. In practice, trying to use their recommended
-  // scratch registers results in a SEGV inside _Unwind_SetGR, so we pass
-  // things to the handler using the target cache. This also simplifies the
-  // handler code because it doesn't have to worry about saving its arguments
-  // somewhere while executing the exit trace.
-  TargetCache::header()->unwinderScratch = (int64_t)exn;
-  TargetCache::header()->doSideExit = ism;
-  if (ism) {
-    TargetCache::header()->unwinderTv = ism->tv();
+  // In theory the unwind api will let us set registers in the frame
+  // before executing our landing pad. In practice, trying to use
+  // their recommended scratch registers results in a SEGV inside
+  // _Unwind_SetGR, so we pass things to the handler using the
+  // RDS. This also simplifies the handler code because it doesn't
+  // have to worry about saving its arguments somewhere while
+  // executing the exit trace.
+  unwindRdsInfo->unwinderScratch = (int64_t)exn;
+  unwindRdsInfo->doSideExit = do_side_exit;
+  if (do_side_exit) {
+    unwindRdsInfo->unwinderTv = unwinder_tv;
   }
   _Unwind_SetIP(ctx, (uint64_t)catchTrace);
   tl_regState = VMRegState::DIRTY;
 
   return true;
+}
+
+void deregister_unwind_region(std::vector<char>* p) {
+  std::auto_ptr<std::vector<char> > del(p);
+  __deregister_frame(&(*p)[0]);
+}
+
 }
 
 _Unwind_Reason_Code
@@ -115,16 +160,21 @@ tc_unwind_personality(int version,
   // packed into a 64-bit int. For now we shouldn't be seeing exceptions from
   // any other runtimes but this may change in the future.
   DEBUG_ONLY constexpr uint64_t kMagicClass = 0x474e5543432b2b00;
-  assert(exceptionClass == kMagicClass);
+  DEBUG_ONLY constexpr uint64_t kMagicDependentClass = 0x474e5543432b2b01;
+  assert(exceptionClass == kMagicClass ||
+         exceptionClass == kMagicDependentClass);
   assert(version == 1);
 
   auto const& ti = typeInfoFromUnwindException(exceptionObj);
   InvalidSetMException* ism = nullptr;
+  TVCoercionException* tce = nullptr;
   if (ti == typeid(InvalidSetMException)) {
     ism = static_cast<InvalidSetMException*>(
       exceptionFromUnwindException(exceptionObj));
+  } else if (ti == typeid(TVCoercionException)) {
+    tce = static_cast<TVCoercionException*>(
+      exceptionFromUnwindException(exceptionObj));
   }
-
 
   if (Trace::moduleEnabled(TRACEMOD, 1)) {
     DEBUG_ONLY auto const* unwindType =
@@ -133,7 +183,7 @@ tc_unwind_personality(int version,
     auto* exnType = __cxa_demangle(ti.name(), nullptr, nullptr, &status);
     SCOPE_EXIT { free(exnType); };
     assert(status == 0);
-    FTRACE(1, "unwind {} exn {}: regState: {} ip: {} type: {}. ",
+    FTRACE(1, "unwind {} exn {}: regState: {} ip: {} type: {}.\n",
            unwindType, exceptionObj,
            tl_regState == VMRegState::DIRTY ? "dirty" : "clean",
            (TCA)_Unwind_GetIP(context), exnType);
@@ -152,38 +202,44 @@ tc_unwind_personality(int version,
              ism->tv().pretty());
       return _URC_HANDLER_FOUND;
     }
+    if (tce) {
+      FTRACE(1, "TVCoercionException thrown, returning _URC_HANDLER_FOUND");
+      return _URC_HANDLER_FOUND;
+    }
   }
 
   /*
    * During the cleanup phase, we can either use a landing pad to perform
    * cleanup (with _Unwind_SetIP and _URC_INSTALL_CONTEXT), or we can do it
    * here. We sync the VM registers here, then optionally use a landing pad,
-   * which is an exit traces from hhir with a few special instructions.
+   * which is an exit trace from hhir with a few special instructions.
    */
   else if (actions & _UA_CLEANUP_PHASE) {
+    TypedValue tv = ism ? ism->tv() : tce ? tce->tv() : TypedValue();
     if (tl_regState == VMRegState::DIRTY) {
       sync_regstate(context);
     }
-    if (install_catch_trace(context, exceptionObj, ism)) {
+    if (install_catch_trace(context, exceptionObj, ism || tce, tv)) {
       return _URC_INSTALL_CONTEXT;
     }
   }
 
+  always_assert(!(actions & _UA_HANDLER_FRAME));
+
   FTRACE(1, "returning _URC_CONTINUE_UNWIND\n");
   return _URC_CONTINUE_UNWIND;
-}
-
-void deregister_unwind_region(std::vector<char>* p) {
-  std::auto_ptr<std::vector<char> > del(p);
-  __deregister_frame(&(*p)[0]);
-}
-
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 
 UnwindInfoHandle
 register_unwind_region(unsigned char* startAddr, size_t size) {
+  FTRACE(1, "register_unwind_region: base {}, size {}\n", startAddr, size);
+  // The first time we're called, this will dynamically link the data
+  // we need in the request data segment.  All future JIT translations
+  // of catch traces may use offsets based on this handle.
+  unwindRdsInfo.bind();
+
   std::unique_ptr<std::vector<char>> bufferMem(new std::vector<char>);
   std::vector<char>& buffer = *bufferMem;
 
@@ -274,7 +330,7 @@ register_unwind_region(unsigned char* startAddr, size_t size) {
 
   __register_frame(&buffer[0]);
 
-  return boost::shared_ptr<std::vector<char> >(
+  return std::shared_ptr<std::vector<char> >(
     bufferMem.release(),
     deregister_unwind_region
   );

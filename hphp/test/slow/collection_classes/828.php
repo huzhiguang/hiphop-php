@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 function f() {
   $obj = new stdClass();
@@ -10,13 +10,6 @@ $obj, $obj}
   var_dump($a[1]->prop);
   $obj = new stdClass();
   $a = Map {
-'a' => $obj, 'b' => $obj}
-;
-  $a = unserialize(serialize($a));
-  $a['a']->prop = 22;
-  var_dump($a['b']->prop);
-  $obj = new stdClass();
-  $a = StableMap {
 'a' => $obj, 'b' => $obj}
 ;
   $a = unserialize(serialize($a));

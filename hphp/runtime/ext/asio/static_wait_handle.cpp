@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -15,20 +15,51 @@
    +----------------------------------------------------------------------+
 */
 
-#include "hphp/runtime/ext/ext_asio.h"
+#include "hphp/runtime/ext/asio/static_wait_handle.h"
+
+#include "hphp/system/systemlib.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-c_StaticWaitHandle::c_StaticWaitHandle(Class* cb)
-    : c_WaitHandle(cb) {
-}
-
-c_StaticWaitHandle::~c_StaticWaitHandle() {
-}
-
 void c_StaticWaitHandle::t___construct() {
-  throw NotSupportedException(__func__, "WTF? This is an abstract class");
+  // gen-ext-hhvm requires at least one declared method in the class to work
+  not_reached();
+}
+
+/**
+ * Create succeeded StaticWaitHandle object.
+ *
+ * - consumes reference of the given cell
+ * - produces reference for the returned StaticWaitHandle object
+ */
+c_StaticWaitHandle* c_StaticWaitHandle::CreateSucceeded(const Cell& result) {
+  auto waitHandle = newobj<c_StaticWaitHandle>();
+  waitHandle->setState(STATE_SUCCEEDED);
+  waitHandle->incRefCount();
+  cellCopy(result, waitHandle->m_resultOrException);
+  return waitHandle;
+}
+
+c_StaticWaitHandle* c_StaticWaitHandle::CreateSucceededVM(const Cell result) {
+  return CreateSucceeded(result);
+}
+
+/**
+ * Create failed StaticWaitHandle object.
+ *
+ * - consumes reference of the given Exception object
+ * - produces reference for the returned StaticWaitHandle object
+ */
+c_StaticWaitHandle* c_StaticWaitHandle::CreateFailed(ObjectData* exception) {
+  assert(exception);
+  assert(exception->instanceof(SystemLib::s_ExceptionClass));
+
+  auto waitHandle = newobj<c_StaticWaitHandle>();
+  waitHandle->setState(STATE_FAILED);
+  waitHandle->incRefCount();
+  cellCopy(make_tv<KindOfObject>(exception), waitHandle->m_resultOrException);
+  return waitHandle;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

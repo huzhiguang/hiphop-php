@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,9 +18,11 @@
 #define incl_HPHP_CLASS_INFO_H_
 
 #include "hphp/runtime/base/types.h"
+#include <utility>
+#include <vector>
 #include "hphp/runtime/base/complex-types.h"
 #include "hphp/util/mutex.h"
-#include "hphp/util/case-insensitive.h"
+#include "hphp/util/functional.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -35,7 +37,7 @@ class ClassInfoHook;
 class ClassInfo {
 public:
   enum Attribute {                      //  class   prop   func  method param
-    ZendParamMode          = (1 <<  0), //                  x      x
+    ParamCoerceModeNull    = (1 <<  0), //                  x      x
     IsRedeclared           = (1 <<  1), //    x             x
     IsVolatile             = (1 <<  2), //    x             x
 
@@ -50,23 +52,20 @@ public:
     IsStatic               = (1 <<  9), //           x             x
     IsCppAbstract          = (1 << 10), //    x
     HasCall                = IsPublic,  //    x
-    HasCallStatic          = IsProtected,//   x
     AllowOverride          = IsPrivate, //                  x
     IsReference            = (1 << 11), //                  x      x     x
-    IsConstructor          = (1 << 12), //                         x
+    // Unused              = (1 << 12),
 
     // need a non-zero number for const char * maps
     IsNothing              = (1 << 13),
 
-    ZendCompat             = (1 << 14), //                  x      x
+    // Unused              = (1 << 14),
 
-    HasGeneratorAsBody     = (1 << 15), //                  x      x
     IsCppSerializable      = (1 << 15), //    x
     HipHopSpecific         = (1 << 16), //    x             x
 
     VariableArguments      = (1 << 17), //                  x      x
     RefVariableArguments   = (1 << 18), //                  x      x
-    MixedVariableArguments = (1 << 19), //                  x      x
 
     FunctionIsFoldable     = (1 << 20), //                  x
     NoEffect               = (1 << 21), //                  x
@@ -79,7 +78,8 @@ public:
     IsSystem               = (1 << 28), //    x             x
 
     IsTrait                = (1 << 29), //    x
-    NeedsActRec            = (1u << 31),//                  x      x
+    ParamCoerceModeFalse   = (1 << 30), //                  x      x
+    NoFCallBuiltin         = (1u << 31),//                  x      x
   };
 
   class ConstantInfo {
@@ -91,12 +91,12 @@ public:
     const char *valueText;
     const void* callback;
 
-    CVarRef getDeferredValue() const;
+    const Variant& getDeferredValue() const;
     Variant getValue() const;
     bool isDeferred() const { return deferred; }
     bool isCallback() const { return callback != nullptr; }
-    void setValue(CVarRef value);
-    void setStaticValue(CVarRef value);
+    void setValue(const Variant& value);
+    void setStaticValue(const Variant& value);
 
     bool isDynamic() const {
       return deferred;
@@ -114,7 +114,7 @@ public:
     String name;
 
     Variant getValue() const;
-    void setStaticValue(CVarRef value);
+    void setStaticValue(const Variant& value);
 
   private:
     Variant value;
@@ -123,7 +123,7 @@ public:
   struct ParameterInfo {
     ~ParameterInfo();
     Attribute attribute;
-    DataType argType;      // hinted arg type
+    MaybeDataType argType; // hinted arg type
     const char *name;
     const char *type;      // hinted type string
     const char *value;     // serialized default value
@@ -150,7 +150,7 @@ public:
     const char *file;
     int line1;
     int line2;
-    DataType returnType;
+    MaybeDataType returnType;
   };
 
   class PropertyInfo {
@@ -158,7 +158,7 @@ public:
     PropertyInfo() : docComment(nullptr) {}
     Attribute attribute;
     String name;
-    DataType type;
+    MaybeDataType type;
     const char *docComment;
     const ClassInfo *owner;
   };
@@ -185,20 +185,10 @@ public:
   static void Load();
 
   /**
-   * Return a list of PHP library functions.
-   */
-  static Array GetSystemFunctions();
-
-  /**
-   * Return a list of user defined functions.
-   */
-  static Array GetUserFunctions();
-
-  /**
    * Locate one function.
    */
-  static const MethodInfo *FindSystemFunction(CStrRef name);
-  static const MethodInfo *FindFunction(CStrRef name);
+  static const MethodInfo *FindSystemFunction(const String& name);
+  static const MethodInfo *FindFunction(const String& name);
 
   /**
    * Return a list of declared classes.
@@ -208,12 +198,12 @@ public:
   /**
    * Locate one class.
    */
-  static const ClassInfo *FindClass(CStrRef name);
+  static const ClassInfo *FindClass(const String& name);
 
   /**
    * Locate one system class.
    */
-  static const ClassInfo *FindSystemClass(CStrRef name);
+  static const ClassInfo *FindSystemClass(const String& name);
 
   /**
    * Return a list of declared interfaces.
@@ -228,32 +218,32 @@ public:
   /**
    * Locate one interface.
    */
-  static const ClassInfo *FindInterface(CStrRef name);
+  static const ClassInfo *FindInterface(const String& name);
 
   /**
    * Locate one system interface.
    */
-  static const ClassInfo *FindSystemInterface(CStrRef name);
+  static const ClassInfo *FindSystemInterface(const String& name);
 
   /**
    * Locate one trait.
    */
-  static const ClassInfo *FindTrait(CStrRef name);
+  static const ClassInfo *FindTrait(const String& name);
 
   /**
    * Locate one system trait.
    */
-  static const ClassInfo *FindSystemTrait(CStrRef name);
+  static const ClassInfo *FindSystemTrait(const String& name);
 
   /**
    * Locate either a class, interface, or trait.
    */
-  static const ClassInfo *FindClassInterfaceOrTrait(CStrRef name);
+  static const ClassInfo *FindClassInterfaceOrTrait(const String& name);
 
   /**
    * Locate either a system class, system interface, or system trait.
    */
-  static const ClassInfo *FindSystemClassInterfaceOrTrait(CStrRef name);
+  static const ClassInfo *FindSystemClassInterfaceOrTrait(const String& name);
 
   /**
    * Get all statically known system constants, unless explicitly
@@ -267,7 +257,8 @@ public:
    * interfaces.
    *   type: 0: unknown; 1: class; 2: interface
    */
-  static bool GetClassMethods(MethodVec &ret, CStrRef classname, int type = 0);
+  static bool GetClassMethods(MethodVec &ret, const String& classname,
+                              int type = 0);
   static bool GetClassMethods(MethodVec &ret, const ClassInfo *classInfo);
 
   /**
@@ -279,7 +270,7 @@ public:
   /**
    * Return lists of names for auto-complete purposes.
    */
-  static void GetClassSymbolNames(CArrRef names, bool interface, bool trait,
+  static void GetClassSymbolNames(const Array& names, bool interface, bool trait,
                                   std::vector<String> &classes,
                                   std::vector<String> *clsMethods,
                                   std::vector<String> *clsProperties,
@@ -290,8 +281,6 @@ public:
                              std::vector<String> *clsMethods,
                              std::vector<String> *clsProperties,
                              std::vector<String> *clsConstants);
-
-  static void SetHook(ClassInfoHook *hook) { s_hook = hook; }
 
   static Variant GetVariant(DataType type, const void *addr) {
     switch (type) {
@@ -309,10 +298,15 @@ public:
         return *(Object*)addr;
       case KindOfResource:
         return *(Resource*)addr;
-      default:
-        assert(false);
-        return uninit_null();
+
+      case KindOfUninit:
+      case KindOfNull:
+      case KindOfStaticString:
+      case KindOfRef:
+      case KindOfClass:
+        break;
     }
+    not_reached();
   }
 
 public:
@@ -329,7 +323,7 @@ public:
   int getLine1() const { return checkCurrent()->m_line1;}
   int getLine2() const { return checkCurrent()->m_line2;}
   virtual const ClassInfo* getCurrentOrNull() const { return this; }
-  virtual CStrRef getName() const { return m_name;}
+  virtual const String& getName() const { return m_name;}
   const char *getDocComment() const { return m_docComment; }
 
   virtual void postInit();
@@ -337,7 +331,7 @@ public:
   /**
    * Parents of this class.
    */
-  virtual CStrRef getParentClass() const = 0;
+  virtual const String& getParentClass() const = 0;
   const ClassInfo *getParentClassInfo() const;
   virtual const InterfaceSet &getInterfaces() const = 0;
   virtual const InterfaceVec &getInterfacesVec() const = 0;
@@ -350,8 +344,8 @@ public:
    */
   virtual const MethodMap &getMethods() const = 0;    // non-recursively
   virtual const MethodVec &getMethodsVec() const = 0; // non-recursively
-  MethodInfo *getMethodInfo(CStrRef name) const;
-  MethodInfo *hasMethod(CStrRef name,
+  MethodInfo *getMethodInfo(const String& name) const;
+  MethodInfo *hasMethod(const String& name,
                         ClassInfo *&classInfo,
                         bool interfaces = false) const;
 
@@ -375,8 +369,6 @@ public:
 protected:
   static bool s_loaded;            // whether class map is loaded
   static ClassInfo *s_systemFuncs; // all system functions
-
-  static ClassInfoHook *s_hook;
 
   Attribute m_attribute;
   int m_cdec_offset;
@@ -405,7 +397,7 @@ public:
   virtual ~ClassInfoUnique();
 
   // implementing ClassInfo
-  CStrRef getParentClass() const { return m_parent;}
+  const String& getParentClass() const { return m_parent;}
   const ClassInfo *getParentClassInfo() const;
   const InterfaceSet &getInterfaces() const { return m_interfaces;}
   const InterfaceVec &getInterfacesVec() const { return m_interfacesVec;}
@@ -437,22 +429,6 @@ private:
   ConstantMap   m_constants;       // all constants
   ConstantVec   m_constantsVec;    // all constants in declaration order
   UserAttributeVec m_userAttrVec;
-};
-
-/**
- * Interface for a hook into class info for eval. This way I can avoid
- * a dependency on eval.
- */
-class ClassInfoHook {
-public:
-  virtual ~ClassInfoHook() {};
-  virtual Array getUserFunctions() const = 0;
-  virtual Array getClasses() const = 0;
-  virtual Array getInterfaces() const = 0;
-  virtual Array getTraits() const = 0;
-  virtual const ClassInfo::MethodInfo *findFunction(CStrRef name) const = 0;
-  virtual const ClassInfo *findClassLike(CStrRef name) const = 0;
-  virtual const ClassInfo::ConstantInfo *findConstant(CStrRef name) const = 0;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

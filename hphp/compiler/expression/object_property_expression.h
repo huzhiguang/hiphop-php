@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -36,7 +36,6 @@ public:
   DECLARE_EXPRESSION_VIRTUAL_FUNCTIONS;
   DECL_AND_IMPL_LOCAL_EFFECTS_METHODS;
 
-  ExpressionPtr postOptimize(AnalysisResultConstPtr ar);
   virtual bool isRefable(bool checkError = false) const { return true;}
 
   virtual void setContext(Context context);

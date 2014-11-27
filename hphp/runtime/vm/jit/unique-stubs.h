@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,11 +19,10 @@
 #include "hphp/runtime/vm/jit/types.h"
 #include "hphp/runtime/base/datatype.h"
 
-namespace HPHP { namespace JIT {
+namespace HPHP { namespace jit {
 
 //////////////////////////////////////////////////////////////////////
 
-using Transl::TCA;
 
 constexpr int kNumFreeLocalsHelpers = 9;
 
@@ -66,39 +65,6 @@ struct UniqueStubs {
   TCA resumeHelper;
 
   /*
-   * A helper routine for implementing the DefCls opcode.
-   */
-  TCA defClsHelper;
-
-  /*
-   * Functions for releasing various php objects when their reference
-   * count goes to zero.  Indexed using typeToDestrIndex.
-   *
-   * FIXME: this is dead code after the tx64->hhir switch.  Leaving in
-   * for now to review whether we want to use it.
-   */
-  TCA dtorStubs[kDestrTableSize];
-
-  /*
-   * Generic destructor stub for PtrToGen types.
-   *
-   * The irPopRHelper takes the pointer to the value to decref in
-   * rVmSp, and is intended for generic PopR instructions.  The normal
-   * dtorGenericStub takes the pointer to the value to dec ref in the
-   * first argument register.
-   */
-  TCA irPopRHelper;
-  TCA dtorGenericStub;
-
-  /*
-   * Generic destructor stub for in-registered Gen or Cell types.
-   *
-   * FIXME: currently dead code after tx64->hhir.  We need to look at
-   * whether we want to use this again.
-   */
-  TCA dtorGenericStubRegs;
-
-  /*
    * Helper stubs for doing generic decrefs on a function return.  The
    * stub is a partially-unrolled loop with kNumFreeLocalsHelpers
    * points to call to.  The freeManyLocalsHelper entry point should
@@ -138,6 +104,25 @@ struct UniqueStubs {
    * dispatches to the translation.
    */
   TCA funcBodyHelperThunk;
+
+  /*
+   * Calls EventHook::onFunctionEnter, and handles the case where it requests
+   * that we skip the function.
+   */
+  TCA functionEnterHelper;
+
+  /*
+   * BindCall stubs for immutable/non-immutable calls
+   */
+  TCA bindCallStub;
+  TCA immutableBindCallStub;
+
+  /*
+   * Utility for logging stubs addresses during startup and registering the gdb
+   * symbols. It's often useful to know where they were when debugging.
+   */
+  TCA add(const char* name, TCA start);
+
 };
 
 //////////////////////////////////////////////////////////////////////

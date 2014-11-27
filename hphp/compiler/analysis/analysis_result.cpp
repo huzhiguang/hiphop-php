@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,12 +16,21 @@
 
 #include "hphp/compiler/analysis/analysis_result.h"
 
+#include <folly/Conv.h>
+
 #include <iomanip>
 #include <algorithm>
 #include <sstream>
 #include <boost/format.hpp>
 #include <boost/bind.hpp>
+#include <atomic>
+#include <map>
+#include <set>
+#include <utility>
+#include <vector>
+
 #include "hphp/compiler/analysis/alias_manager.h"
+#include "hphp/compiler/analysis/exceptions.h"
 #include "hphp/compiler/analysis/file_scope.h"
 #include "hphp/compiler/analysis/class_scope.h"
 #include "hphp/compiler/analysis/code_error.h"
@@ -32,6 +41,7 @@
 #include "hphp/compiler/statement/loop_statement.h"
 #include "hphp/compiler/statement/class_variable.h"
 #include "hphp/compiler/statement/use_trait_statement.h"
+#include "hphp/compiler/statement/class_require_statement.h"
 #include "hphp/compiler/analysis/symbol_table.h"
 #include "hphp/compiler/package.h"
 #include "hphp/compiler/parser/parser.h"
@@ -45,12 +55,11 @@
 #include "hphp/compiler/expression/expression_list.h"
 #include "hphp/compiler/expression/array_pair_expression.h"
 #include "hphp/compiler/expression/simple_function_call.h"
-#include "hphp/runtime/ext/ext_json.h"
 #include "hphp/runtime/base/zend-printf.h"
 #include "hphp/runtime/base/program-functions.h"
 #include "hphp/util/atomic.h"
 #include "hphp/util/logger.h"
-#include "hphp/util/util.h"
+#include "hphp/util/text-util.h"
 #include "hphp/util/hash.h"
 #include "hphp/util/process.h"
 #include "hphp/util/job-queue.h"
@@ -78,6 +87,18 @@ AnalysisResult::AnalysisResult()
     m_arrayLitstrKeyMaxSize(0), m_arrayIntegerKeyMaxSize(0),
     m_package(nullptr), m_parseOnDemand(false), m_phase(ParseAllFiles) {
   m_classForcedVariants[0] = m_classForcedVariants[1] = false;
+}
+
+AnalysisResult::~AnalysisResult() {
+  always_assert(!m_finish);
+}
+
+void AnalysisResult::finish() {
+  if (m_finish) {
+    decltype(m_finish) f;
+    f.swap(m_finish);
+    f(shared_from_this());
+  }
 }
 
 void AnalysisResult::appendExtraCode(const std::string &key,
@@ -196,7 +217,7 @@ BlockScopePtr AnalysisResult::findConstantDeclarer(
 
 ClassScopePtr AnalysisResult::findClass(const std::string &name) const {
   AnalysisResultConstPtr ar = shared_from_this();
-  string lname = Util::toLower(name);
+  string lname = toLower(name);
   StringToClassScopePtrMap::const_iterator sysIter =
     m_systemClasses.find(lname);
   if (sysIter != m_systemClasses.end()) return sysIter->second;
@@ -213,7 +234,7 @@ ClassScopePtr AnalysisResult::findClass(const std::string &name,
   AnalysisResultPtr ar = shared_from_this();
   if (by == PropertyName) return ClassScopePtr();
 
-  string lname = Util::toLower(name);
+  string lname = toLower(name);
   if (by == MethodName) {
     StringToClassScopePtrVecMap::iterator iter =
       m_methodToClassDecs.find(lname);
@@ -225,7 +246,7 @@ ClassScopePtr AnalysisResult::findClass(const std::string &name,
         // The call to findClass by method name means all these
         // same-named methods should be dynamic since there will
         // be an invoke to call one of them.
-        BOOST_FOREACH(ClassScopePtr cls, iter->second) {
+        for (ClassScopePtr cls: iter->second) {
           FunctionScopePtr func = cls->findFunction(ar, lname, true);
           // Something fishy here
           if (func) {
@@ -288,7 +309,7 @@ ClassScopePtr AnalysisResult::findExactClass(ConstructPtr cs,
 bool AnalysisResult::checkClassPresent(ConstructPtr cs,
                                        const std::string &name) const {
   if (name == "self" || name == "parent") return true;
-  std::string lowerName = Util::toLower(name);
+  std::string lowerName = toLower(name);
   if (ClassScopePtr currentCls = cs->getClassScope()) {
     if (lowerName == currentCls->getName() ||
         currentCls->derivesFrom(shared_from_this(), lowerName,
@@ -456,8 +477,8 @@ void AnalysisResult::markRedeclaringClasses() {
    * as redeclaring for now.
    */
   for (auto& kv : m_classAliases) {
-    assert(kv.first == Util::toLower(kv.first));
-    assert(kv.second == Util::toLower(kv.second));
+    assert(kv.first == toLower(kv.first));
+    assert(kv.second == toLower(kv.second));
     markRedeclaring(kv.first);
     markRedeclaring(kv.second);
   }
@@ -469,7 +490,7 @@ void AnalysisResult::markRedeclaringClasses() {
    * that things like 'instanceof Foo' will not mean the same thing.
    */
   for (auto& name : m_typeAliasNames) {
-    assert(Util::toLower(name) == name);
+    assert(toLower(name) == name);
     markRedeclaring(name);
   }
 }
@@ -488,8 +509,7 @@ void AnalysisResult::link(FileScopePtr user, FileScopePtr provider) {
 
 bool AnalysisResult::addClassDependency(FileScopePtr usingFile,
                                         const std::string &className) {
-  if (BuiltinSymbols::s_classes.find(className) !=
-      BuiltinSymbols::s_classes.end())
+  if (m_systemClasses.find(className) != m_systemClasses.end())
     return true;
 
   StringToClassScopePtrVecMap::const_iterator iter =
@@ -507,8 +527,7 @@ bool AnalysisResult::addClassDependency(FileScopePtr usingFile,
 
 bool AnalysisResult::addFunctionDependency(FileScopePtr usingFile,
                                            const std::string &functionName) {
-  if (BuiltinSymbols::s_functions.find(functionName) !=
-      BuiltinSymbols::s_functions.end())
+  if (m_functions.find(functionName) != m_functions.end())
     return true;
   StringToFunctionScopePtrMap::const_iterator iter =
     m_functionDecs.find(functionName);
@@ -570,25 +589,32 @@ bool AnalysisResult::isSystemConstant(const std::string &constName) const {
 ///////////////////////////////////////////////////////////////////////////////
 // Program
 
-void AnalysisResult::loadBuiltins() {
-  AnalysisResultPtr ar = shared_from_this();
-  BuiltinSymbols::LoadFunctions(ar, m_functions);
-  BuiltinSymbols::LoadClasses(ar, m_systemClasses);
-  BuiltinSymbols::LoadVariables(ar, m_variables);
-  BuiltinSymbols::LoadConstants(ar, m_constants);
+void AnalysisResult::addSystemFunction(FunctionScopeRawPtr fs) {
+  FunctionScopePtr& entry = m_functions[fs->getName()];
+  assert(!entry);
+  entry = fs;
+}
+
+void AnalysisResult::addSystemClass(ClassScopeRawPtr cs) {
+  ClassScopePtr& entry = m_systemClasses[cs->getName()];
+  assert(!entry);
+  entry = cs;
 }
 
 void AnalysisResult::checkClassDerivations() {
   AnalysisResultPtr ar = shared_from_this();
-  ClassScopePtr cls;
   for (StringToClassScopePtrVecMap::const_iterator iter = m_classDecs.begin();
        iter != m_classDecs.end(); ++iter) {
-    BOOST_FOREACH(cls, iter->second) {
+    for (ClassScopePtr cls: iter->second) {
+      if (Option::WholeProgram) {
+        try {
+          cls->importUsedTraits(ar);
+        } catch (const AnalysisTimeFatalException& e) {
+          cls->setFatal(e);
+        }
+      }
       hphp_string_iset seen;
       cls->checkDerivation(ar, seen);
-      if (Option::WholeProgram) {
-        cls->importUsedTraits(ar);
-      }
     }
   }
 }
@@ -605,22 +631,26 @@ void AnalysisResult::resolveNSFallbackFuncs() {
 }
 
 void AnalysisResult::collectFunctionsAndClasses(FileScopePtr fs) {
-  const StringToFunctionScopePtrMap &funcs = fs->getFunctions();
-
-  for (StringToFunctionScopePtrMap::const_iterator iter = funcs.begin();
-       iter != funcs.end(); ++iter) {
-    FunctionScopePtr func = iter->second;
+  for (const auto& iter : fs->getFunctions()) {
+    FunctionScopePtr func = iter.second;
     if (!func->inPseudoMain()) {
-      FunctionScopePtr &funcDec = m_functionDecs[iter->first];
+      FunctionScopePtr &funcDec = m_functionDecs[iter.first];
       if (funcDec) {
-        FunctionScopePtrVec &funcVec = m_functionReDecs[iter->first];
-        int sz = funcVec.size();
-        if (!sz) {
-          funcDec->setRedeclaring(sz++);
-          funcVec.push_back(funcDec);
+        if (funcDec->isSystem()) {
+          assert(funcDec->allowOverride());
+          funcDec = func;
+        } else if (func->isSystem()) {
+          assert(func->allowOverride());
+        } else {
+          FunctionScopePtrVec &funcVec = m_functionReDecs[iter.first];
+          int sz = funcVec.size();
+          if (!sz) {
+            funcDec->setRedeclaring(sz++);
+            funcVec.push_back(funcDec);
+          }
+          func->setRedeclaring(sz++);
+          funcVec.push_back(func);
         }
-        func->setRedeclaring(sz++);
-        funcVec.push_back(func);
       } else {
         funcDec = func;
       }
@@ -628,13 +658,12 @@ void AnalysisResult::collectFunctionsAndClasses(FileScopePtr fs) {
   }
 
   if (const StringToFunctionScopePtrVecMap *redec = fs->getRedecFunctions()) {
-    for (StringToFunctionScopePtrVecMap::const_iterator iter = redec->begin();
-         iter != redec->end(); ++iter) {
-      FunctionScopePtrVec::const_iterator i = iter->second.begin();
-      FunctionScopePtrVec::const_iterator e = iter->second.end();
-      FunctionScopePtr &funcDec = m_functionDecs[iter->first];
+    for (const auto &iter : *redec) {
+      FunctionScopePtrVec::const_iterator i = iter.second.begin();
+      FunctionScopePtrVec::const_iterator e = iter.second.end();
+      FunctionScopePtr &funcDec = m_functionDecs[iter.first];
       assert(funcDec); // because the first one was in funcs above
-      FunctionScopePtrVec &funcVec = m_functionReDecs[iter->first];
+      FunctionScopePtrVec &funcVec = m_functionReDecs[iter.first];
       int sz = funcVec.size();
       if (!sz) {
         funcDec->setRedeclaring(sz++);
@@ -647,11 +676,9 @@ void AnalysisResult::collectFunctionsAndClasses(FileScopePtr fs) {
     }
   }
 
-  const StringToClassScopePtrVecMap &classes = fs->getClasses();
-  for (StringToClassScopePtrVecMap::const_iterator iter = classes.begin();
-       iter != classes.end(); ++iter) {
-    ClassScopePtrVec &clsVec = m_classDecs[iter->first];
-    clsVec.insert(clsVec.end(), iter->second.begin(), iter->second.end());
+  for (const auto& iter : fs->getClasses()) {
+    ClassScopePtrVec &clsVec = m_classDecs[iter.first];
+    clsVec.insert(clsVec.end(), iter.second.begin(), iter.second.end());
   }
 
   m_classAliases.insert(fs->getClassAliases().begin(),
@@ -688,7 +715,7 @@ void AnalysisResult::analyzeProgram(bool system /* = false */) {
   // Analyze some special cases
   for (set<string>::const_iterator it = Option::VolatileClasses.begin();
        it != Option::VolatileClasses.end(); ++it) {
-    ClassScopePtr cls = findClass(Util::toLower(*it));
+    ClassScopePtr cls = findClass(toLower(*it));
     if (cls && cls->isUserClass()) {
       cls->setVolatile();
     }
@@ -711,26 +738,25 @@ void AnalysisResult::analyzeProgram(bool system /* = false */) {
     The new entries added to m_classDecs are always empty, so it
     doesnt matter that we dont include them in the iteration
   */
-  ClassScopePtr cls;
   std::vector<ClassScopePtr> classes;
   classes.reserve(m_classDecs.size());
   for (StringToClassScopePtrVecMap::const_iterator iter = m_classDecs.begin();
        iter != m_classDecs.end(); ++iter) {
-    BOOST_FOREACH(cls, iter->second) {
+    for (ClassScopePtr cls: iter->second) {
       classes.push_back(cls);
     }
   }
 
   // Collect methods
-  BOOST_FOREACH(cls, classes) {
+  for (ClassScopePtr cls: classes) {
     if (cls->isRedeclaring()) {
       cls->setStaticDynamic(ar);
     }
     StringToFunctionScopePtrMap methods;
-    cls->collectMethods(ar, methods);
+    cls->collectMethods(ar, methods, true /* include privates */);
     bool needAbstractMethodImpl =
       (!cls->isAbstract() && !cls->isInterface() &&
-       !cls->derivesFromRedeclaring() &&
+       cls->derivesFromRedeclaring() == Derivation::Normal &&
        !cls->getAttribute(ClassScope::UsesUnknownTrait));
     for (StringToFunctionScopePtrMap::const_iterator iterMethod =
            methods.begin(); iterMethod != methods.end(); ++iterMethod) {
@@ -746,10 +772,12 @@ void AnalysisResult::analyzeProgram(bool system /* = false */) {
     }
   }
 
+  ClassScopePtr cls;
   string cname;
-  BOOST_FOREACH(tie(cname, cls), m_systemClasses) {
+  for (auto& sysclass_cls: m_systemClasses) {
+    tie(cname, cls) = sysclass_cls;
     StringToFunctionScopePtrMap methods;
-    cls->collectMethods(ar, methods);
+    cls->collectMethods(ar, methods, true /* include privates */);
     for (StringToFunctionScopePtrMap::const_iterator iterMethod =
            methods.begin(); iterMethod != methods.end(); ++iterMethod) {
       m_methodToClassDecs[iterMethod->first].push_back(cls);
@@ -805,7 +833,7 @@ void AnalysisResult::analyzePerfectVirtuals() {
       ClassScopePtr cls = iter->second[i];
 
       // being conservative, not to do redeclaring classes at all
-      if (cls->derivesFromRedeclaring()) {
+      if (cls->derivesFromRedeclaring() == Derivation::Redeclaring) {
         addClassRootMethods(ar, cls, redeclaringMethods);
         continue;
       }
@@ -967,11 +995,14 @@ struct OptVisitor {
 
   AnalysisResultPtr m_ar;
   unsigned m_nscope;
-  JobQueueDispatcher<BlockScope *, OptWorker<When> > *m_dispatcher;
+  JobQueueDispatcher<OptWorker<When>> *m_dispatcher;
 };
 
 template <typename When>
-class OptWorker : public JobQueueWorker<BlockScope *, true, true> {
+class OptWorker : public JobQueueWorker<BlockScope*,
+                                        void*,
+                                        true,
+                                        true> {
 public:
   OptWorker() {}
 
@@ -990,8 +1021,8 @@ public:
     acc->second += 1;
 #endif /* HPHP_INSTRUMENT_PROCESS_PARALLEL */
     try {
-      DepthFirstVisitor<When, OptVisitor > *visitor =
-        (DepthFirstVisitor<When, OptVisitor >*)m_opaque;
+      auto visitor =
+        (DepthFirstVisitor<When, OptVisitor>*) m_context;
       {
         Lock ldep(BlockScope::s_depsMutex);
         Lock lstate(BlockScope::s_jobStateMutex);
@@ -1143,22 +1174,20 @@ public:
   }
 };
 
-// Pre, InferTypes, and Post defined in depth_first_visitor.h
+// Pre defined in depth_first_visitor.h
 
 typedef   OptVisitor<Pre>          PreOptVisitor;
 typedef   OptWorker<Pre>           PreOptWorker;
-typedef   OptVisitor<InferTypes>   InferTypesVisitor;
-typedef   OptWorker<InferTypes>    InferTypesWorker;
-typedef   OptVisitor<Post>         PostOptVisitor;
-typedef   OptWorker<Post>          PostOptWorker;
 
 template<>
 void OptWorker<Pre>::onThreadEnter() {
   hphp_session_init();
+  hphp_context_init();
 }
 
 template<>
 void OptWorker<Pre>::onThreadExit() {
+  hphp_context_exit();
   hphp_session_exit();
 }
 
@@ -1180,7 +1209,7 @@ void OptWorker<Pre>::onThreadExit() {
     } \
     if (threadCount <= 0) threadCount = 1; \
     this->m_data.m_dispatcher = \
-      new JobQueueDispatcher<BlockScope *, worker >( \
+      new JobQueueDispatcher<worker>( \
         threadCount, true, 0, false, this); \
   } while (0)
 
@@ -1196,28 +1225,7 @@ void DepthFirstVisitor<Pre, OptVisitor>::setup() {
 }
 
 template<>
-void DepthFirstVisitor<InferTypes, OptVisitor>::setup() {
-  IMPLEMENT_OPT_VISITOR_SETUP(InferTypesWorker);
-}
-
-template<>
-void DepthFirstVisitor<Post, OptVisitor>::setup() {
-  IMPLEMENT_OPT_VISITOR_SETUP(PostOptWorker);
-}
-
-template<>
 void DepthFirstVisitor<Pre, OptVisitor>::enqueue(BlockScopeRawPtr scope) {
-  IMPLEMENT_OPT_VISITOR_ENQUEUE(scope);
-}
-
-template<>
-void DepthFirstVisitor<InferTypes, OptVisitor>::enqueue(
-  BlockScopeRawPtr scope) {
-  IMPLEMENT_OPT_VISITOR_ENQUEUE(scope);
-}
-
-template<>
-void DepthFirstVisitor<Post, OptVisitor>::enqueue(BlockScopeRawPtr scope) {
   IMPLEMENT_OPT_VISITOR_ENQUEUE(scope);
 }
 
@@ -1225,7 +1233,7 @@ template <typename When>
 void
 AnalysisResult::preWaitCallback(bool first,
                                 const BlockScopeRawPtrQueue &scopes,
-                                void *opaque) {
+                                void *context) {
   // default is no-op
 }
 
@@ -1234,7 +1242,7 @@ bool
 AnalysisResult::postWaitCallback(bool first,
                                  bool again,
                                  const BlockScopeRawPtrQueue &scopes,
-                                 void *opaque) {
+                                 void *context) {
   // default is no-op
   return again;
 }
@@ -1280,10 +1288,7 @@ static inline void DumpScopeWithDeps(BlockScopeRawPtr scope) {
   for (BlockScopeRawPtrFlagsVec::const_iterator it = ordered.begin(),
        end = ordered.end(); it != end; ++it) {
     BlockScopeRawPtrFlagsVec::value_type pf = *it;
-    string prefix = "    ";
-    prefix += "(";
-    prefix += boost::lexical_cast<string>(pf->second);
-    prefix += ") ";
+    auto prefix = folly::to<string>("    (", pf->second, ") ");
     DumpScope(pf->first, prefix.c_str());
   }
 }
@@ -1299,7 +1304,7 @@ struct BIPairCmp {
 template <typename When>
 void
 AnalysisResult::processScopesParallel(const char *id,
-                                      void *opaque /* = NULL */) {
+                                      void *context /* = NULL */) {
   BlockScopeRawPtrQueue scopes;
   getScopesSet(scopes);
 
@@ -1336,7 +1341,7 @@ AnalysisResult::processScopesParallel(const char *id,
 
     BlockScopeRawPtrQueue enqueued;
     again = dfv.visitParallel(scopes, first, enqueued);
-    preWaitCallback<When>(first, scopes, opaque);
+    preWaitCallback<When>(first, scopes, context);
 
 #ifdef HPHP_INSTRUMENT_PROCESS_PARALLEL
     {
@@ -1372,9 +1377,7 @@ AnalysisResult::processScopesParallel(const char *id,
         v.size() > 20 ? v.begin() + 20 : v.end();
       for (std::vector<BIPair>::const_iterator it = v.begin();
           it != end; ++it) {
-        string prefix;
-        prefix += boost::lexical_cast<string>((*it).second);
-        prefix += " times: ";
+        auto prefix = folly::to<string>((*it).second, " times: ");
         DumpScope((*it).first, prefix.c_str());
       }
       std::cout << "Number of global force reruns: "
@@ -1390,7 +1393,7 @@ AnalysisResult::processScopesParallel(const char *id,
     std::cout << "Number of waiting scopes: " << numWaiting << std::endl;
 #endif /* HPHP_INSTRUMENT_PROCESS_PARALLEL */
 
-    again = postWaitCallback<When>(first, again, scopes, opaque);
+    again = postWaitCallback<When>(first, again, scopes, context);
     first = false;
   } while (again);
   dfv.data().stop();
@@ -1463,134 +1466,6 @@ void AnalysisResult::preOptimize() {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-// infer types
-
-template<>
-int
-DepthFirstVisitor<InferTypes, OptVisitor>::visitScope(BlockScopeRawPtr scope) {
-  // acquire a lock on the scope
-  SimpleLock lock(scope->getInferTypesMutex());
-
-  // set the thread local to this scope-
-  // use an object to do this so if an exception is thrown we can take
-  // advantage of stack-unwinding
-  //
-  // NOTE: this *must* happen *after* the lock has been acquired, since there
-  // is code which depends on this ordering
-  SetCurrentScope sc(scope);
-
-  StatementPtr stmt = scope->getStmt();
-  MethodStatementPtr m =
-    dynamic_pointer_cast<MethodStatement>(stmt);
-  bool pushPrev = m && !scope->isFirstPass() &&
-    !scope->getContainingFunction()->inPseudoMain();
-  if (m) {
-    if (pushPrev) scope->getVariables()->beginLocal();
-    scope->getContainingFunction()->pushReturnType();
-  }
-
-  int ret = 0;
-  try {
-    bool done;
-    do {
-      scope->clearUpdated();
-      if (m) {
-        scope->getContainingFunction()->clearRetExprs();
-        m->inferFunctionTypes(this->m_data.m_ar);
-      } else {
-        for (int i = 0, n = stmt->getKidCount(); i < n; i++) {
-          StatementPtr kid(
-            dynamic_pointer_cast<Statement>(stmt->getNthKid(i)));
-          if (kid) {
-            kid->inferTypes(this->m_data.m_ar);
-          }
-        }
-      }
-
-      done = !scope->getUpdated();
-      ret |= scope->getUpdated();
-      scope->incPass();
-    } while (!done);
-
-    if (m) {
-      bool changed = scope->getContainingFunction()->popReturnType();
-      if (changed && scope->selfUser() & BlockScope::UseKindCallerReturn) {
-        // for a recursive caller, we must let the scope run again, because
-        // there are potentially AST nodes which are interested in the updated
-        // return type
-#ifdef HPHP_INSTRUMENT_TYPE_INF
-        ++RescheduleException::s_NumForceRerunSelfCaller;
-#endif /* HPHP_INSTRUMENT_TYPE_INF */
-        scope->setForceRerun(true);
-      }
-      if (pushPrev) {
-        scope->getVariables()->endLocal();
-        ret = 0; // since we really care about the updated flags *after*
-                 // endLocal()
-      }
-      scope->getContainingFunction()->fixRetExprs();
-      ret |= scope->getUpdated();
-      scope->clearUpdated();
-    }
-  } catch (RescheduleException &e) {
-    // potential deadlock detected- reschedule
-    // this scope to run at a later time
-#ifdef HPHP_INSTRUMENT_TYPE_INF
-    ++RescheduleException::s_NumReschedules;
-#endif /* HPHP_INSTRUMENT_TYPE_INF */
-    ret |= scope->getUpdated();
-    if (m) {
-      scope->getContainingFunction()->resetReturnType();
-      if (pushPrev) {
-        scope->getVariables()->resetLocal();
-        ret = 0; // since we really care about the updated flags *after*
-                 // resetLocal()
-      }
-      scope->getContainingFunction()->fixRetExprs();
-      ret |= scope->getUpdated();
-      scope->clearUpdated();
-    }
-    scope->setNeedsReschedule(true);
-  }
-
-  // inc regardless of reschedule exception or not, since these are the
-  // semantics of run id
-  scope->incRunId();
-
-  return ret;
-}
-
-template<>
-bool AnalysisResult::postWaitCallback<InferTypes>(
-    bool first, bool again, const BlockScopeRawPtrQueue &scopes, void *opaque) {
-
-#ifdef HPHP_INSTRUMENT_TYPE_INF
-  std::cout << "Number of rescheduled: " <<
-    RescheduleException::s_NumReschedules << std::endl;
-  RescheduleException::s_NumReschedules = 0;
-
-  std::cout << "Number of force rerun self callers: " <<
-    RescheduleException::s_NumForceRerunSelfCaller << std::endl;
-  RescheduleException::s_NumForceRerunSelfCaller = 0;
-
-  std::cout << "Number of return types changed: " <<
-    RescheduleException::s_NumRetTypesChanged << std::endl;
-  RescheduleException::s_NumRetTypesChanged = 0;
-
-  std::cout << "Lock contention: " << std::endl;
-  for (LProfileMap::const_iterator it = BaseTryLock::s_LockProfileMap.begin();
-       it != BaseTryLock::s_LockProfileMap.end(); ++it) {
-    const LEntry &entry = it->first;
-    int count = it->second;
-    std::cout << "(" << entry.first << "@" << entry.second << "): " <<
-      count << std::endl;
-  }
-
-  BaseTryLock::s_LockProfileMap.clear();
-#endif /* HPHP_INSTRUMENT_TYPE_INF */
-
-  return again;
-}
 
 #ifdef HPHP_INSTRUMENT_TYPE_INF
 std::atomic<int> RescheduleException::s_NumReschedules(0);
@@ -1599,130 +1474,8 @@ std::atomic<int> RescheduleException::s_NumRetTypesChanged(0);
 LProfileMap BaseTryLock::s_LockProfileMap;
 #endif /* HPHP_INSTRUMENT_TYPE_INF */
 
-void AnalysisResult::inferTypes() {
-  setPhase(FirstInference);
-  BlockScopeRawPtrQueue scopes;
-  getScopesSet(scopes);
-
-  for (BlockScopeRawPtrQueue::iterator
-       it = scopes.begin(), end = scopes.end();
-       it != end; ++it) {
-    (*it)->setInTypeInference(true);
-    (*it)->clearUpdated();
-    assert((*it)->getNumDepsToWaitFor() == 0);
-  }
-
-#ifdef HPHP_INSTRUMENT_TYPE_INF
-  assert(RescheduleException::s_NumReschedules          == 0);
-  assert(RescheduleException::s_NumForceRerunSelfCaller == 0);
-  assert(BaseTryLock::s_LockProfileMap.empty());
-#endif /* HPHP_INSTRUMENT_TYPE_INF */
-
-  processScopesParallel<InferTypes>("InferTypes");
-
-  for (BlockScopeRawPtrQueue::iterator
-       it = scopes.begin(), end = scopes.end();
-       it != end; ++it) {
-    (*it)->setInTypeInference(false);
-    (*it)->clearUpdated();
-    assert((*it)->getMark() == BlockScope::MarkProcessed);
-    assert((*it)->getNumDepsToWaitFor() == 0);
-  }
-}
-
 ///////////////////////////////////////////////////////////////////////////////
-// post-opt
 
-template<>
-int DepthFirstVisitor<Post, OptVisitor>::visit(BlockScopeRawPtr scope) {
-  scope->clearUpdated();
-  StatementPtr stmt = scope->getStmt();
-  bool done = false;
-  if (MethodStatementPtr m =
-      dynamic_pointer_cast<MethodStatement>(stmt)) {
-
-    AliasManager am(1);
-    if (am.optimize(this->m_data.m_ar, m)) {
-      scope->addUpdates(BlockScope::UseKindCaller);
-    }
-    if (Option::LocalCopyProp || Option::EliminateDeadCode) {
-      done = true;
-    }
-  }
-
-  if (!done) {
-    StatementPtr rep = this->visitStmtRecur(stmt);
-    always_assert(!rep);
-  }
-
-  return scope->getUpdated();
-}
-
-template<>
-ExpressionPtr DepthFirstVisitor<Post, OptVisitor>::visit(ExpressionPtr e) {
-  return e->postOptimize(this->m_data.m_ar);
-}
-
-template<>
-StatementPtr DepthFirstVisitor<Post, OptVisitor>::visit(StatementPtr stmt) {
-  return stmt->postOptimize(this->m_data.m_ar);
-}
-
-class FinalWorker : public JobQueueWorker<MethodStatementPtr> {
-public:
-  virtual void doJob(MethodStatementPtr m) {
-    try {
-      AliasManager am(1);
-      am.finalSetup(((AnalysisResult*)m_opaque)->shared_from_this(), m);
-    } catch (Exception &e) {
-      Logger::Error("%s", e.getMessage().c_str());
-    }
-  }
-};
-
-template<>
-void AnalysisResult::preWaitCallback<Post>(
-    bool first, const BlockScopeRawPtrQueue &scopes, void *opaque) {
-  assert(!Option::ControlFlow || opaque != nullptr);
-  if (first && Option::ControlFlow) {
-    JobQueueDispatcher<FinalWorker::JobType, FinalWorker> *dispatcher
-      = (JobQueueDispatcher<FinalWorker::JobType, FinalWorker> *) opaque;
-    for (BlockScopeRawPtrQueue::const_iterator it = scopes.begin(),
-           end = scopes.end(); it != end; ++it) {
-      BlockScopeRawPtr scope = *it;
-      if (MethodStatementPtr m =
-          dynamic_pointer_cast<MethodStatement>(scope->getStmt())) {
-        dispatcher->enqueue(m);
-      }
-    }
-  }
-}
-
-void AnalysisResult::postOptimize() {
-  setPhase(AnalysisResult::PostOptimize);
-  if (Option::ControlFlow) {
-    BlockScopeRawPtrQueue scopes;
-    getScopesSet(scopes);
-
-    unsigned int threadCount = Option::ParserThreadCount;
-    if (threadCount > scopes.size()) {
-      threadCount = scopes.size();
-    }
-    if (threadCount <= 0) threadCount = 1;
-
-    JobQueueDispatcher<FinalWorker::JobType, FinalWorker> dispatcher(
-      threadCount, true, 0, false, this);
-
-    processScopesParallel<Post>("PostOptimize", &dispatcher);
-
-    dispatcher.start();
-    dispatcher.stop();
-  } else {
-    processScopesParallel<Post>("PostOptimize");
-  }
-}
-
-///////////////////////////////////////////////////////////////////////////////
 } // namespace HPHP
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1776,7 +1529,7 @@ AnalysisResult::forceClassVariants(
   AnalysisResultPtr ar = shared_from_this();
   for (StringToClassScopePtrVecMap::const_iterator iter = m_classDecs.begin();
        iter != m_classDecs.end(); ++iter) {
-    BOOST_FOREACH(ClassScopePtr cls, iter->second) {
+    for (ClassScopePtr cls: iter->second) {
       COND_TRY_LOCK(cls, acquireLocks);
       cls->getVariables()->forceVariants(
         ar, VariableTable::GetVarClassMask(false, doStatic), false);
@@ -1805,7 +1558,7 @@ void AnalysisResult::forceClassVariants(
   AnalysisResultPtr ar = shared_from_this();
   for (StringToClassScopePtrVecMap::const_iterator iter = m_classDecs.begin();
        iter != m_classDecs.end(); ++iter) {
-    BOOST_FOREACH(ClassScopePtr cls, iter->second) {
+    for (ClassScopePtr cls: iter->second) {
       COND_TRY_LOCK(cls, acquireLocks);
       cls->getVariables()->forceVariant(
         ar, name, VariableTable::GetVarClassMask(false, doStatic));

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,8 +13,12 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/compiler/expression/closure_expression.h"
+
+#include <boost/make_shared.hpp>
+#include <set>
+#include <folly/ScopeGuard.h>
+
 #include "hphp/compiler/expression/parameter_expression.h"
 #include "hphp/compiler/expression/expression_list.h"
 #include "hphp/compiler/expression/simple_variable.h"
@@ -24,73 +28,79 @@
 #include "hphp/compiler/analysis/function_scope.h"
 #include "hphp/compiler/analysis/file_scope.h"
 
-using namespace HPHP;
+namespace HPHP {
+
+//////////////////////////////////////////////////////////////////////
 
 TypePtr ClosureExpression::s_ClosureType =
   Type::CreateObjectType("closure"); // needs lower case
 
-///////////////////////////////////////////////////////////////////////////////
-// constructors/destructors
+ClosureExpression::ClosureExpression(
+    EXPRESSION_CONSTRUCTOR_PARAMETERS,
+    ClosureType type,
+    FunctionStatementPtr func,
+    ExpressionListPtr vars)
+  : Expression(EXPRESSION_CONSTRUCTOR_PARAMETER_VALUES(ClosureExpression))
+  , m_type(type)
+  , m_func(func)
+  , m_captureState(m_type == ClosureType::Short ? CaptureState::Unknown
+                                               : CaptureState::Known)
+{
+  switch (m_type) {
+  case ClosureType::Short:
+    break;
+  case ClosureType::Long:
+    if (vars) initializeFromUseList(vars);
+    break;
+  }
+}
 
-ClosureExpression::ClosureExpression
-(EXPRESSION_CONSTRUCTOR_PARAMETERS, FunctionStatementPtr func,
- ExpressionListPtr vars)
-    : Expression(EXPRESSION_CONSTRUCTOR_PARAMETER_VALUES(ClosureExpression)),
-      m_func(func) {
+void ClosureExpression::initializeFromUseList(ExpressionListPtr vars) {
+  m_vars = ExpressionListPtr(
+    new ExpressionList(vars->getScope(), vars->getLocation()));
 
-  if (vars) {
-    m_vars = ExpressionListPtr
-      (new ExpressionList(vars->getScope(), vars->getLocation()));
-    // push the vars in reverse order, not retaining duplicates
-    std::set<string> seenBefore;
+  // Because PHP is insane you can have a use variable with the same
+  // name as a param name.
+  // In that case, params win (which is different than zend but much easier)
+  auto seenBefore = collectParamNames();
 
-    // Because PHP is insane you can have a use variable with the same
-    // name as a param name.
-    // In that case, params win (which is different than zend but much easier)
-    ExpressionListPtr bodyParams = m_func->getParams();
-    if (bodyParams) {
-      int nParams = bodyParams->getCount();
-      for (int i = 0; i < nParams; i++) {
-        ParameterExpressionPtr par(
-          static_pointer_cast<ParameterExpression>((*bodyParams)[i]));
-        seenBefore.insert(par->getName());
-      }
+  for (int i = vars->getCount() - 1; i >= 0; i--) {
+    ParameterExpressionPtr param(
+      dynamic_pointer_cast<ParameterExpression>((*vars)[i]));
+    assert(param);
+    if (param->getName() == "this") {
+      // "this" is automatically included.
+      // Once we get rid of all the callsites, make this an error
+      continue;
     }
-
-    for (int i = vars->getCount() - 1; i >= 0; i--) {
-      ParameterExpressionPtr param(
-        dynamic_pointer_cast<ParameterExpression>((*vars)[i]));
-      assert(param);
-      if (param->getName() == "this") {
-        // "this" is automatically included.
-        // Once we get rid of all the callsites, make this an error
-        continue;
-      }
-      if (seenBefore.find(param->getName().c_str()) == seenBefore.end()) {
-        seenBefore.insert(param->getName().c_str());
-        m_vars->insertElement(param);
-      }
-    }
-
-    if (m_vars) {
-      m_values = ExpressionListPtr
-        (new ExpressionList(m_vars->getScope(), m_vars->getLocation()));
-      for (int i = 0; i < m_vars->getCount(); i++) {
-        ParameterExpressionPtr param =
-          dynamic_pointer_cast<ParameterExpression>((*m_vars)[i]);
-        const string &name = param->getName();
-
-        SimpleVariablePtr var(new SimpleVariable(param->getScope(),
-                                                 param->getLocation(),
-                                                 name));
-        if (param->isRef()) {
-          var->setContext(RefValue);
-        }
-        m_values->addElement(var);
-      }
-      assert(m_vars->getCount() == m_values->getCount());
+    if (seenBefore.find(param->getName().c_str()) == seenBefore.end()) {
+      seenBefore.insert(param->getName().c_str());
+      m_vars->insertElement(param);
     }
   }
+
+  initializeValuesFromVars();
+}
+
+void ClosureExpression::initializeValuesFromVars() {
+  if (!m_vars) return;
+
+  m_values = ExpressionListPtr
+    (new ExpressionList(m_vars->getScope(), m_vars->getLocation()));
+  for (int i = 0; i < m_vars->getCount(); i++) {
+    ParameterExpressionPtr param =
+      dynamic_pointer_cast<ParameterExpression>((*m_vars)[i]);
+    const string &name = param->getName();
+
+    SimpleVariablePtr var(new SimpleVariable(param->getScope(),
+                                             param->getLocation(),
+                                             name));
+    if (param->isRef()) {
+      var->setContext(RefValue);
+    }
+    m_values->addElement(var);
+  }
+  assert(m_vars->getCount() == m_values->getCount());
 }
 
 ExpressionPtr ClosureExpression::clone() {
@@ -137,123 +147,131 @@ void ClosureExpression::setNthKid(int n, ConstructPtr cp) {
 
 void ClosureExpression::analyzeProgram(AnalysisResultPtr ar) {
   m_func->analyzeProgram(ar);
-  if (m_vars) {
-    m_values->analyzeProgram(ar);
 
-    if (ar->getPhase() == AnalysisResult::AnalyzeAll) {
-      getFunctionScope()->addUse(m_func->getFunctionScope(),
-                                 BlockScope::UseKindClosure);
-      m_func->getFunctionScope()->setClosureVars(m_vars);
+  if (m_vars) analyzeVars(ar);
 
-      // closure function's variable table (not containing function's)
-      VariableTablePtr variables = m_func->getFunctionScope()->getVariables();
-      VariableTablePtr containing = getFunctionScope()->getVariables();
-      for (int i = 0; i < m_vars->getCount(); i++) {
-        ParameterExpressionPtr param =
-          dynamic_pointer_cast<ParameterExpression>((*m_vars)[i]);
-        const string &name = param->getName();
-        {
-          Symbol *containingSym = containing->addDeclaredSymbol(name, param);
-          containingSym->setPassClosureVar();
-
-          Symbol *sym = variables->addDeclaredSymbol(name, param);
-          sym->setClosureVar();
-          sym->setDeclaration(ConstructPtr());
-          if (param->isRef()) {
-            sym->setRefClosureVar();
-            sym->setUsed();
-          } else {
-            sym->clearRefClosureVar();
-            sym->clearUsed();
-          }
-        }
-      }
-      return;
-    }
-    if (ar->getPhase() == AnalysisResult::AnalyzeFinal) {
-      // closure function's variable table (not containing function's)
-      VariableTablePtr variables = m_func->getFunctionScope()->getVariables();
-      for (int i = 0; i < m_vars->getCount(); i++) {
-        ParameterExpressionPtr param =
-          dynamic_pointer_cast<ParameterExpression>((*m_vars)[i]);
-        const string &name = param->getName();
-
-        // so we can assign values to them, instead of seeing CVarRef
-        Symbol *sym = variables->getSymbol(name);
-        if (sym && sym->isParameter()) {
-          sym->setLvalParam();
-        }
-      }
-    }
-  }
-
-  FunctionScopeRawPtr container = 
+  FunctionScopeRawPtr container =
     getFunctionScope()->getContainingNonClosureFunction();
   if (container && container->isStatic()) {
     m_func->getModifiers()->add(T_STATIC);
   }
-
 }
 
-TypePtr ClosureExpression::inferTypes(AnalysisResultPtr ar, TypePtr type,
-                                      bool coerce) {
-  if (m_vars) {
-    assert(m_values && m_values->getCount() == m_vars->getCount());
+void ClosureExpression::analyzeVars(AnalysisResultPtr ar) {
+  m_values->analyzeProgram(ar);
 
-    // containing function's variable table (not closure function's)
-    VariableTablePtr variables = getScope()->getVariables();
+  if (ar->getPhase() == AnalysisResult::AnalyzeAll) {
+    getFunctionScope()->addUse(m_func->getFunctionScope(),
+                               BlockScope::UseKindClosure);
+    m_func->getFunctionScope()->setClosureVars(m_vars);
 
-    // closure function's variable table
-    VariableTablePtr cvariables = m_func->getFunctionScope()->getVariables();
-
-    // force all reference use vars into variant for this function scope
+    // closure function's variable table (not containing function's)
+    VariableTablePtr variables = m_func->getFunctionScope()->getVariables();
+    VariableTablePtr containing = getFunctionScope()->getVariables();
     for (int i = 0; i < m_vars->getCount(); i++) {
       ParameterExpressionPtr param =
         dynamic_pointer_cast<ParameterExpression>((*m_vars)[i]);
       const string &name = param->getName();
-      if (param->isRef()) {
-        variables->forceVariant(ar, name, VariableTable::AnyVars);
+      {
+        Symbol *containingSym = containing->addDeclaredSymbol(name, param);
+        containingSym->setPassClosureVar();
+
+        Symbol *sym = variables->addDeclaredSymbol(name, param);
+        sym->setClosureVar();
+        sym->setDeclaration(ConstructPtr());
+        if (param->isRef()) {
+          sym->setRefClosureVar();
+          sym->setUsed();
+        } else {
+          sym->clearRefClosureVar();
+          sym->clearUsed();
+        }
       }
     }
+    return;
+  }
 
-    // infer the types of the values
-    m_values->inferAndCheck(ar, Type::Some, false);
-
-    // coerce the types inferred from m_values into m_vars
+  if (ar->getPhase() == AnalysisResult::AnalyzeFinal) {
+    // closure function's variable table (not containing function's)
+    VariableTablePtr variables = m_func->getFunctionScope()->getVariables();
     for (int i = 0; i < m_vars->getCount(); i++) {
-      ExpressionPtr value = (*m_values)[i];
-      ParameterExpressionPtr var =
+      ParameterExpressionPtr param =
         dynamic_pointer_cast<ParameterExpression>((*m_vars)[i]);
-      assert(!var->getExpectedType());
-      assert(!var->getImplementedType());
-      if (var->isRef()) {
-        var->setActualType(Type::Variant);
-      } else {
-        TypePtr origVarType(var->getActualType() ?
-                            var->getActualType() : Type::Some);
-        var->setActualType(Type::Coerce(ar, origVarType, value->getType()));
-      }
-    }
+      const string &name = param->getName();
 
-    {
-      // this lock isn't technically needed for thread-safety, since
-      // the dependencies are all set up. however, the lock assertions
-      // will fail if we don't acquire it.
-      GET_LOCK(m_func->getFunctionScope());
-
-      // bootstrap the closure function's variable table with
-      // the types from m_vars
-      for (int i = 0; i < m_vars->getCount(); i++) {
-        ParameterExpressionPtr param =
-          dynamic_pointer_cast<ParameterExpression>((*m_vars)[i]);
-        const string &name = param->getName();
-        cvariables->addParamLike(name, param->getType(), ar,
-                                 shared_from_this(),
-                                 getScope()->isFirstPass());
+      // so we can assign values to them, instead of seeing CVarRef
+      Symbol *sym = variables->getSymbol(name);
+      if (sym && sym->isParameter()) {
+        sym->setLvalParam();
       }
     }
   }
-  return s_ClosureType;
+}
+
+void ClosureExpression::setCaptureList(
+    AnalysisResultPtr ar,
+    const std::set<std::string>& captureNames) {
+  assert(m_captureState == CaptureState::Unknown);
+  m_captureState = CaptureState::Known;
+
+  bool usedThis = false;
+  SCOPE_EXIT {
+    /*
+     * TODO: closures in a non-class scope should be neither static
+     * nor non-static, but right now we don't really have this idea.
+     *
+     * This would allow not having to check for a $this or late bound
+     * class in the closure object or on the ActRec when returning
+     * from those closures.
+     *
+     * (We could also mark closures that don't use late static binding
+     * with this flag to avoid checks on closures in member functions
+     * when they use neither $this nor static::)
+     */
+    if (!usedThis) m_func->getModifiers()->add(T_STATIC);
+  };
+
+  if (captureNames.empty()) return;
+
+  m_vars = ExpressionListPtr(
+    new ExpressionList(getOriginalScope(), getLocation()));
+
+  for (auto const& name : captureNames) {
+    if (name == "this") {
+      usedThis = true;
+      continue;
+    }
+
+    auto expr = ParameterExpressionPtr(new ParameterExpression(
+      BlockScopePtr(getOriginalScope()),
+      getLocation(),
+      TypeAnnotationPtr(),
+      true /* hhType */,
+      name,
+      false /* ref */,
+      0 /* token modifier thing */,
+      ExpressionPtr(),
+      ExpressionPtr()
+    ));
+    m_vars->insertElement(expr);
+  }
+
+  initializeValuesFromVars();
+  analyzeVars(ar);
+}
+
+std::set<std::string> ClosureExpression::collectParamNames() const {
+  std::set<std::string> ret;
+
+  auto bodyParams = m_func->getParams();
+  if (!bodyParams) return ret;
+
+  int nParams = bodyParams->getCount();
+  for (int i = 0; i < nParams; i++) {
+    auto par = static_pointer_cast<ParameterExpression>((*bodyParams)[i]);
+    ret.insert(par->getName());
+  }
+  return ret;
 }
 
 bool ClosureExpression::hasStaticLocals() {
@@ -285,6 +303,22 @@ bool ClosureExpression::hasStaticLocalsImpl(ConstructPtr root) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+
+void ClosureExpression::outputCodeModel(CodeGenerator &cg) {
+  auto numProps = m_vars != nullptr && m_vars->getCount() > 0 ? 3 : 2;
+  cg.printObjectHeader("ClosureExpression", numProps);
+  cg.printPropertyHeader("ffunction");
+  m_func->outputCodeModel(cg);
+  if (m_vars != nullptr && m_vars->getCount() > 0) {
+    cg.printPropertyHeader("capturedVariables");
+    cg.printExpressionVector(m_vars);
+  }
+  cg.printPropertyHeader("sourceLocation");
+  cg.printLocation(this->getLocation());
+  cg.printObjectFooter();
+}
+
+///////////////////////////////////////////////////////////////////////////////
 // code generation functions
 
 void ClosureExpression::outputPHP(CodeGenerator &cg, AnalysisResultPtr ar) {
@@ -295,4 +329,6 @@ void ClosureExpression::outputPHP(CodeGenerator &cg, AnalysisResultPtr ar) {
     cg_printf(")");
   }
   m_func->outputPHPBody(cg, ar);
+}
+
 }

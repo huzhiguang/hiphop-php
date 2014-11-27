@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,10 +17,11 @@
 #ifndef incl_HPHP_VM_REPO_H_
 #define incl_HPHP_VM_REPO_H_
 
-#include "hphp/runtime/vm/unit.h"
-#include "hphp/runtime/vm/class.h"
-#include "hphp/runtime/vm/preclass-emit.h"
-#include "hphp/runtime/vm/func.h"
+#include <vector>
+#include <utility>
+#include <string>
+#include <memory>
+#include <cstdlib>
 
 #include <sqlite3.h>
 
@@ -30,18 +31,35 @@
 #include <sys/types.h>
 #include <pwd.h>
 
+#include "hphp/runtime/vm/class.h"
+#include "hphp/runtime/vm/func.h"
+#include "hphp/runtime/vm/litstr-repo-proxy.h"
+#include "hphp/runtime/vm/preclass-emitter.h"
+#include "hphp/runtime/vm/unit-emitter.h"
+
 namespace HPHP {
+///////////////////////////////////////////////////////////////////////////////
 
 class Repo : public RepoProxy {
- private:
   static SimpleMutex s_lock;
   static unsigned s_nRepos;
- public:
+
+public:
+  struct GlobalData;
+
   // Do not directly instantiate this class; a thread-local creates one per
   // thread on demand when Repo::get() is called.
   static Repo& get();
   static bool prefork();
   static void postfork(pid_t pid);
+
+  /*
+   * In some command line programs that use the repo, it is necessary
+   * to shut it down at some point in the process.  (See hhbbc.)  This
+   * function accomplishes this.
+   */
+  static void shutdown();
+
   Repo();
   ~Repo();
 
@@ -72,38 +90,71 @@ class Repo : public RepoProxy {
   UnitRepoProxy& urp() { return m_urp; }
   PreClassRepoProxy& pcrp() { return m_pcrp; }
   FuncRepoProxy& frp() { return m_frp; }
+  LitstrRepoProxy& lsrp() { return m_lsrp; }
 
   static void setCliFile(const std::string& cliFile);
 
-  Unit* loadUnit(const std::string& name, const MD5& md5);
+  std::unique_ptr<Unit> loadUnit(const std::string& name, const MD5& md5);
   bool findFile(const char* path, const std::string& root, MD5& md5);
   bool insertMd5(UnitOrigin unitOrigin, UnitEmitter* ue, RepoTxn& txn);
-  void commitMd5(UnitOrigin unitOrigin, UnitEmitter *ue);
+  void commitMd5(UnitOrigin unitOrigin, UnitEmitter* ue);
 
-#define RP_IOP(o) RP_OP(Insert##o, insert##o)
-#define RP_GOP(o) RP_OP(Get##o, get##o)
-#define RP_OPS \
-  RP_IOP(FileHash) \
-  RP_GOP(FileHash)
-  class InsertFileHashStmt : public RepoProxy::Stmt {
-    public:
-      InsertFileHashStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
-      void insert(RepoTxn& txn, const StringData* path, const MD5& md5);
+  /*
+   * Return the largest size for a static string that can be inserted into the
+   * repo.
+   */
+  size_t stringLengthLimit() const;
+
+  /*
+   * Return a vector of (filepath, MD5) for every unit in central
+   * repo.
+   */
+  std::vector<std::pair<std::string,MD5>> enumerateUnits(
+    int repoId, bool preloadOnly, bool warn);
+
+  /*
+   * Load the repo-global metadata table, including the global litstr
+   * table.  Normally called during process initialization.
+   */
+  void loadGlobalData(bool allowFailure = false);
+
+  /*
+   * Access to global data.
+   *
+   * Pre: loadGlobalData() already called, and
+   * RuntimeOption::RepoAuthoritative.
+   */
+  static const GlobalData& global() {
+    assert(RuntimeOption::RepoAuthoritative);
+    return s_globalData;
+  }
+
+  /*
+   * Used during repo creation to associate the supplied GlobalData
+   * with the repo that was being built.  Also saves the global litstr
+   * table.
+   *
+   * No other threads may be reading or writing the repo GlobalData
+   * when this is called.
+   */
+  void saveGlobalData(GlobalData newData);
+
+ private:
+  /*
+   * RepoStmts for setting/getting file hashes.
+   */
+  struct InsertFileHashStmt : public RepoProxy::Stmt {
+    InsertFileHashStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
+    void insert(RepoTxn& txn, const StringData* path, const MD5& md5);
   };
-  class GetFileHashStmt : public RepoProxy::Stmt {
-    public:
-      GetFileHashStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
-      bool get(const char* path, MD5& md5);
+
+  struct GetFileHashStmt : public RepoProxy::Stmt {
+    GetFileHashStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
+    bool get(const char* path, MD5& md5);
   };
-#define RP_OP(c, o) \
- public: \
-  c##Stmt& o(int repoId) { return *m_##o[repoId]; } \
- private: \
-  c##Stmt m_##o##Local; \
-  c##Stmt m_##o##Central; \
-  c##Stmt* m_##o[RepoIdCount];
-  RP_OPS
-#undef RP_OP
+
+  InsertFileHashStmt m_insertFileHash[RepoIdCount];
+  GetFileHashStmt m_getFileHash[RepoIdCount];
 
  public:
   std::string table(int repoId, const char* tablePrefix);
@@ -142,7 +193,7 @@ class Repo : public RepoProxy {
   void disconnect();
   void initCentral();
   std::string insertSchema(const char* path);
-  bool openCentral(const char* repoPath);
+  bool openCentral(const char* repoPath, std::string& errorMsg);
   void initLocal();
   void attachLocal(const char* repoPath, bool isWritable);
   void pragmas(int repoId);
@@ -150,12 +201,15 @@ class Repo : public RepoProxy {
   void setIntPragma(int repoId, const char* name, int val);
   void getTextPragma(int repoId, const char* name, std::string& val);
   void setTextPragma(int repoId, const char* name, const char* val);
-  bool initSchema(int repoId, bool& isWritable);
+  bool initSchema(int repoId, bool& isWritable, std::string& errorMsg);
   bool schemaExists(int repoId);
-  bool createSchema(int repoId);
+  bool createSchema(int repoId, std::string& errorMsg);
   bool writable(int repoId);
 
+private:
   static std::string s_cliFile;
+  static GlobalData s_globalData;
+
   std::string m_localRepo;
   std::string m_centralRepo;
   sqlite3* m_dbc; // Database connection, shared by multiple attached databases.
@@ -170,7 +224,17 @@ class Repo : public RepoProxy {
   UnitRepoProxy m_urp;
   PreClassRepoProxy m_pcrp;
   FuncRepoProxy m_frp;
+  LitstrRepoProxy m_lsrp;
 };
+
+//////////////////////////////////////////////////////////////////////
+
+/*
+ * Try to commit a vector of unit emitters to the current repo.
+ */
+void batchCommit(std::vector<std::unique_ptr<UnitEmitter>>);
+
+//////////////////////////////////////////////////////////////////////
 
 }
 

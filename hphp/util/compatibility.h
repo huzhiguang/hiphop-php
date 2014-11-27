@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,14 +13,18 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #ifndef incl_HPHP_COMPATIBILITY_H_
 #define incl_HPHP_COMPATIBILITY_H_
 
-#include "hphp/util/base.h"
+#include <cstdint>
+#include <time.h>
+#include <unistd.h>
+
+#include "hphp/util/portability.h"
 
 namespace HPHP {
-///////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////////////////////////
 
 #define PHP_DIR_SEPARATOR '/'
 
@@ -33,7 +37,31 @@ typedef int clockid_t;
 int gettime(clockid_t which_clock, struct timespec *tp);
 int64_t gettime_diff_us(const timespec &start, const timespec &end);
 
-///////////////////////////////////////////////////////////////////////////////
+/*
+ * Drop the cached pages associated with the file from the file system
+ * cache, if supported on our build target.
+ *
+ * Returns: -1 on error, setting errno according to posix_fadvise
+ * values.
+ */
+int fadvise_dontneed(int fd, off_t len);
+
+#ifdef __CYGWIN__
+
+typedef struct {
+  const char *dli_fname;
+  void *dli_fbase;
+  const char *dli_sname;
+  void *dli_saddr;
+} Dl_info;
+
+int dladdr(const void *addr, Dl_info *info);
+int backtrace (void **buffer, int size);
+
+#endif
+
+//////////////////////////////////////////////////////////////////////
+
 }
 
-#endif // incl_HPHP_COMPATIBILITY_H_
+#endif

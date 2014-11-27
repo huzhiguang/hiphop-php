@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,7 +14,6 @@
    +----------------------------------------------------------------------+
 */
 #include "hphp/util/arena.h"
-#include "hphp/util/util.h"
 #include "hphp/util/assertions.h"
 #include "hphp/util/malloc-size-class.h"
 
@@ -35,6 +34,7 @@ ArenaImpl<kChunkBytes>::ArenaImpl() {
   memset(&m_frame, 0, sizeof m_frame);
   m_current = static_cast<char*>(malloc(kChunkBytes));
   m_ptrs.push_back(m_current);
+  m_bypassSlabAlloc = RuntimeOption::DisableSmartAllocator;
 #ifdef DEBUG
   m_externalAllocSize = 0;
 #endif
@@ -63,12 +63,22 @@ template<size_t kChunkBytes>
 void* ArenaImpl<kChunkBytes>::allocSlow(size_t nbytes) {
   // Large allocations go directly to malloc without discarding our
   // current chunk.
-  if (UNLIKELY(nbytes >= kChunkBytes)) {
-    char* ptr = static_cast<char*>(malloc(nbytes));
-#ifdef DEBUG
-    m_externalAllocSize += nbytes;
+  if (UNLIKELY(nbytes >= kChunkBytes || m_bypassSlabAlloc)) {
+#if defined(VALGRIND) || !defined(USE_JEMALLOC)
+    // We want all our pointers to be kMinBytes - 1 byte aligned.
+    // Without jemalloc we have to do that by hand.
+    auto extra = kMinBytes - 1;
+#else
+    auto extra = 0;
 #endif
-    m_externalPtrs.push(ptr);
+
+    char* ptr = static_cast<char*>(malloc(nbytes + extra));
+#ifdef DEBUG
+    m_externalAllocSize += nbytes + extra;
+#endif
+    m_externalPtrs.push(ptr); // save ptr before aligning it
+    // align up to (extra + 1) bytes
+    ptr = (char*)((uintptr_t(ptr) + extra) & ~extra);
     assert((intptr_t(ptr) & (kMinBytes - 1)) == 0);
     return ptr;
   }
@@ -79,7 +89,7 @@ void* ArenaImpl<kChunkBytes>::allocSlow(size_t nbytes) {
 template<size_t kChunkBytes>
 void ArenaImpl<kChunkBytes>::createSlab() {
   ++m_frame.index;
-  m_frame.offset = 0;
+  m_frame.offset = RuntimeOption::DisableSmartAllocator ? kChunkBytes : 0 ;
   if (m_frame.index < m_ptrs.size()) {
     m_current = m_ptrs[m_frame.index];
   } else {

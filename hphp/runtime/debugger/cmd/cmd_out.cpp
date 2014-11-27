@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,6 +15,9 @@
 */
 
 #include "hphp/runtime/debugger/cmd/cmd_out.h"
+
+#include "hphp/runtime/vm/vm-regs.h"
+#include "hphp/runtime/vm/hhbc.h"
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
@@ -37,7 +40,7 @@ void CmdOut::onSetup(DebuggerProxy &proxy, CmdInterrupt &interrupt) {
   TRACE(2, "CmdOut::onSetup\n");
   assert(!m_complete); // Complete cmds should not be asked to do work.
   m_stackDepth = proxy.getStackDepth();
-  m_vmDepth = g_vmContext->m_nesting;
+  m_vmDepth = g_context->m_nesting;
 
   // Simply setup a "step out breakpoint" and let the program run.
   setupStepOuts();
@@ -48,7 +51,13 @@ void CmdOut::onBeginInterrupt(DebuggerProxy &proxy, CmdInterrupt &interrupt) {
   assert(!m_complete); // Complete cmds should not be asked to do work.
 
   m_needsVMInterrupt = false;
-  int currentVMDepth = g_vmContext->m_nesting;
+
+  if (m_skippingOverPopR) {
+    m_complete = true;
+    return;
+  }
+
+  int currentVMDepth = g_context->m_nesting;
   int currentStackDepth = proxy.getStackDepth();
 
   // Deeper or same depth? Keep running.
@@ -70,8 +79,18 @@ void CmdOut::onBeginInterrupt(DebuggerProxy &proxy, CmdInterrupt &interrupt) {
 
   TRACE(2, "CmdOut: shallower stack depth, done.\n");
   cleanupStepOuts();
-  m_complete = (decCount() == 0);
-  if (!m_complete) {
+  int depth = decCount();
+  if (depth == 0) {
+    PC pc = vmpc();
+    // Step over PopR following a call
+    if (*reinterpret_cast<const Op*>(pc) == Op::PopR) {
+      m_skippingOverPopR = true;
+      m_needsVMInterrupt = true;
+    } else {
+      m_complete = true;
+    }
+    return;
+  } else {
     TRACE(2, "CmdOut: not complete, step out again.\n");
     onSetup(proxy, interrupt);
   }

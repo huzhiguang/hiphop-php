@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,11 +18,11 @@
 #define incl_HPHP_EVAL_DEBUGGER_CMD_MACHINE_H_
 
 #include "hphp/runtime/debugger/debugger_command.h"
+#include <vector>
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
 
-DECLARE_BOOST_TYPES(CmdMachine);
 class CmdMachine : public DebuggerCommand {
 public:
   static bool AttachSandbox(DebuggerClient &client, const char *user = nullptr,
@@ -49,7 +49,7 @@ private:
                             DSandboxInfoPtr sandbox,
                             bool force = false);
 
-  DSandboxInfoPtrVec m_sandboxes;
+  std::vector<DSandboxInfoPtr> m_sandboxes;
   Array m_rpcConfig;
   bool m_force;
   bool m_succeed;

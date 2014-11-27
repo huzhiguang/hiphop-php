@@ -1,6 +1,6 @@
-<?php
+<?hh
 
-$m = StableMap {
+$m = Map {
 'd' => 4}
 ;
 $x0 = Vector {

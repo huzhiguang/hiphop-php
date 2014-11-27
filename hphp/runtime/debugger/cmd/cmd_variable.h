@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,16 +22,20 @@
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
 
-DECLARE_BOOST_TYPES(CmdVariable);
 class CmdVariable : public DebuggerCommand {
 public:
   static Array GetGlobalVariables();
-  static void PrintVariable(DebuggerClient &client, CStrRef varName);
-  static void PrintVariables(DebuggerClient &client, CArrRef variables,
-                             bool global, CStrRef text);
+  static void PrintVariable(DebuggerClient &client, const String& varName);
+  static void PrintVariables(DebuggerClient &client, const Array& variables,
+                              int frame, const String& text, int version);
 
 public:
-  CmdVariable() : DebuggerCommand(KindOfVariable) {}
+
+  explicit CmdVariable(Type type = KindOfVariable) : DebuggerCommand(type) {
+    m_frame = 0;
+    m_version = 1;
+    m_global = false;
+  }
 
   virtual void help(DebuggerClient &client);
 
@@ -45,7 +49,9 @@ protected:
 private:
   int m_frame;
   Array m_variables;
-  bool m_global;
+  bool m_global; // Set true by onServer if it used g_context->m_globalVarEnv
+  String m_varName;
+  String m_filter;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

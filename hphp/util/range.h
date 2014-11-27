@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -106,7 +106,13 @@ public:
     m_next++;
     return tmp;
   }
+
   bool empty() const { return m_next == m_end; }
+
+  // Support begin() and end() so this can be used with range-based
+  // for.
+  Iter begin() const { return m_next; }
+  Iter end() const { return m_end; }
 
 private:
   Iter m_next, m_end;
@@ -124,12 +130,10 @@ template<typename Cont,
 struct Range : public IterRange<It, RangePolicy> {
   explicit Range(typename match_iterator<It, Cont>::type& c) :
      IterRange<It, RangePolicy>(c.begin(), c.end()) { }
-};
 
-template<typename Range, typename Function>
-void range_foreach(Range r, const Function& f) {
-  while (!r.empty()) f(r.popFront());
-}
+  using IterRange<It,RangePolicy>::begin;
+  using IterRange<It,RangePolicy>::end;
+};
 
 }
 

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,8 +17,8 @@
 #ifndef incl_HPHP_STRING_BUFFER_H_
 #define incl_HPHP_STRING_BUFFER_H_
 
-#include "hphp/runtime/base/types.h"
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/exceptions.h"
+#include "hphp/runtime/base/type-string.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -27,7 +27,7 @@ class File;
 
 class StringBufferLimitException : public FatalErrorException {
 public:
-  StringBufferLimitException(int size, CStrRef partialResult)
+  StringBufferLimitException(int size, const String& partialResult)
     : FatalErrorException(0, "StringBuffer exceeded %d bytes of memory", size),
       m_result(partialResult) {}
   virtual ~StringBufferLimitException() throw() {}
@@ -37,6 +37,9 @@ public:
 
 /*
  * Efficient string concatenation.
+ *
+ * StringBuffer is designed not to contain any malloc()d memory (only
+ * per-request smart allocated memory) based on sweeping-related assumptions.
  */
 struct StringBuffer {
   static const int kDefaultOutputLimit = StringData::MaxSize;
@@ -142,6 +145,14 @@ struct StringBuffer {
   char* appendCursor(int additionalBytes);
 
   /*
+   * Mutate a character in existing buffer.
+   */
+  void set(int offset, char c) {
+    assert(offset < m_len);
+    m_buffer[offset] = c;
+  }
+
+  /*
    * Append various types of things to this string.
    */
   void append(char c) {
@@ -153,7 +164,7 @@ struct StringBuffer {
   }
   void append(unsigned char c) { append((char)c);}
   void append(const char* s) { assert(s); append(s, strlen(s)); }
-  void append(CStrRef s) { append(s.data(), s.size()); }
+  void append(const String& s) { append(s.data(), s.size()); }
   void append(const std::string& s) { append(s.data(), s.size()); }
   void append(const StringData* s) { append(s->data(), s->size()); }
   void append(const char* s, int len) {
@@ -165,7 +176,7 @@ struct StringBuffer {
     }
     appendHelper(s, len);
   }
-  void append(CVarRef s);
+  void append(const Variant& s);
   void append(int n);
   void append(int64_t n);
 

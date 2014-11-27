@@ -15,93 +15,81 @@
 #   +----------------------------------------------------------------------+
 #
 
-include(HPHPSetup)
-
-# HHVM Build
-SET(USE_HHVM TRUE)
-SET(ENV{HHVM} 1)
-ADD_DEFINITIONS("-DHHVM -DHHVM_BINARY=1 -DHHVM_PATH=\\\"${HPHP_HOME}/hphp/hhvm/hhvm\\\"")
-
-set(RECURSIVE_SOURCE_SUBDIRS runtime/base runtime/debugger runtime/eval runtime/ext runtime/server runtime/vm util zend neo parser vixl)
-foreach (dir ${RECURSIVE_SOURCE_SUBDIRS})
-	auto_sources(files "*.cpp" "RECURSE" "${CMAKE_CURRENT_SOURCE_DIR}/${dir}")
-	list(APPEND CXX_SOURCES ${files})
-
-	auto_sources(files "*.c" "RECURSE" "${CMAKE_CURRENT_SOURCE_DIR}/${dir}")
-	list(APPEND C_SOURCES ${files})
-
-	auto_sources(files "*.S" "RECURSE" "${CMAKE_CURRENT_SOURCE_DIR}/${dir}")
-	list(APPEND ASM_SOURCES ${files})
-endforeach(dir ${RECURSIVE_SOURCE_SUBDIRS})
-
-if(NOT LINUX)
-	add_definitions(-DNO_HARDWARE_COUNTERS)
-	list(REMOVE_ITEM CXX_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/runtime/vm/debug/elfwriter.cpp)
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/facebook")
+  # I'm sorry, but facebook's internal repo has the top level dir stored inside
+  # of hphp/, so we need to pull that one in first if it exists
+  CMAKE_MINIMUM_REQUIRED(VERSION 2.8.7 FATAL_ERROR)
+  set(HPHP_HOME ${CMAKE_CURRENT_SOURCE_DIR}/..)
+  set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/facebook/CMake"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/public_tld/CMake"
+                        ${CMAKE_MODULE_PATH})
+  include(FBTLD)
 endif()
 
-# Not working with off-the-shelf libevent
-list(REMOVE_ITEM CXX_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/runtime/server/server-name-indication.cpp")
+include(HPHPSetup)
+include(FollySetup)
+if (ENABLE_COTIRE)
+  include(cotire)
+  FIND_PATH(LIBC_INCLUDE_PATH stdlib.h)
 
-# Waiting on OSS fix :(
-list(REMOVE_ITEM CXX_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/runtime/vm/runtime-type-profiler.cpp)
+  # Detect the architecture-specific include directory
+  IF("${CMAKE_LIBRARY_ARCHITECTURE}" STREQUAL "")
+    # For CentOS/Red Hat where they store it directly in /usr/include
+    SET(ARCH_INCLUDE_PATH "${LIBC_INCLUDE_PATH}/bits")
+  ELSE()
+    FIND_PATH(ARCH_INCLUDE_PATH ${CMAKE_LIBRARY_ARCHITECTURE})
+    SET(ARCH_INCLUDE_PATH "${ARCH_INCLUDE_PATH}/${CMAKE_LIBRARY_ARCHITECTURE}")
+  ENDIF()
 
-# remove ext_hhvm, and anything in a test folder
-foreach (file ${CXX_SOURCES})
-       	if (${file} MATCHES "ext_hhvm")
-		list(REMOVE_ITEM CXX_SOURCES ${file})
-	endif()
-	if (${file} MATCHES "/test/")
-		list(REMOVE_ITEM CXX_SOURCES ${file})
-	endif()
-endforeach(file ${CXX_SOURCES})
+  set_property(DIRECTORY
+    PROPERTY COTIRE_PREFIX_HEADER_IGNORE_PATH
+      "${LIBC_INCLUDE_PATH}/stdlib.h"
+      "${LIBC_INCLUDE_PATH}/string.h"
+      "${LIBC_INCLUDE_PATH}/ansidecl.h"
+      "${LIBC_INCLUDE_PATH}/bfd.h"
+      "${LIBC_INCLUDE_PATH}/libelf.h"
+      "${LIBC_INCLUDE_PATH}/elf.h"
+      "${LIBC_INCLUDE_PATH}/gelf.h"
+      "${ARCH_INCLUDE_PATH}"
+      "${CCLIENT_INCLUDE_PATH}"
+      "${JEMALLOC_INCLUDE_DIR}/jemalloc"
+      "${ONIGURUMA_INCLUDE_DIR}/onigposix.h"
+      "${ONIGURUMA_INCLUDE_DIR}/oniguruma.h"
+      "${LIBPNG_INCLUDE_DIRS}/png.h"
+      "${LDAP_INCLUDE_DIR}/ldap.h"
+      "${CMAKE_SOURCE_DIR}"
+      "${CMAKE_BINARY_DIR}")
+endif()
 
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin")
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin")
+add_definitions("-DHHVM")
+add_definitions("-DUSE_CMAKE")
 
-add_subdirectory(third_party/libafdt)
-add_subdirectory(third_party/libmbfl)
-add_subdirectory(third_party/libsqlite3)
-add_subdirectory(third_party/timelib)
-add_subdirectory(third_party/lz4)
-add_subdirectory(third_party/double-conversion)
-add_subdirectory(third_party/folly)
-
-foreach (CXX_FILE ${CXX_SOURCES})
-	if(${CXX_FILE} MATCHES ".no.cpp$")
-		SET_SOURCE_FILES_PROPERTIES(
-			${CXX_FILE}
-			PROPERTIES
-			COMPILE_FLAGS -O0
-		)
-	endif()
-endforeach()
-
-add_custom_command(
-  OUTPUT "hphp-repo-schema.h" "hphp-build-info.cpp"
-  COMMAND "hphp/util/generate-buildinfo.sh"
-  DEPENDS ${CXX_SOURCES} ${C_SOURCES}
-  WORKING_DIRECTORY ${HPHP_HOME}
-  COMMENT "Generating Repo Schema ID and Compiler ID"
-  VERBATIM)
-
-ADD_LIBRARY(hphp_runtime_static STATIC
-            "hphp-repo-schema.h" "hphp-build-info.cpp"
-            ${CXX_SOURCES} ${C_SOURCES} ${ASM_SOURCES})
-SET_TARGET_PROPERTIES(hphp_runtime_static PROPERTIES OUTPUT_NAME "hphp_runtime")
-SET_TARGET_PROPERTIES(hphp_runtime_static PROPERTIES PREFIX "lib")
-SET_TARGET_PROPERTIES(hphp_runtime_static PROPERTIES CLEAN_DIRECT_OUTPUT 1)
-
-SET(CMAKE_CXX_ARCHIVE_APPEND "<CMAKE_AR> q <TARGET> <LINK_FLAGS> <OBJECTS>")
-
-hphp_link(hphp_runtime_static)
-
-add_subdirectory("tools/bootstrap")
+add_subdirectory(tools/bootstrap)
+add_subdirectory(tools/hfsort)
 
 add_subdirectory(compiler)
-add_subdirectory(runtime/ext_hhvm)
-add_subdirectory(hhvm)
-add_subdirectory(system)
+add_subdirectory(hack)
+add_subdirectory(hhbbc)
+add_subdirectory(neo)
+add_subdirectory(parser)
 
-if (NOT "$ENV{HPHP_NOTEST}" STREQUAL "1")
-	add_subdirectory(test)
+add_subdirectory(runtime)
+add_subdirectory(runtime/ext)
+add_subdirectory(runtime/ext_hhvm)
+if (ENABLE_ZEND_COMPAT)
+  add_subdirectory(runtime/ext_zend_compat)
+endif()
+add_subdirectory(system)
+add_subdirectory(util)
+add_subdirectory(vixl)
+add_subdirectory(zend)
+
+add_subdirectory(hhvm)
+
+option(TEST_BIN "Create the HHVM test binary" OFF)
+if (TEST_BIN)
+  add_subdirectory(test)
 endif ()
+
+# Keep this last
+add_subdirectory(tools/hphpize)

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,10 +13,11 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/util/text-art.h"
 
-namespace HPHP { namespace Util { namespace TextArt {
+#include <cassert>
+
+namespace HPHP { namespace TextArt {
 ///////////////////////////////////////////////////////////////////////////////
 
 bool s_use_utf8 = true;
@@ -50,4 +51,4 @@ const char *get_box_drawing_char(BoxDrawing name) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-}}}
+}}

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,6 +16,7 @@
 
 #include "hphp/compiler/expression/await_expression.h"
 #include "hphp/compiler/analysis/function_scope.h"
+#include "hphp/compiler/code_model_enums.h"
 
 using namespace HPHP;
 
@@ -25,14 +26,13 @@ using namespace HPHP;
 AwaitExpression::AwaitExpression(EXPRESSION_CONSTRUCTOR_PARAMETERS,
  ExpressionPtr exp)
   : Expression(EXPRESSION_CONSTRUCTOR_PARAMETER_VALUES(AwaitExpression)),
-    m_exp(exp), m_label(-1) {
+    m_exp(exp) {
 }
 
 ExpressionPtr AwaitExpression::clone() {
   AwaitExpressionPtr exp(new AwaitExpression(*this));
   Expression::deepCopy(exp);
   exp->m_exp = Clone(m_exp);
-  exp->m_label = m_label;
   return exp;
 }
 
@@ -46,9 +46,6 @@ ExpressionPtr AwaitExpression::clone() {
 void AwaitExpression::analyzeProgram(AnalysisResultPtr ar) {
   assert(getFunctionScope() && getFunctionScope()->isAsync());
   m_exp->analyzeProgram(ar);
-  if (m_label == -1) {
-    setLabel(getFunctionScope()->allocYieldLabel());
-  }
 }
 
 ConstructPtr AwaitExpression::getNthKid(int n) const {
@@ -77,12 +74,18 @@ void AwaitExpression::setNthKid(int n, ConstructPtr cp) {
   }
 }
 
-TypePtr AwaitExpression::inferTypes(AnalysisResultPtr ar, TypePtr type,
-                                    bool coerce) {
-  m_exp->inferAndCheck(ar, Type::Some, false);
-  return Type::Variant;
-}
+///////////////////////////////////////////////////////////////////////////////
 
+void AwaitExpression::outputCodeModel(CodeGenerator &cg) {
+  cg.printObjectHeader("UnaryOpExpression", 3);
+  cg.printPropertyHeader("expression");
+  m_exp->outputCodeModel(cg);
+  cg.printPropertyHeader("operation");
+  cg.printValue(PHP_AWAIT_OP);
+  cg.printPropertyHeader("sourceLocation");
+  cg.printLocation(this->getLocation());
+  cg.printObjectFooter();
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 // code generation functions

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,15 +15,16 @@
 */
 
 #include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/base/mixed-array-defs.h"
 
 namespace HPHP {
 
 //////////////////////////////////////////////////////////////////////
 
-static __thread GlobalVariables* g_variables;
+static __thread GlobalsArray* g_variables;
 static __thread EnvConstants* g_envConstants;
 
-GlobalVariables* get_global_variables() {
+GlobalsArray* get_global_variables() {
   assert(g_variables);
   return g_variables;
 }
@@ -48,11 +49,12 @@ void EnvConstants::requestExit() {
   g_envConstants = nullptr;
 }
 
-GlobalNameValueTableWrapper::GlobalNameValueTableWrapper(
-  NameValueTable* tab) : NameValueTableWrapper(tab) {
-
-  Variant arr(HphpArray::GetStaticEmptyArray());
-#define X(s,v) tab->set(StringData::GetStaticString(#s), v.asTypedValue());
+GlobalsArray::GlobalsArray(NameValueTable* tab)
+  : ArrayData(kGlobalsKind)
+  , m_tab(tab)
+{
+  Variant arr(staticEmptyArray());
+#define X(s,v) tab->set(makeStaticString(#s), v.asTypedValue());
 
   X(argc,                 init_null_variant);
   X(argv,                 init_null_variant);
@@ -63,8 +65,8 @@ GlobalNameValueTableWrapper::GlobalNameValueTableWrapper(
   X(_FILES,               arr);
   X(_ENV,                 arr);
   X(_REQUEST,             arr);
+  X(_SESSION,             arr);
   X(HTTP_RAW_POST_DATA,   init_null_variant);
-  X(http_response_header, init_null_variant);
 #undef X
 
   g_variables = this;

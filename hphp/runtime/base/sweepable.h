@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,7 +17,8 @@
 #ifndef incl_HPHP_SWEEPABLE_H_
 #define incl_HPHP_SWEEPABLE_H_
 
-#include "hphp/util/base.h"
+#include "hphp/util/portability.h"
+#include "hphp/runtime/base/memory-manager.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -29,6 +30,13 @@ namespace HPHP {
  * clear out request-local allocations that are not smart-allocated.
  */
 class Sweepable {
+  /*
+   * Sweepable objects are not supposed to be copied or assigned
+   * naively.
+   */
+  Sweepable(const Sweepable&) = delete;
+  Sweepable& operator=(const Sweepable&) = delete;
+
 public:
   struct Node {
     Node *next, *prev;
@@ -36,28 +44,27 @@ public:
     void delist();
     void init();
   };
-  static void SweepAll();
+  static unsigned SweepAll();
   static void InitSweepableList();
 
 public:
-  Sweepable();
-  virtual ~Sweepable();
+  explicit Sweepable(HeaderKind kind = HeaderKind::Sweepable);
 
   /*
-   * Default sweep behavior is to delete ourselves.  Note that this is
-   * not appropriate for a smart-allocated class.
+   * There is no default behavior. Make sure this function frees all
+   * NON-SMART-ALLOCATED resources ONLY.
    */
-  virtual void sweep() { delete this; }
+  virtual void sweep() = 0;
 
   /*
    * Note: "Persistent" here means that the object will stay alive
    * across requests, but *as a thread local*.  It can be reused once
    * the same server thread gets around to handling a new request.  If
-   * you need this you probably should be using it via PersistentObjectStore.
+   * you need this you probably should be using it via PersistentResourceStore.
    */
-  void incPersistent() { ++m_persistentCount; }
-  void decPersistent() { --m_persistentCount; }
-  bool isPersistent() { return m_persistentCount > 0; }
+  void incPersistent() { ++m_persist; }
+  void decPersistent() { --m_persist; }
+  bool isPersistent() { return m_persist > 0; }
 
   /*
    * Remove this object from the sweepable list, so it won't have
@@ -65,9 +72,19 @@ public:
    */
   void unregister();
 
+protected:
+  ~Sweepable();
+
 private:
+  union {
+    struct {
+      UNUSED char m_pad[3];
+      UNUSED const HeaderKind m_kind;
+      unsigned m_persist;
+    };
+    uint64_t m_kind_persist;
+  };
   Node m_sweepNode;
-  int m_persistentCount;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

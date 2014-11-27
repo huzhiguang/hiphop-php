@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -25,7 +25,7 @@ using namespace HPHP;
 GotoStatement::GotoStatement
 (STATEMENT_CONSTRUCTOR_PARAMETERS, const std::string &label)
   : Statement(STATEMENT_CONSTRUCTOR_PARAMETER_VALUES(GotoStatement)),
-    m_label(label), m_error((ParserBase::GotoError)0), m_id(0) {
+    m_label(label), m_error((ParserBase::GotoError)0) {
 }
 
 StatementPtr GotoStatement::clone() {
@@ -83,7 +83,15 @@ void GotoStatement::setNthKid(int n, ConstructPtr cp) {
   }
 }
 
-void GotoStatement::inferTypes(AnalysisResultPtr ar) {
+///////////////////////////////////////////////////////////////////////////////
+
+void GotoStatement::outputCodeModel(CodeGenerator &cg) {
+  cg.printObjectHeader("GotoStatement", 2);
+  cg.printPropertyHeader("label");
+  cg.printValue(m_label);
+  cg.printPropertyHeader("sourceLocation");
+  cg.printLocation(this->getLocation());
+  cg.printObjectFooter();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -92,4 +100,3 @@ void GotoStatement::inferTypes(AnalysisResultPtr ar) {
 void GotoStatement::outputPHP(CodeGenerator &cg, AnalysisResultPtr ar) {
   cg_printf("goto %s;\n", m_label.c_str());
 }
-

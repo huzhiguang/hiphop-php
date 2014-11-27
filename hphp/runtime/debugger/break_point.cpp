@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,9 +13,12 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-// force tests to run
-
 #include "hphp/runtime/debugger/break_point.h"
+
+#include <vector>
+
+#include <folly/Conv.h>
+
 #include "hphp/runtime/debugger/debugger.h"
 #include "hphp/runtime/debugger/debugger_proxy.h"
 #include "hphp/runtime/debugger/debugger_thrift_buffer.h"
@@ -25,8 +28,12 @@
 #include "hphp/runtime/base/stat-cache.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/base/comparisons.h"
+#include "hphp/runtime/ext/ext_generator.h"
 
 namespace HPHP { namespace Eval {
+
+using std::string;
+
 ///////////////////////////////////////////////////////////////////////////////
 
 TRACE_SET_MOD(debugger);
@@ -41,7 +48,7 @@ int InterruptSite::getFileLen() const {
 
 std::string InterruptSite::desc() const {
   TRACE(2, "InterruptSite::desc\n");
-  string ret;
+  std::string ret;
   if (m_error.isNull()) {
     ret = "Break";
   } else if (m_error.isObject()) {
@@ -65,7 +72,7 @@ std::string InterruptSite::desc() const {
   string file = getFile();
   int line0 = getLine0();
   if (line0) {
-    ret += " on line " + lexical_cast<string>(line0);
+    ret += " on line " + folly::to<std::string>(line0);
     if (!file.empty()) {
       ret += " of " + file;
     }
@@ -76,7 +83,7 @@ std::string InterruptSite::desc() const {
   return ret;
 }
 
-InterruptSite::InterruptSite(bool hardBreakPoint, CVarRef error)
+InterruptSite::InterruptSite(bool hardBreakPoint, const Variant& error)
     : m_error(error), m_activationRecord(nullptr),
       m_callingSite(nullptr), m_class(nullptr),
       m_file((StringData*)nullptr),
@@ -85,20 +92,24 @@ InterruptSite::InterruptSite(bool hardBreakPoint, CVarRef error)
       m_funcEntry(false) {
   TRACE(2, "InterruptSite::InterruptSite\n");
 #define bail_on(c) if (c) { return; }
-  VMExecutionContext* context = g_vmContext;
-  ActRec *fp = context->getFP();
+  auto const context = g_context.getNoCheck();
+  ActRec *fp = vmfp();
   bail_on(!fp);
   if (hardBreakPoint && fp->skipFrame()) {
     // for hard breakpoint, the fp is for an extension function,
     // so we need to construct the site on the caller
-    fp = context->getPrevVMState(fp, &m_offset);
+    fp = context->getPrevVMStateUNSAFE(fp, &m_offset);
   } else {
-    const uchar *pc = context->getPC();
-    bail_on(!fp->m_func);
-    m_unit = fp->m_func->unit();
+    auto const *pc = vmpc();
+    auto f = fp->m_func;
+    bail_on(!f);
+    m_unit = f->unit();
     bail_on(!m_unit);
     m_offset = m_unit->offsetOf(pc);
-    if (m_offset == fp->m_func->base()) {
+    auto base = f->isGenerator()
+      ? BaseGenerator::userBase(f)
+      : f->base();
+    if (m_offset == base) {
       m_funcEntry = true;
     }
   }
@@ -108,7 +119,7 @@ InterruptSite::InterruptSite(bool hardBreakPoint, CVarRef error)
 
 // Only used to look for callers by function name. No need to
 // to retrieve source line information for this kind of site.
-InterruptSite::InterruptSite(ActRec *fp, Offset offset, CVarRef error)
+InterruptSite::InterruptSite(ActRec *fp, Offset offset, const Variant& error)
   : m_error(error), m_activationRecord(nullptr),
     m_callingSite(nullptr), m_class(nullptr),
     m_file((StringData*)nullptr),
@@ -136,12 +147,6 @@ void InterruptSite::Initialize(ActRec *fp) {
     m_char1 = m_sourceLoc.char1;
   }
   m_function = fp->m_func->name()->data();
-  if (fp->m_func->isGenerator()) {
-    // Strip off "$continuation" to get the original function name
-    assert(m_function.compare(m_function.length() - 13,
-                              string::npos, "$continuation") == 0);
-    m_function.resize(m_function.length() - 13);
-  }
   if (fp->m_func->preClass()) {
     m_class = fp->m_func->preClass()->name()->data();
   } else {
@@ -158,9 +163,9 @@ void InterruptSite::Initialize(ActRec *fp) {
 // longer than there is a guarantee that this site will be alive.
 const InterruptSite *InterruptSite::getCallingSite() const {
   if (m_callingSite != nullptr) return m_callingSite.get();
-  VMExecutionContext* context = g_vmContext;
+  auto const context = g_context.getNoCheck();
   Offset parentOffset;
-  auto parentFp = context->getPrevVMState(m_activationRecord, &parentOffset);
+  auto parentFp = context->getPrevVMStateUNSAFE(m_activationRecord, &parentOffset);
   if (parentFp == nullptr) return nullptr;
   m_callingSite.reset(new InterruptSite(parentFp, parentOffset, m_error));
   return m_callingSite.get();
@@ -497,7 +502,7 @@ std::string BreakPointInfo::site() const {
       preposition = "";
     }
     if (m_line1) {
-      ret += "on line " + lexical_cast<string>(m_line1);
+      ret += "on line " + folly::to<string>(m_line1);
       if (!m_file.empty()) {
         ret += " of " + m_file;
       }
@@ -523,12 +528,12 @@ std::string BreakPointInfo::descBreakPointReached() const {
     }
     if (m_line1 || m_line2) {
       if (m_line1 == m_line2) {
-        ret += "on line " + lexical_cast<string>(m_line1);
+        ret += "on line " + folly::to<string>(m_line1);
       } else if (m_line2 == -1) {
-        ret += "between line " + lexical_cast<string>(m_line1) + " and end";
+        ret += "between line " + folly::to<string>(m_line1) + " and end";
       } else {
-        ret += "between line " + lexical_cast<string>(m_line1) +
-          " and line " + lexical_cast<string>(m_line2);
+        ret += "between line " + folly::to<string>(m_line1) +
+          " and line " + folly::to<string>(m_line2);
       }
       if (!m_file.empty()) {
         ret += " of " + regex(m_file);
@@ -630,7 +635,7 @@ void mangleXhpName(const std::string &source, std::string &target) {
 
 int32_t scanName(const std::string &str, int32_t offset) {
   auto len = str.length();
-  assert(0 <= offset && offset < len);
+  assert(0 <= offset && offset <= len);
   while (offset < len) {
     char ch = str[offset];
     if (ch == ':' || ch == '\\' || ch == ',' || ch == '(' || ch == '=' ||
@@ -790,7 +795,7 @@ void BreakPointInfo::parseBreakPointReached(const std::string &exp,
     }
     // Now we have a namespace, class and func name.
     // The namespace only or the namespace and class might be empty.
-    DFunctionInfoPtr pfunc(new DFunctionInfo());
+    auto pfunc = std::make_shared<DFunctionInfo>();
     if (m_class.empty()) {
       if (!isValidIdentifier(name)) goto returnInvalid;
       if (m_namespace.empty()) {
@@ -997,7 +1002,7 @@ bool BreakPointInfo::Match(const char *haystack, int haystack_len,
   return HPHP::same(r, 1);
 }
 
-bool BreakPointInfo::checkExceptionOrError(CVarRef e) {
+bool BreakPointInfo::checkExceptionOrError(const Variant& e) {
   TRACE(2, "BreakPointInfo::checkException\n");
   assert(!e.isNull());
   if (e.isObject()) {
@@ -1005,7 +1010,7 @@ bool BreakPointInfo::checkExceptionOrError(CVarRef e) {
       return Match(m_class.c_str(), m_class.size(),
                    e.toObject()->o_getClassName().data(), true, false);
     }
-    return e.instanceof(m_class.c_str());
+    return e.getObjectData()->o_instanceof(m_class.c_str());
   }
   return Match(m_class.c_str(), m_class.size(), ErrorClassName, m_regex,
                false);
@@ -1088,7 +1093,8 @@ bool BreakPointInfo::checkClause(DebuggerProxy &proxy) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-void BreakPointInfo::SendImpl(int version, const BreakPointInfoPtrVec &bps,
+void BreakPointInfo::SendImpl(int version,
+                              const std::vector<BreakPointInfoPtr> &bps,
                               DebuggerThriftBuffer &thrift) {
   TRACE(2, "BreakPointInfo::SendImpl\n");
   int16_t size = bps.size();
@@ -1098,7 +1104,8 @@ void BreakPointInfo::SendImpl(int version, const BreakPointInfoPtrVec &bps,
   }
 }
 
-void BreakPointInfo::RecvImpl(int version, BreakPointInfoPtrVec &bps,
+void BreakPointInfo::RecvImpl(int version,
+                              std::vector<BreakPointInfoPtr> &bps,
                               DebuggerThriftBuffer &thrift) {
   TRACE(2, "BreakPointInfo::RecvImpl\n");
   int16_t size;

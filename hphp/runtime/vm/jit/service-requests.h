@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,9 +16,13 @@
 #ifndef incl_HPHP_RUNTIME_VM_SERVICE_REQUESTS_H_
 #define incl_HPHP_RUNTIME_VM_SERVICE_REQUESTS_H_
 
+#include "hphp/runtime/vm/jit/containers.h"
+#include "hphp/runtime/vm/jit/translator-inline.h"
+#include "hphp/runtime/vm/jit/types.h"
+#include "hphp/runtime/vm/srckey.h"
 #include "hphp/util/asm-x64.h"
 
-namespace HPHP { namespace JIT {
+namespace HPHP { namespace jit {
 
 #define SERVICE_REQUESTS \
   /*
@@ -118,6 +122,12 @@ enum class SRFlags {
    * unbalance the return stack buffer---in these cases use a jmp.
    */
   JmpInsteadOfRet = 1 << 1,
+
+  /*
+   * Indicates if the service request is persistent. For non-persistent
+   * requests, the service request stub may be reused.
+   */
+  Persist = 1 << 2,
 };
 
 inline bool operator&(SRFlags a, SRFlags b) {
@@ -135,67 +145,27 @@ inline SRFlags operator|(SRFlags a, SRFlags b) {
  * to it at callout-time.
  */
 
-// REQ_BIND_CALL
-struct ReqBindCall {
-  SrcKey m_sourceInstr;
-  Transl::TCA m_toSmash;
-  int m_nArgs;
-  bool m_isImmutable; // call was to known func.
-};
-
-
 struct ServiceReqArgInfo {
   enum {
     Immediate,
     CondCode,
+    RipRelative,
   } m_kind;
   union {
     uint64_t m_imm;
-    Transl::ConditionCode m_cc;
+    jit::ConditionCode m_cc;
   };
 };
 
-typedef smart::vector<ServiceReqArgInfo> ServiceReqArgVec;
-
-inline ServiceReqArgInfo ccServiceReqArgInfo(Transl::ConditionCode cc) {
-  return ServiceReqArgInfo{ServiceReqArgInfo::CondCode, { uint64_t(cc) }};
+inline ServiceReqArgInfo RipRelative(TCA addr) {
+  return ServiceReqArgInfo {
+    ServiceReqArgInfo::RipRelative,
+    { (uint64_t)addr }
+  };
 }
 
-template<typename T>
-typename std::enable_if<
-  // Only allow for things with a sensible cast to uint64_t.
-  std::is_integral<T>::value || std::is_pointer<T>::value ||
-  std::is_enum<T>::value
-  >::type packServiceReqArg(ServiceReqArgVec& args, T arg) {
-  // By default, assume we meant to pass an immediate arg.
-  args.push_back({ ServiceReqArgInfo::Immediate, { uint64_t(arg) } });
-}
-
-inline void packServiceReqArg(ServiceReqArgVec& args,
-                       const ServiceReqArgInfo& argInfo) {
-  args.push_back(argInfo);
-}
-
-template<typename T, typename... Arg>
-void packServiceReqArgs(ServiceReqArgVec& argv, T arg, Arg... args) {
-  packServiceReqArg(argv, arg);
-  packServiceReqArgs(argv, args...);
-}
-
-inline void packServiceReqArgs(ServiceReqArgVec& argv) {
-  // Recursive base case.
-}
+typedef jit::vector<ServiceReqArgInfo> ServiceReqArgVec;
 
 }}
-
-namespace std {
-
-template<> struct hash<HPHP::JIT::ServiceRequest> {
-  size_t operator()(const HPHP::JIT::ServiceRequest& sr) const {
-    return sr;
-  }
-};
-
-}
 
 #endif

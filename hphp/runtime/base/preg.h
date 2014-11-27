@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,38 +17,140 @@
 #ifndef incl_HPHP_PREG_H_
 #define incl_HPHP_PREG_H_
 
-#include "hphp/runtime/base/types.h"
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/smart-containers.h"
+#include "hphp/runtime/base/type-string.h"
+
+#include <cstdint>
+#include <cstddef>
+#include <pcre.h>
+
+#define PREG_PATTERN_ORDER          1
+#define PREG_SET_ORDER              2
+#define PREG_OFFSET_CAPTURE         (1<<8)
+
+#define PREG_SPLIT_NO_EMPTY         (1<<0)
+#define PREG_SPLIT_DELIM_CAPTURE    (1<<1)
+#define PREG_SPLIT_OFFSET_CAPTURE   (1<<2)
+
+#define PREG_REPLACE_EVAL           (1<<0)
+
+#define PREG_GREP_INVERT            (1<<0)
+
+enum {
+  PHP_PCRE_NO_ERROR = 0,
+  PHP_PCRE_INTERNAL_ERROR,
+  PHP_PCRE_BACKTRACK_LIMIT_ERROR,
+  PHP_PCRE_RECURSION_LIMIT_ERROR,
+  PHP_PCRE_BAD_UTF8_ERROR,
+  PHP_PCRE_BAD_UTF8_OFFSET_ERROR
+};
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-Variant preg_grep(CStrRef pattern, CArrRef input, int flags = 0);
+class Array;
+struct Variant;
 
-Variant preg_match(CStrRef pattern, CStrRef subject, Variant &matches,
+class pcre_cache_entry {
+  pcre_cache_entry(const pcre_cache_entry&);
+  pcre_cache_entry& operator=(const pcre_cache_entry&);
+
+public:
+  pcre_cache_entry() : subpat_names(nullptr) {}
+  ~pcre_cache_entry();
+
+  pcre *re;
+  pcre_extra *extra; // Holds results of studying
+  int preg_options:1;
+  int compile_options:31;
+  int num_subpats;
+  mutable std::atomic<char**> subpat_names;
+};
+
+class PCREglobals {
+public:
+  PCREglobals();
+  ~PCREglobals();
+  void cleanupOnRequestEnd(const pcre_cache_entry* ent);
+  void onSessionExit();
+  // pcre ini_settings
+  int64_t m_preg_backtrace_limit;
+  int64_t m_preg_recursion_limit;
+  pcre_jit_stack *m_jit_stack;
+private:
+  smart::vector<const pcre_cache_entry*> m_overflow;
+};
+
+///////////////////////////////////////////////////////////////////////////////
+// Cache management
+
+/*
+ * Initialize PCRE cache.
+ */
+void pcre_init();
+
+/*
+ * Clear PCRE cache.  Not thread safe - call only after parsing options.
+ */
+void pcre_reinit();
+
+/*
+ * Clean up thread-local PCREs.
+ */
+void pcre_session_exit();
+
+/*
+ * Dump the contents of the PCRE cache to filename.
+ */
+void pcre_dump_cache(const std::string& filename);
+
+///////////////////////////////////////////////////////////////////////////////
+// PHP API
+
+Variant preg_grep(const String& pattern, const Array& input, int flags = 0);
+
+Variant preg_match(const String& pattern, const String& subject,
+                   Variant& matches,
                    int flags = 0, int offset = 0);
 
-Variant preg_match(CStrRef pattern, CStrRef subject, int flags = 0,
+Variant preg_match(const String& pattern,
+                   const String& subject,
+                   int flags = 0,
                    int offset = 0);
 
-Variant preg_match_all(CStrRef pattern, CStrRef subject, Variant &matches,
+Variant preg_match_all(const String& pattern, const String& subject,
+                       Variant& matches,
                        int flags = 0, int offset = 0);
 
-Variant preg_match_all(CStrRef pattern, CStrRef subject,
+Variant preg_match_all(const String& pattern, const String& subject,
                        int flags = 0, int offset = 0);
 
-Variant preg_replace_impl(CVarRef pattern, CVarRef replacement,
-                          CVarRef subject, int limit, Variant &count,
-                          bool is_callable);
-int preg_replace(Variant &result, CVarRef pattern, CVarRef replacement,
-                 CVarRef subject, int limit = -1);
-int preg_replace_callback(Variant &result, CVarRef pattern, CVarRef callback,
-                          CVarRef subject, int limit = -1);
+Variant preg_replace_impl(const Variant& pattern, const Variant& replacement,
+                          const Variant& subject, int limit, Variant& count,
+                          bool is_callable, bool is_filter);
+int preg_replace(Variant& result,
+                 const Variant& pattern,
+                 const Variant& replacement,
+                 const Variant& subject,
+                 int limit = -1);
+int preg_replace_callback(Variant& result,
+                          const Variant& pattern,
+                          const Variant& callback,
+                          const Variant& subject,
+                          int limit = -1);
+int preg_filter(Variant& result,
+                const Variant& pattern,
+                const Variant& replacement,
+                const Variant& subject,
+                int limit = -1);
 
-Variant preg_split(CVarRef pattern, CVarRef subject, int limit = -1,
+Variant preg_split(const String& pattern,
+                   const String& subject,
+                   int limit = -1,
                    int flags = 0);
-String preg_quote(CStrRef str, CStrRef delimiter = null_string);
-Variant php_split(CStrRef spliton, CStrRef str, int count, bool icase);
+String preg_quote(const String& str, const String& delimiter = null_string);
+Variant php_split(const String& spliton, const String& str, int count,
+                  bool icase);
 
 int preg_last_error();
 

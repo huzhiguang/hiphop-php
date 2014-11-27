@@ -14,11 +14,6 @@
             "value": null
         },
         {
-            "name": "SID",
-            "type": "String",
-            "desc": "Dynamic constant: session_id()"
-        },
-        {
             "name": "PHP_SAPI",
             "type": "String",
             "desc": "Dynamic constant: php_sapi_name()"
@@ -100,18 +95,6 @@
             "value": 131094
         },
         {
-            "name": "AF_INET",
-            "value": 2
-        },
-        {
-            "name": "AF_INET6",
-            "value": 10
-        },
-        {
-            "name": "AF_UNIX",
-            "value": 1
-        },
-        {
             "name": "ALT_DIGITS",
             "value": 131119
         },
@@ -122,26 +105,6 @@
         {
             "name": "APACHE_MAP",
             "value": 200
-        },
-        {
-            "name": "ASSERT_ACTIVE",
-            "value": 1
-        },
-        {
-            "name": "ASSERT_BAIL",
-            "value": 3
-        },
-        {
-            "name": "ASSERT_CALLBACK",
-            "value": 2
-        },
-        {
-            "name": "ASSERT_QUIET_EVAL",
-            "value": 5
-        },
-        {
-            "name": "ASSERT_WARNING",
-            "value": 4
         },
         {
             "name": "CASE_LOWER",
@@ -245,7 +208,7 @@
         },
         {
             "name": "CRYPT_BLOWFISH",
-            "value": 0
+            "value": 1
         },
         {
             "name": "CRYPT_EXT_DES",
@@ -262,946 +225,6 @@
         {
             "name": "CRYPT_STD_DES",
             "value": 1
-        },
-        {
-            "name": "CURLAUTH_ANY",
-            "value": -1
-        },
-        {
-            "name": "CURLAUTH_ANYSAFE",
-            "value": -2
-        },
-        {
-            "name": "CURLAUTH_BASIC",
-            "value": 1
-        },
-        {
-            "name": "CURLAUTH_DIGEST",
-            "value": 2
-        },
-        {
-            "name": "CURLAUTH_GSSNEGOTIATE",
-            "value": 4
-        },
-        {
-            "name": "CURLAUTH_NTLM",
-            "value": 8
-        },
-        {
-            "name": "CURLCLOSEPOLICY_CALLBACK",
-            "value": 5
-        },
-        {
-            "name": "CURLCLOSEPOLICY_LEAST_RECENTLY_USED",
-            "value": 2
-        },
-        {
-            "name": "CURLCLOSEPOLICY_LEAST_TRAFFIC",
-            "value": 3
-        },
-        {
-            "name": "CURLCLOSEPOLICY_OLDEST",
-            "value": 1
-        },
-        {
-            "name": "CURLCLOSEPOLICY_SLOWEST",
-            "value": 4
-        },
-        {
-            "name": "CURLE_ABORTED_BY_CALLBACK",
-            "value": 42
-        },
-        {
-            "name": "CURLE_BAD_CALLING_ORDER",
-            "value": 44
-        },
-        {
-            "name": "CURLE_BAD_CONTENT_ENCODING",
-            "value": 61
-        },
-        {
-            "name": "CURLE_BAD_FUNCTION_ARGUMENT",
-            "value": 43
-        },
-        {
-            "name": "CURLE_BAD_PASSWORD_ENTERED",
-            "value": 46
-        },
-        {
-            "name": "CURLE_COULDNT_CONNECT",
-            "value": 7
-        },
-        {
-            "name": "CURLE_COULDNT_RESOLVE_HOST",
-            "value": 6
-        },
-        {
-            "name": "CURLE_COULDNT_RESOLVE_PROXY",
-            "value": 5
-        },
-        {
-            "name": "CURLE_FAILED_INIT",
-            "value": 2
-        },
-        {
-            "name": "CURLE_FILESIZE_EXCEEDED",
-            "value": 63
-        },
-        {
-            "name": "CURLE_FILE_COULDNT_READ_FILE",
-            "value": 37
-        },
-        {
-            "name": "CURLE_FTP_ACCESS_DENIED",
-            "value": 9
-        },
-        {
-            "name": "CURLE_FTP_BAD_DOWNLOAD_RESUME",
-            "value": 36
-        },
-        {
-            "name": "CURLE_FTP_CANT_GET_HOST",
-            "value": 15
-        },
-        {
-            "name": "CURLE_FTP_CANT_RECONNECT",
-            "value": 16
-        },
-        {
-            "name": "CURLE_FTP_COULDNT_GET_SIZE",
-            "value": 32
-        },
-        {
-            "name": "CURLE_FTP_COULDNT_RETR_FILE",
-            "value": 19
-        },
-        {
-            "name": "CURLE_FTP_COULDNT_SET_ASCII",
-            "value": 29
-        },
-        {
-            "name": "CURLE_FTP_COULDNT_SET_BINARY",
-            "value": 17
-        },
-        {
-            "name": "CURLE_FTP_COULDNT_STOR_FILE",
-            "value": 25
-        },
-        {
-            "name": "CURLE_FTP_COULDNT_USE_REST",
-            "value": 31
-        },
-        {
-            "name": "CURLE_FTP_PORT_FAILED",
-            "value": 30
-        },
-        {
-            "name": "CURLE_FTP_QUOTE_ERROR",
-            "value": 21
-        },
-        {
-            "name": "CURLE_FTP_SSL_FAILED",
-            "value": 64
-        },
-        {
-            "name": "CURLE_FTP_USER_PASSWORD_INCORRECT",
-            "value": 10
-        },
-        {
-            "name": "CURLE_FTP_WEIRD_227_FORMAT",
-            "value": 14
-        },
-        {
-            "name": "CURLE_FTP_WEIRD_PASS_REPLY",
-            "value": 11
-        },
-        {
-            "name": "CURLE_FTP_WEIRD_PASV_REPLY",
-            "value": 13
-        },
-        {
-            "name": "CURLE_FTP_WEIRD_SERVER_REPLY",
-            "value": 8
-        },
-        {
-            "name": "CURLE_FTP_WEIRD_USER_REPLY",
-            "value": 12
-        },
-        {
-            "name": "CURLE_FTP_WRITE_ERROR",
-            "value": 20
-        },
-        {
-            "name": "CURLE_FUNCTION_NOT_FOUND",
-            "value": 41
-        },
-        {
-            "name": "CURLE_GOT_NOTHING",
-            "value": 52
-        },
-        {
-            "name": "CURLE_HTTP_NOT_FOUND",
-            "value": 22
-        },
-        {
-            "name": "CURLE_HTTP_PORT_FAILED",
-            "value": 45
-        },
-        {
-            "name": "CURLE_HTTP_POST_ERROR",
-            "value": 34
-        },
-        {
-            "name": "CURLE_HTTP_RANGE_ERROR",
-            "value": 33
-        },
-        {
-            "name": "CURLE_LDAP_CANNOT_BIND",
-            "value": 38
-        },
-        {
-            "name": "CURLE_LDAP_INVALID_URL",
-            "value": 62
-        },
-        {
-            "name": "CURLE_LDAP_SEARCH_FAILED",
-            "value": 39
-        },
-        {
-            "name": "CURLE_LIBRARY_NOT_FOUND",
-            "value": 40
-        },
-        {
-            "name": "CURLE_MALFORMAT_USER",
-            "value": 24
-        },
-        {
-            "name": "CURLE_OBSOLETE",
-            "value": 50
-        },
-        {
-            "name": "CURLE_OK",
-            "value": 0
-        },
-        {
-            "name": "CURLE_OPERATION_TIMEOUTED",
-            "value": 28
-        },
-        {
-            "name": "CURLE_OUT_OF_MEMORY",
-            "value": 27
-        },
-        {
-            "name": "CURLE_PARTIAL_FILE",
-            "value": 18
-        },
-        {
-            "name": "CURLE_READ_ERROR",
-            "value": 26
-        },
-        {
-            "name": "CURLE_RECV_ERROR",
-            "value": 56
-        },
-        {
-            "name": "CURLE_SEND_ERROR",
-            "value": 55
-        },
-        {
-            "name": "CURLE_SHARE_IN_USE",
-            "value": 57
-        },
-        {
-            "name": "CURLE_SSL_CACERT",
-            "value": 60
-        },
-        {
-            "name": "CURLE_SSL_CERTPROBLEM",
-            "value": 58
-        },
-        {
-            "name": "CURLE_SSL_CIPHER",
-            "value": 59
-        },
-        {
-            "name": "CURLE_SSL_CONNECT_ERROR",
-            "value": 35
-        },
-        {
-            "name": "CURLE_SSL_ENGINE_NOTFOUND",
-            "value": 53
-        },
-        {
-            "name": "CURLE_SSL_ENGINE_SETFAILED",
-            "value": 54
-        },
-        {
-            "name": "CURLE_SSL_PEER_CERTIFICATE",
-            "value": 51
-        },
-        {
-            "name": "CURLE_TELNET_OPTION_SYNTAX",
-            "value": 49
-        },
-        {
-            "name": "CURLE_TOO_MANY_REDIRECTS",
-            "value": 47
-        },
-        {
-            "name": "CURLE_UNKNOWN_TELNET_OPTION",
-            "value": 48
-        },
-        {
-            "name": "CURLE_UNSUPPORTED_PROTOCOL",
-            "value": 1
-        },
-        {
-            "name": "CURLE_URL_MALFORMAT",
-            "value": 3
-        },
-        {
-            "name": "CURLE_URL_MALFORMAT_USER",
-            "value": 4
-        },
-        {
-            "name": "CURLE_WRITE_ERROR",
-            "value": 23
-        },
-        {
-            "name": "CURLFTPAUTH_DEFAULT",
-            "value": 0
-        },
-        {
-            "name": "CURLFTPAUTH_SSL",
-            "value": 1
-        },
-        {
-            "name": "CURLFTPAUTH_TLS",
-            "value": 2
-        },
-        {
-            "name": "CURLFTPSSL_ALL",
-            "value": 3
-        },
-        {
-            "name": "CURLFTPSSL_CONTROL",
-            "value": 2
-        },
-        {
-            "name": "CURLFTPSSL_NONE",
-            "value": 0
-        },
-        {
-            "name": "CURLFTPSSL_TRY",
-            "value": 1
-        },
-        {
-            "name": "CURLINFO_CONNECT_TIME",
-            "value": 3145733
-        },
-        {
-            "name": "CURLINFO_CONTENT_LENGTH_DOWNLOAD",
-            "value": 3145743
-        },
-        {
-            "name": "CURLINFO_CONTENT_LENGTH_UPLOAD",
-            "value": 3145744
-        },
-        {
-            "name": "CURLINFO_CONTENT_TYPE",
-            "value": 1048594
-        },
-        {
-            "name": "CURLINFO_EFFECTIVE_URL",
-            "value": 1048577
-        },
-        {
-            "name": "CURLINFO_FILETIME",
-            "value": 2097166
-        },
-        {
-            "name": "CURLINFO_HEADER_OUT",
-            "value": 2
-        },
-        {
-            "name": "CURLINFO_HEADER_SIZE",
-            "value": 2097163
-        },
-        {
-            "name": "CURLINFO_HTTP_CODE",
-            "value": 2097154
-        },
-        {
-            "name": "CURLINFO_NAMELOOKUP_TIME",
-            "value": 3145732
-        },
-        {
-            "name": "CURLINFO_PRETRANSFER_TIME",
-            "value": 3145734
-        },
-        {
-            "name": "CURLINFO_PRIVATE",
-            "value": 1048597
-        },
-        {
-            "name": "CURLINFO_REDIRECT_COUNT",
-            "value": 2097172
-        },
-        {
-            "name": "CURLINFO_REDIRECT_TIME",
-            "value": 3145747
-        },
-        {
-            "name": "CURLINFO_REQUEST_SIZE",
-            "value": 2097164
-        },
-        {
-            "name": "CURLINFO_SIZE_DOWNLOAD",
-            "value": 3145736
-        },
-        {
-            "name": "CURLINFO_SIZE_UPLOAD",
-            "value": 3145735
-        },
-        {
-            "name": "CURLINFO_SPEED_DOWNLOAD",
-            "value": 3145737
-        },
-        {
-            "name": "CURLINFO_SPEED_UPLOAD",
-            "value": 3145738
-        },
-        {
-            "name": "CURLINFO_SSL_VERIFYRESULT",
-            "value": 2097165
-        },
-        {
-            "name": "CURLINFO_STARTTRANSFER_TIME",
-            "value": 3145745
-        },
-        {
-            "name": "CURLINFO_TOTAL_TIME",
-            "value": 3145731
-        },
-        {
-            "name": "CURLMSG_DONE",
-            "value": 1
-        },
-        {
-            "name": "CURLM_BAD_EASY_HANDLE",
-            "value": 2
-        },
-        {
-            "name": "CURLM_BAD_HANDLE",
-            "value": 1
-        },
-        {
-            "name": "CURLM_CALL_MULTI_PERFORM",
-            "value": -1
-        },
-        {
-            "name": "CURLM_INTERNAL_ERROR",
-            "value": 4
-        },
-        {
-            "name": "CURLM_OK",
-            "value": 0
-        },
-        {
-            "name": "CURLM_OUT_OF_MEMORY",
-            "value": 3
-        },
-        {
-            "name": "CURLOPT_AUTOREFERER",
-            "value": 58
-        },
-        {
-            "name": "CURLOPT_BINARYTRANSFER",
-            "value": 19914
-        },
-        {
-            "name": "CURLOPT_BUFFERSIZE",
-            "value": 98
-        },
-        {
-            "name": "CURLOPT_CAINFO",
-            "value": 10065
-        },
-        {
-            "name": "CURLOPT_CAPATH",
-            "value": 10097
-        },
-        {
-            "name": "CURLOPT_CLOSEPOLICY",
-            "value": 72
-        },
-        {
-            "name": "CURLOPT_CONNECTTIMEOUT",
-            "value": 78
-        },
-        {
-            "name": "CURLOPT_COOKIE",
-            "value": 10022
-        },
-        {
-            "name": "CURLOPT_COOKIEFILE",
-            "value": 10031
-        },
-        {
-            "name": "CURLOPT_COOKIEJAR",
-            "value": 10082
-        },
-        {
-            "name": "CURLOPT_COOKIESESSION",
-            "value": 96
-        },
-        {
-            "name": "CURLOPT_CRLF",
-            "value": 27
-        },
-        {
-            "name": "CURLOPT_CUSTOMREQUEST",
-            "value": 10036
-        },
-        {
-            "name": "CURLOPT_DNS_CACHE_TIMEOUT",
-            "value": 92
-        },
-        {
-            "name": "CURLOPT_DNS_USE_GLOBAL_CACHE",
-            "value": 91
-        },
-        {
-            "name": "CURLOPT_EGDSOCKET",
-            "value": 10077
-        },
-        {
-            "name": "CURLOPT_ENCODING",
-            "value": 10102
-        },
-        {
-            "name": "CURLOPT_FAILONERROR",
-            "value": 45
-        },
-        {
-            "name": "CURLOPT_FILE",
-            "value": 10001
-        },
-        {
-            "name": "CURLOPT_FILETIME",
-            "value": 69
-        },
-        {
-            "name": "CURLOPT_FOLLOWLOCATION",
-            "value": 52
-        },
-        {
-            "name": "CURLOPT_FORBID_REUSE",
-            "value": 75
-        },
-        {
-            "name": "CURLOPT_FRESH_CONNECT",
-            "value": 74
-        },
-        {
-            "name": "CURLOPT_FTPAPPEND",
-            "value": 50
-        },
-        {
-            "name": "CURLOPT_FTPLISTONLY",
-            "value": 48
-        },
-        {
-            "name": "CURLOPT_FTPPORT",
-            "value": 10017
-        },
-        {
-            "name": "CURLOPT_FTPSSLAUTH",
-            "value": 129
-        },
-        {
-            "name": "CURLOPT_FTP_CREATE_MISSING_DIRS",
-            "value": 110
-        },
-        {
-            "name": "CURLOPT_FTP_SSL",
-            "value": 119
-        },
-        {
-            "name": "CURLOPT_FTP_USE_EPRT",
-            "value": 106
-        },
-        {
-            "name": "CURLOPT_FTP_USE_EPSV",
-            "value": 85
-        },
-        {
-            "name": "CURLOPT_HEADER",
-            "value": 42
-        },
-        {
-            "name": "CURLOPT_HEADERFUNCTION",
-            "value": 20079
-        },
-        {
-            "name": "CURLOPT_HTTP200ALIASES",
-            "value": 10104
-        },
-        {
-            "name": "CURLOPT_HTTPAUTH",
-            "value": 107
-        },
-        {
-            "name": "CURLOPT_HTTPGET",
-            "value": 80
-        },
-        {
-            "name": "CURLOPT_HTTPHEADER",
-            "value": 10023
-        },
-        {
-            "name": "CURLOPT_HTTPPROXYTUNNEL",
-            "value": 61
-        },
-        {
-            "name": "CURLOPT_HTTP_VERSION",
-            "value": 84
-        },
-        {
-            "name": "CURLOPT_INFILE",
-            "value": 10009
-        },
-        {
-            "name": "CURLOPT_INFILESIZE",
-            "value": 14
-        },
-        {
-            "name": "CURLOPT_INTERFACE",
-            "value": 10062
-        },
-        {
-            "name": "CURLOPT_IPRESOLVE",
-            "value": 113
-        },
-        {
-            "name": "CURLOPT_KRB4LEVEL",
-            "value": 10063
-        },
-        {
-            "name": "CURLOPT_LOW_SPEED_LIMIT",
-            "value": 19
-        },
-        {
-            "name": "CURLOPT_LOW_SPEED_TIME",
-            "value": 20
-        },
-        {
-            "name": "CURLOPT_MAXCONNECTS",
-            "value": 71
-        },
-        {
-            "name": "CURLOPT_MAXREDIRS",
-            "value": 68
-        },
-        {
-            "name": "CURLOPT_MUTE",
-            "value": -2
-        },
-        {
-            "name": "CURLOPT_NETRC",
-            "value": 51
-        },
-        {
-            "name": "CURLOPT_NOBODY",
-            "value": 44
-        },
-        {
-            "name": "CURLOPT_NOPROGRESS",
-            "value": 43
-        },
-        {
-            "name": "CURLOPT_NOSIGNAL",
-            "value": 99
-        },
-        {
-            "name": "CURLOPT_PASSWDFUNCTION",
-            "value": -3
-        },
-        {
-            "name": "CURLOPT_PORT",
-            "value": 3
-        },
-        {
-            "name": "CURLOPT_POST",
-            "value": 47
-        },
-        {
-            "name": "CURLOPT_POSTFIELDS",
-            "value": 10015
-        },
-        {
-            "name": "CURLOPT_POSTQUOTE",
-            "value": 10039
-        },
-        {
-            "name": "CURLOPT_PRIVATE",
-            "value": 10103
-        },
-        {
-            "name": "CURLOPT_PROXY",
-            "value": 10004
-        },
-        {
-            "name": "CURLOPT_PROXYAUTH",
-            "value": 111
-        },
-        {
-            "name": "CURLOPT_PROXYPORT",
-            "value": 59
-        },
-        {
-            "name": "CURLOPT_PROXYTYPE",
-            "value": 101
-        },
-        {
-            "name": "CURLOPT_PROXYUSERPWD",
-            "value": 10006
-        },
-        {
-            "name": "CURLOPT_PUT",
-            "value": 54
-        },
-        {
-            "name": "CURLOPT_QUOTE",
-            "value": 10028
-        },
-        {
-            "name": "CURLOPT_RANDOM_FILE",
-            "value": 10076
-        },
-        {
-            "name": "CURLOPT_RANGE",
-            "value": 10007
-        },
-        {
-            "name": "CURLOPT_READDATA",
-            "value": 10009
-        },
-        {
-            "name": "CURLOPT_READFUNCTION",
-            "value": 20012
-        },
-        {
-            "name": "CURLOPT_REFERER",
-            "value": 10016
-        },
-        {
-            "name": "CURLOPT_RESUME_FROM",
-            "value": 21
-        },
-        {
-            "name": "CURLOPT_RETURNTRANSFER",
-            "value": 19913
-        },
-        {
-            "name": "CURLOPT_SSLCERT",
-            "value": 10025
-        },
-        {
-            "name": "CURLOPT_SSLCERTPASSWD",
-            "value": 10026
-        },
-        {
-            "name": "CURLOPT_SSLCERTTYPE",
-            "value": 10086
-        },
-        {
-            "name": "CURLOPT_SSLENGINE",
-            "value": 10089
-        },
-        {
-            "name": "CURLOPT_SSLENGINE_DEFAULT",
-            "value": 90
-        },
-        {
-            "name": "CURLOPT_SSLKEY",
-            "value": 10087
-        },
-        {
-            "name": "CURLOPT_SSLKEYPASSWD",
-            "value": 10026
-        },
-        {
-            "name": "CURLOPT_SSLKEYTYPE",
-            "value": 10088
-        },
-        {
-            "name": "CURLOPT_SSLVERSION",
-            "value": 32
-        },
-        {
-            "name": "CURLOPT_SSL_CIPHER_LIST",
-            "value": 10083
-        },
-        {
-            "name": "CURLOPT_SSL_VERIFYHOST",
-            "value": 81
-        },
-        {
-            "name": "CURLOPT_SSL_VERIFYPEER",
-            "value": 64
-        },
-        {
-            "name": "CURLOPT_STDERR",
-            "value": 10037
-        },
-        {
-            "name": "CURLOPT_TCP_NODELAY",
-            "value": 121
-        },
-        {
-            "name": "CURLOPT_TIMECONDITION",
-            "value": 33
-        },
-        {
-            "name": "CURLOPT_TIMEOUT",
-            "value": 13
-        },
-        {
-            "name": "CURLOPT_TIMEVALUE",
-            "value": 34
-        },
-        {
-            "name": "CURLOPT_TRANSFERTEXT",
-            "value": 53
-        },
-        {
-            "name": "CURLOPT_UNRESTRICTED_AUTH",
-            "value": 105
-        },
-        {
-            "name": "CURLOPT_UPLOAD",
-            "value": 46
-        },
-        {
-            "name": "CURLOPT_URL",
-            "value": 10002
-        },
-        {
-            "name": "CURLOPT_USERAGENT",
-            "value": 10018
-        },
-        {
-            "name": "CURLOPT_USERPWD",
-            "value": 10005
-        },
-        {
-            "name": "CURLOPT_VERBOSE",
-            "value": 41
-        },
-        {
-            "name": "CURLOPT_WRITEFUNCTION",
-            "value": 20011
-        },
-        {
-            "name": "CURLOPT_WRITEHEADER",
-            "value": 10029
-        },
-        {
-            "name": "CURLOPT_FB_TLS_VER_MAX",
-            "value": 2147482624
-        },
-        {
-            "name": "CURLOPT_FB_TLS_VER_MAX_NONE",
-            "value": 2147482625
-        },
-        {
-            "name": "CURLOPT_FB_TLS_VER_MAX_1_1",
-            "value": 2147482626
-        },
-        {
-            "name": "CURLOPT_FB_TLS_VER_MAX_1_0",
-            "value": 2147482627
-        },
-        {
-            "name": "CURLOPT_FB_TLS_CIPHER_SPEC",
-            "value": 2147482628
-        },
-        {
-            "name": "CURLPROXY_HTTP",
-            "value": 0
-        },
-        {
-            "name": "CURLPROXY_SOCKS5",
-            "value": 5
-        },
-        {
-            "name": "CURLVERSION_NOW",
-            "value": 2
-        },
-        {
-            "name": "CURL_HTTP_VERSION_1_0",
-            "value": 1
-        },
-        {
-            "name": "CURL_HTTP_VERSION_1_1",
-            "value": 2
-        },
-        {
-            "name": "CURL_HTTP_VERSION_NONE",
-            "value": 0
-        },
-        {
-            "name": "CURL_IPRESOLVE_V4",
-            "value": 1
-        },
-        {
-            "name": "CURL_IPRESOLVE_V6",
-            "value": 2
-        },
-        {
-            "name": "CURL_IPRESOLVE_WHATEVER",
-            "value": 0
-        },
-        {
-            "name": "CURL_NETRC_IGNORED",
-            "value": 0
-        },
-        {
-            "name": "CURL_NETRC_OPTIONAL",
-            "value": 1
-        },
-        {
-            "name": "CURL_NETRC_REQUIRED",
-            "value": 2
-        },
-        {
-            "name": "CURL_TIMECOND_IFMODSINCE",
-            "value": 1
-        },
-        {
-            "name": "CURL_TIMECOND_IFUNMODSINCE",
-            "value": 2
-        },
-        {
-            "name": "CURL_TIMECOND_LASTMOD",
-            "value": 3
-        },
-        {
-            "name": "CURL_VERSION_IPV6",
-            "value": 1
-        },
-        {
-            "name": "CURL_VERSION_KERBEROS4",
-            "value": 2
-        },
-        {
-            "name": "CURL_VERSION_LIBZ",
-            "value": 8
-        },
-        {
-            "name": "CURL_VERSION_SSL",
-            "value": 4
         },
         {
             "name": "DATE_ATOM",
@@ -1496,12 +519,20 @@
             "value": 3
         },
         {
-            "name": "ENT_FB_UTF8",
+            "name": "ENT_IGNORE",
             "value": 4
         },
         {
-            "name": "ENT_FB_UTF8_ONLY",
+            "name": "ENT_SUBSTITUTE",
             "value": 8
+        },
+        {
+            "name": "ENT_FB_UTF8",
+            "value": 32768
+        },
+        {
+            "name": "ENT_FB_UTF8_ONLY",
+            "value": 65536
         },
         {
             "name": "ERA",
@@ -1522,102 +553,6 @@
         {
             "name": "EXIF_USE_MBSTRING",
             "value": 0
-        },
-        {
-            "name": "EXTR_IF_EXISTS",
-            "value": 6
-        },
-        {
-            "name": "EXTR_OVERWRITE",
-            "value": 0
-        },
-        {
-            "name": "EXTR_PREFIX_ALL",
-            "value": 3
-        },
-        {
-            "name": "EXTR_PREFIX_IF_EXISTS",
-            "value": 5
-        },
-        {
-            "name": "EXTR_PREFIX_INVALID",
-            "value": 4
-        },
-        {
-            "name": "EXTR_PREFIX_SAME",
-            "value": 2
-        },
-        {
-            "name": "EXTR_REFS",
-            "value": 256
-        },
-        {
-            "name": "EXTR_SKIP",
-            "value": 1
-        },
-        {
-            "name": "E_ALL",
-            "value": 30719
-        },
-        {
-            "name": "E_COMPILE_ERROR",
-            "value": 64
-        },
-        {
-            "name": "E_COMPILE_WARNING",
-            "value": 128
-        },
-        {
-            "name": "E_CORE_ERROR",
-            "value": 16
-        },
-        {
-            "name": "E_CORE_WARNING",
-            "value": 32
-        },
-        {
-            "name": "E_DEPRECATED",
-            "value": 8192
-        },
-        {
-            "name": "E_ERROR",
-            "value": 1
-        },
-        {
-            "name": "E_NOTICE",
-            "value": 8
-        },
-        {
-            "name": "E_PARSE",
-            "value": 4
-        },
-        {
-            "name": "E_RECOVERABLE_ERROR",
-            "value": 4096
-        },
-        {
-            "name": "E_STRICT",
-            "value": 2048
-        },
-        {
-            "name": "E_USER_DEPRECATED",
-            "value": 16384
-        },
-        {
-            "name": "E_USER_ERROR",
-            "value": 256
-        },
-        {
-            "name": "E_USER_NOTICE",
-            "value": 1024
-        },
-        {
-            "name": "E_USER_WARNING",
-            "value": 512
-        },
-        {
-            "name": "E_WARNING",
-            "value": 2
         },
         {
             "name": "FALSE",
@@ -1644,6 +579,14 @@
             "value": 1
         },
         {
+            "name": "FILE_TEXT",
+            "value": 0
+        },
+        {
+            "name": "FILE_BINARY",
+            "value": 0
+        },
+        {
             "name": "FNM_CASEFOLD",
             "value": 16
         },
@@ -1658,14 +601,6 @@
         {
             "name": "FNM_PERIOD",
             "value": 4
-        },
-        {
-            "name": "FORCE_DEFLATE",
-            "value": 2
-        },
-        {
-            "name": "FORCE_GZIP",
-            "value": 1
         },
         {
             "name": "FT_INTERNAL",
@@ -1784,18 +719,6 @@
             "value": 8192
         },
         {
-            "name": "GRAPHEME_EXTR_COUNT",
-            "value": 0
-        },
-        {
-            "name": "GRAPHEME_EXTR_MAXBYTES",
-            "value": 1
-        },
-        {
-            "name": "GRAPHEME_EXTR_MAXCHARS",
-            "value": 2
-        },
-        {
             "name": "HASH_HMAC",
             "value": 1
         },
@@ -1805,7 +728,15 @@
         },
         {
             "name": "HPHP_VERSION",
-            "value": "2.1.0"
+            "value": "3.5.0-dev"
+        },
+        {
+            "name": "HHVM_VERSION",
+            "value": "3.5.0-dev"
+        },
+        {
+            "name": "HHVM_VERSION_ID",
+            "value": 30500
         },
         {
             "name": "HTML_ENTITIES",
@@ -1814,22 +745,6 @@
         {
             "name": "HTML_SPECIALCHARS",
             "value": 0
-        },
-        {
-            "name": "ICONV_IMPL",
-            "value": "glibc"
-        },
-        {
-            "name": "ICONV_MIME_DECODE_CONTINUE_ON_ERROR",
-            "value": 2
-        },
-        {
-            "name": "ICONV_MIME_DECODE_STRICT",
-            "value": 1
-        },
-        {
-            "name": "ICONV_VERSION",
-            "value": "2.5"
         },
         {
             "name": "IDNA_ALLOW_UNASSIGNED",
@@ -1968,6 +883,10 @@
             "value": 6
         },
         {
+            "name": "IMAGETYPE_COUNT",
+            "value": 18
+        },
+        {
             "name": "IMAGETYPE_GIF",
             "value": 1
         },
@@ -2024,6 +943,10 @@
             "value": 8
         },
         {
+            "name": "IMAGETYPE_UNKNOWN",
+            "value": 0
+        },
+        {
             "name": "IMAGETYPE_WBMP",
             "value": 15
         },
@@ -2034,22 +957,6 @@
         {
             "name": "IMAGETYPE_ICO",
             "value": 17
-        },
-        {
-            "name": "IMAP_CLOSETIMEOUT",
-            "value": 4
-        },
-        {
-            "name": "IMAP_OPENTIMEOUT",
-            "value": 1
-        },
-        {
-            "name": "IMAP_READTIMEOUT",
-            "value": 2
-        },
-        {
-            "name": "IMAP_WRITETIMEOUT",
-            "value": 3
         },
         {
             "name": "IMG_ARC_CHORD",
@@ -2152,6 +1059,10 @@
             "value": 10
         },
         {
+            "name": "IMG_FILTER_PIXELATE",
+            "value": 11
+        },
+        {
             "name": "IMG_GD2_COMPRESSED",
             "value": 2
         },
@@ -2184,38 +1095,6 @@
             "value": 16
         },
         {
-            "name": "INFO_ALL",
-            "value": 4294967295
-        },
-        {
-            "name": "INFO_CONFIGURATION",
-            "value": 4
-        },
-        {
-            "name": "INFO_CREDITS",
-            "value": 2
-        },
-        {
-            "name": "INFO_ENVIRONMENT",
-            "value": 16
-        },
-        {
-            "name": "INFO_GENERAL",
-            "value": 1
-        },
-        {
-            "name": "INFO_LICENSE",
-            "value": 64
-        },
-        {
-            "name": "INFO_MODULES",
-            "value": 8
-        },
-        {
-            "name": "INFO_VARIABLES",
-            "value": 32
-        },
-        {
             "name": "INI_ALL",
             "value": 7
         },
@@ -2237,14 +1116,6 @@
         },
         {
             "name": "INI_USER",
-            "value": 1
-        },
-        {
-            "name": "INTL_IDNA_VARIANT_2003",
-            "value": 0
-        },
-        {
-            "name": "INTL_IDNA_VARIANT_UTS46",
             "value": 1
         },
         {
@@ -2376,84 +1247,20 @@
             "value": 4
         },
         {
-            "name": "LIBXML_COMPACT",
-            "value": 65536
-        },
-        {
-            "name": "LIBXML_DOTTED_VERSION",
-            "value": "2.6.26"
-        },
-        {
-            "name": "LIBXML_DTDATTR",
-            "value": 8
-        },
-        {
-            "name": "LIBXML_DTDLOAD",
-            "value": 4
-        },
-        {
-            "name": "LIBXML_DTDVALID",
-            "value": 16
-        },
-        {
-            "name": "LIBXML_ERR_ERROR",
-            "value": 2
-        },
-        {
-            "name": "LIBXML_ERR_FATAL",
-            "value": 3
-        },
-        {
-            "name": "LIBXML_ERR_NONE",
+            "name": "ENT_HTML401",
             "value": 0
         },
         {
-            "name": "LIBXML_ERR_WARNING",
-            "value": 1
+            "name": "ENT_XML1",
+            "value": 16
         },
         {
-            "name": "LIBXML_NOBLANKS",
-            "value": 256
-        },
-        {
-            "name": "LIBXML_NOCDATA",
-            "value": 16384
-        },
-        {
-            "name": "LIBXML_NOEMPTYTAG",
-            "value": 4
-        },
-        {
-            "name": "LIBXML_NOENT",
-            "value": 2
-        },
-        {
-            "name": "LIBXML_NOERROR",
+            "name": "ENT_XHTML",
             "value": 32
         },
         {
-            "name": "LIBXML_NONET",
-            "value": 2048
-        },
-        {
-            "name": "LIBXML_NOWARNING",
-            "value": 64
-        },
-        {
-            "name": "LIBXML_NOXMLDECL",
-            "value": 2
-        },
-        {
-            "name": "LIBXML_NSCLEAN",
-            "value": 8192
-        },
-        {
-            "name": "LIBXML_VERSION",
-            "value": 20626
-        },
-        {
-            "name": "LIBXML_XINCLUDE",
-            "value": 1024
+            "name": "ENT_HTML5",
+            "value": 48
         },
         {
             "name": "LOCK_EX",
@@ -2636,170 +1443,6 @@
             "value": 1
         },
         {
-            "name": "MCRYPT_3DES",
-            "value": "tripledes"
-        },
-        {
-            "name": "MCRYPT_ARCFOUR",
-            "value": "arcfour"
-        },
-        {
-            "name": "MCRYPT_ARCFOUR_IV",
-            "value": "arcfour-iv"
-        },
-        {
-            "name": "MCRYPT_BLOWFISH",
-            "value": "blowfish"
-        },
-        {
-            "name": "MCRYPT_BLOWFISH_COMPAT",
-            "value": "blowfish-compat"
-        },
-        {
-            "name": "MCRYPT_CAST_128",
-            "value": "cast-128"
-        },
-        {
-            "name": "MCRYPT_CAST_256",
-            "value": "cast-256"
-        },
-        {
-            "name": "MCRYPT_CRYPT",
-            "value": "crypt"
-        },
-        {
-            "name": "MCRYPT_DECRYPT",
-            "value": 1
-        },
-        {
-            "name": "MCRYPT_DES",
-            "value": "des"
-        },
-        {
-            "name": "MCRYPT_DEV_RANDOM",
-            "value": 0
-        },
-        {
-            "name": "MCRYPT_DEV_URANDOM",
-            "value": 1
-        },
-        {
-            "name": "MCRYPT_ENCRYPT",
-            "value": 0
-        },
-        {
-            "name": "MCRYPT_ENIGNA",
-            "value": "crypt"
-        },
-        {
-            "name": "MCRYPT_GOST",
-            "value": "gost"
-        },
-        {
-            "name": "MCRYPT_IDEA",
-            "value": "idea"
-        },
-        {
-            "name": "MCRYPT_LOKI97",
-            "value": "loki97"
-        },
-        {
-            "name": "MCRYPT_MARS",
-            "value": "mars"
-        },
-        {
-            "name": "MCRYPT_MODE_CBC",
-            "value": "cbc"
-        },
-        {
-            "name": "MCRYPT_MODE_CFB",
-            "value": "cfb"
-        },
-        {
-            "name": "MCRYPT_MODE_ECB",
-            "value": "ecb"
-        },
-        {
-            "name": "MCRYPT_MODE_NOFB",
-            "value": "nofb"
-        },
-        {
-            "name": "MCRYPT_MODE_OFB",
-            "value": "ofb"
-        },
-        {
-            "name": "MCRYPT_MODE_STREAM",
-            "value": "stream"
-        },
-        {
-            "name": "MCRYPT_PANAMA",
-            "value": "panama"
-        },
-        {
-            "name": "MCRYPT_RAND",
-            "value": 2
-        },
-        {
-            "name": "MCRYPT_RC2",
-            "value": "rc2"
-        },
-        {
-            "name": "MCRYPT_RC6",
-            "value": "rc6"
-        },
-        {
-            "name": "MCRYPT_RIJNDAEL_128",
-            "value": "rijndael-128"
-        },
-        {
-            "name": "MCRYPT_RIJNDAEL_192",
-            "value": "rijndael-192"
-        },
-        {
-            "name": "MCRYPT_RIJNDAEL_256",
-            "value": "rijndael-256"
-        },
-        {
-            "name": "MCRYPT_SAFER128",
-            "value": "safer-sk128"
-        },
-        {
-            "name": "MCRYPT_SAFER64",
-            "value": "safer-sk64"
-        },
-        {
-            "name": "MCRYPT_SAFERPLUS",
-            "value": "saferplus"
-        },
-        {
-            "name": "MCRYPT_SERPENT",
-            "value": "serpent"
-        },
-        {
-            "name": "MCRYPT_SKIPJACK",
-            "value": "skipjack"
-        },
-        {
-            "name": "MCRYPT_THREEWAY",
-            "value": "threeway"
-        },
-        {
-            "name": "MCRYPT_TRIPLEDES",
-            "value": "tripledes"
-        },
-        {
-            "name": "MCRYPT_TWOFISH",
-            "value": "twofish"
-        },
-        {
-            "name": "MCRYPT_WAKE",
-            "value": "wake"
-        },
-        {
-            "name": "MCRYPT_XTEA",
-            "value": "xtea"
-        },
-        {
             "name": "MON_1",
             "value": 131098
         },
@@ -2848,24 +1491,12 @@
             "value": 131106
         },
         {
-            "name": "MSG_DONTROUTE",
-            "value": 4
-        },
-        {
             "name": "MSG_EAGAIN",
             "value": 11
         },
         {
             "name": "MSG_ENOMSG",
             "value": 42
-        },
-        {
-            "name": "MSG_EOF",
-            "value": 512
-        },
-        {
-            "name": "MSG_EOR",
-            "value": 128
         },
         {
             "name": "MSG_EXCEPT",
@@ -2878,18 +1509,6 @@
         {
             "name": "MSG_NOERROR",
             "value": 2
-        },
-        {
-            "name": "MSG_OOB",
-            "value": 1
-        },
-        {
-            "name": "MSG_PEEK",
-            "value": 2
-        },
-        {
-            "name": "MSG_WAITALL",
-            "value": 256
         },
         {
             "name": "MW_AbsoluteIntent",
@@ -4232,400 +2851,72 @@
             "value": 13
         },
         {
-            "name": "MYSQLI_ASSOC",
-            "value": 1
-        },
-        {
-            "name": "MYSQLI_AUTO_INCREMENT_FLAG",
-            "value": 512
-        },
-        {
-            "name": "MYSQLI_BLOB_FLAG",
-            "value": 16
-        },
-        {
-            "name": "MYSQLI_BOTH",
-            "value": 3
-        },
-        {
-            "name": "MYSQLI_CLIENT_COMPRESS",
-            "value": 32
-        },
-        {
-            "name": "MYSQLI_CLIENT_FOUND_ROWS",
-            "value": 2
-        },
-        {
-            "name": "MYSQLI_CLIENT_IGNORE_SPACE",
-            "value": 256
-        },
-        {
-            "name": "MYSQLI_CLIENT_INTERACTIVE",
-            "value": 1024
-        },
-        {
-            "name": "MYSQLI_CLIENT_NO_SCHEMA",
-            "value": 16
-        },
-        {
-            "name": "MYSQLI_CLIENT_SSL",
-            "value": 2048
-        },
-        {
-            "name": "MYSQLI_CURSOR_TYPE_FOR_UPDATE",
-            "value": 2
-        },
-        {
-            "name": "MYSQLI_CURSOR_TYPE_NO_CURSOR",
-            "value": 0
-        },
-        {
-            "name": "MYSQLI_CURSOR_TYPE_READ_ONLY",
-            "value": 1
-        },
-        {
-            "name": "MYSQLI_CURSOR_TYPE_SCROLLABLE",
-            "value": 4
-        },
-        {
-            "name": "MYSQLI_DATA_TRUNCATED",
-            "value": 101
-        },
-        {
-            "name": "MYSQLI_GROUP_FLAG",
-            "value": 32768
-        },
-        {
-            "name": "MYSQLI_INIT_COMMAND",
-            "value": 3
-        },
-        {
-            "name": "MYSQLI_MULTIPLE_KEY_FLAG",
-            "value": 8
-        },
-        {
-            "name": "MYSQLI_NOT_NULL_FLAG",
-            "value": 1
-        },
-        {
-            "name": "MYSQLI_NO_DATA",
-            "value": 100
-        },
-        {
-            "name": "MYSQLI_NUM",
-            "value": 2
-        },
-        {
-            "name": "MYSQLI_NUM_FLAG",
-            "value": 32768
-        },
-        {
-            "name": "MYSQLI_OPT_CONNECT_TIMEOUT",
-            "value": 0
-        },
-        {
-            "name": "MYSQLI_OPT_LOCAL_INFILE",
-            "value": 8
-        },
-        {
-            "name": "MYSQLI_PART_KEY_FLAG",
-            "value": 16384
-        },
-        {
-            "name": "MYSQLI_PRI_KEY_FLAG",
-            "value": 2
-        },
-        {
-            "name": "MYSQLI_READ_DEFAULT_FILE",
-            "value": 4
-        },
-        {
-            "name": "MYSQLI_READ_DEFAULT_GROUP",
-            "value": 5
-        },
-        {
-            "name": "MYSQLI_REPORT_ALL",
-            "value": 255
-        },
-        {
-            "name": "MYSQLI_REPORT_ERROR",
-            "value": 1
-        },
-        {
-            "name": "MYSQLI_REPORT_INDEX",
-            "value": 4
-        },
-        {
-            "name": "MYSQLI_REPORT_OFF",
-            "value": 0
-        },
-        {
-            "name": "MYSQLI_REPORT_STRICT",
-            "value": 2
-        },
-        {
-            "name": "MYSQLI_RPL_ADMIN",
-            "value": 2
-        },
-        {
-            "name": "MYSQLI_RPL_MASTER",
-            "value": 0
-        },
-        {
-            "name": "MYSQLI_RPL_SLAVE",
-            "value": 1
-        },
-        {
-            "name": "MYSQLI_SET_CHARSET_NAME",
-            "value": 7
-        },
-        {
-            "name": "MYSQLI_SET_FLAG",
-            "value": 2048
-        },
-        {
-            "name": "MYSQLI_STMT_ATTR_CURSOR_TYPE",
-            "value": 1
-        },
-        {
-            "name": "MYSQLI_STMT_ATTR_PREFETCH_ROWS",
-            "value": 2
-        },
-        {
-            "name": "MYSQLI_STMT_ATTR_UPDATE_MAX_LENGTH",
-            "value": 0
-        },
-        {
-            "name": "MYSQLI_STORE_RESULT",
-            "value": 0
-        },
-        {
-            "name": "MYSQLI_TIMESTAMP_FLAG",
-            "value": 1024
-        },
-        {
-            "name": "MYSQLI_TYPE_BIT",
-            "value": 16
-        },
-        {
-            "name": "MYSQLI_TYPE_BLOB",
-            "value": 252
-        },
-        {
-            "name": "MYSQLI_TYPE_CHAR",
-            "value": 1
-        },
-        {
-            "name": "MYSQLI_TYPE_DATE",
-            "value": 10
-        },
-        {
-            "name": "MYSQLI_TYPE_DATETIME",
-            "value": 12
-        },
-        {
-            "name": "MYSQLI_TYPE_DECIMAL",
-            "value": 0
-        },
-        {
-            "name": "MYSQLI_TYPE_DOUBLE",
-            "value": 5
-        },
-        {
-            "name": "MYSQLI_TYPE_ENUM",
-            "value": 247
-        },
-        {
-            "name": "MYSQLI_TYPE_FLOAT",
-            "value": 4
-        },
-        {
-            "name": "MYSQLI_TYPE_GEOMETRY",
-            "value": 255
-        },
-        {
-            "name": "MYSQLI_TYPE_INT24",
-            "value": 9
-        },
-        {
-            "name": "MYSQLI_TYPE_INTERVAL",
-            "value": 247
-        },
-        {
-            "name": "MYSQLI_TYPE_LONG",
-            "value": 3
-        },
-        {
-            "name": "MYSQLI_TYPE_LONGLONG",
-            "value": 8
-        },
-        {
-            "name": "MYSQLI_TYPE_LONG_BLOB",
-            "value": 251
-        },
-        {
-            "name": "MYSQLI_TYPE_MEDIUM_BLOB",
-            "value": 250
-        },
-        {
-            "name": "MYSQLI_TYPE_NEWDATE",
-            "value": 14
-        },
-        {
-            "name": "MYSQLI_TYPE_NEWDECIMAL",
-            "value": 246
-        },
-        {
-            "name": "MYSQLI_TYPE_NULL",
-            "value": 6
-        },
-        {
-            "name": "MYSQLI_TYPE_SET",
-            "value": 248
-        },
-        {
-            "name": "MYSQLI_TYPE_SHORT",
-            "value": 2
-        },
-        {
-            "name": "MYSQLI_TYPE_STRING",
-            "value": 254
-        },
-        {
-            "name": "MYSQLI_TYPE_TIME",
-            "value": 11
-        },
-        {
-            "name": "MYSQLI_TYPE_TIMESTAMP",
-            "value": 7
-        },
-        {
-            "name": "MYSQLI_TYPE_TINY",
-            "value": 1
-        },
-        {
-            "name": "MYSQLI_TYPE_TINY_BLOB",
-            "value": 249
-        },
-        {
-            "name": "MYSQLI_TYPE_VAR_STRING",
-            "value": 253
-        },
-        {
-            "name": "MYSQLI_TYPE_YEAR",
-            "value": 13
-        },
-        {
-            "name": "MYSQLI_UNIQUE_KEY_FLAG",
-            "value": 4
-        },
-        {
-            "name": "MYSQLI_UNSIGNED_FLAG",
-            "value": 32
-        },
-        {
-            "name": "MYSQLI_USE_RESULT",
-            "value": 1
-        },
-        {
-            "name": "MYSQLI_ZEROFILL_FLAG",
-            "value": 64
-        },
-        {
-            "name": "MYSQL_ASSOC",
-            "value": 1
-        },
-        {
-            "name": "MYSQL_BOTH",
-            "value": 3
-        },
-        {
-            "name": "MYSQL_CLIENT_COMPRESS",
-            "value": 32
-        },
-        {
-            "name": "MYSQL_CLIENT_IGNORE_SPACE",
-            "value": 256
-        },
-        {
-            "name": "MYSQL_CLIENT_INTERACTIVE",
-            "value": 1024
-        },
-        {
-            "name": "MYSQL_CLIENT_SSL",
-            "value": 2048
-        },
-        {
-            "name": "MYSQL_NUM",
-            "value": 2
-        },
-        {
             "name": "M_1_PI",
-            "value": 0.31830988618379
+            "value": 0.31830988618379067154
         },
         {
             "name": "M_2_PI",
-            "value": 0.63661977236758
+            "value": 0.63661977236758134308
         },
         {
             "name": "M_2_SQRTPI",
-            "value": 1.1283791670955
+            "value": 1.12837916709551257390
         },
         {
             "name": "M_E",
-            "value": 2.718281828459
+            "value": 2.7182818284590452354
         },
         {
             "name": "M_EULER",
-            "value": 0.57721566490153
+            "value": 0.57721566490153286061
         },
         {
             "name": "M_LN10",
-            "value": 2.302585092994
+            "value": 2.30258509299404568402
         },
         {
             "name": "M_LN2",
-            "value": 0.69314718055995
+            "value": 0.69314718055994530942
         },
         {
             "name": "M_LNPI",
-            "value": 1.1447298858494
+            "value": 1.14472988584940017414
         },
         {
             "name": "M_LOG10E",
-            "value": 0.43429448190325
+            "value": 0.43429448190325182765
         },
         {
             "name": "M_LOG2E",
-            "value": 1.442695040889
+            "value": 1.4426950408889634074
         },
         {
             "name": "M_PI",
-            "value": 3.1415926535898
+            "value": 3.14159265358979323846
         },
         {
             "name": "M_PI_2",
-            "value": 1.5707963267949
+            "value": 1.57079632679489661923
         },
         {
             "name": "M_PI_4",
-            "value": 0.78539816339745
+            "value": 0.78539816339744830962
         },
         {
             "name": "M_SQRT1_2",
-            "value": 0.70710678118655
+            "value": 0.70710678118654752440
         },
         {
             "name": "M_SQRT2",
-            "value": 1.4142135623731
+            "value": 1.41421356237309504880
         },
         {
             "name": "M_SQRT3",
-            "value": 1.7320508075689
+            "value": 1.73205080756887729352
         },
         {
             "name": "M_SQRTPI",
-            "value": 1.7724538509055
+            "value": 1.77245385090551602729
         },
         {
             "name": "NIL",
@@ -4638,250 +2929,6 @@
         {
             "name": "NULL",
             "value": null
-        },
-        {
-            "name": "OCI_ASSOC",
-            "value": 1
-        },
-        {
-            "name": "OCI_BOTH",
-            "value": 3
-        },
-        {
-            "name": "OCI_B_BFILE",
-            "value": 114
-        },
-        {
-            "name": "OCI_B_BIN",
-            "value": 23
-        },
-        {
-            "name": "OCI_B_BLOB",
-            "value": 113
-        },
-        {
-            "name": "OCI_B_CFILEE",
-            "value": 115
-        },
-        {
-            "name": "OCI_B_CLOB",
-            "value": 112
-        },
-        {
-            "name": "OCI_B_CURSOR",
-            "value": 116
-        },
-        {
-            "name": "OCI_B_INT",
-            "value": 3
-        },
-        {
-            "name": "OCI_B_NTY",
-            "value": 108
-        },
-        {
-            "name": "OCI_B_NUM",
-            "value": 2
-        },
-        {
-            "name": "OCI_B_ROWID",
-            "value": 104
-        },
-        {
-            "name": "OCI_COMMIT_ON_SUCCESS",
-            "value": 32
-        },
-        {
-            "name": "OCI_DEFAULT",
-            "value": 0
-        },
-        {
-            "name": "OCI_DESCRIBE_ONLY",
-            "value": 16
-        },
-        {
-            "name": "OCI_DTYPE_FILE",
-            "value": 56
-        },
-        {
-            "name": "OCI_DTYPE_LOB",
-            "value": 50
-        },
-        {
-            "name": "OCI_DTYPE_ROWID",
-            "value": 54
-        },
-        {
-            "name": "OCI_D_FILE",
-            "value": 56
-        },
-        {
-            "name": "OCI_D_LOB",
-            "value": 50
-        },
-        {
-            "name": "OCI_D_ROWID",
-            "value": 54
-        },
-        {
-            "name": "OCI_EXACT_FETCH",
-            "value": 2
-        },
-        {
-            "name": "OCI_FETCHSTATEMENT_BY_COLUMN",
-            "value": 16
-        },
-        {
-            "name": "OCI_FETCHSTATEMENT_BY_ROW",
-            "value": 32
-        },
-        {
-            "name": "OCI_LOB_BUFFER_FREE",
-            "value": 1
-        },
-        {
-            "name": "OCI_NUM",
-            "value": 2
-        },
-        {
-            "name": "OCI_RETURN_LOBS",
-            "value": 8
-        },
-        {
-            "name": "OCI_RETURN_NULLS",
-            "value": 4
-        },
-        {
-            "name": "OCI_SEEK_CUR",
-            "value": 1
-        },
-        {
-            "name": "OCI_SEEK_END",
-            "value": 2
-        },
-        {
-            "name": "OCI_SEEK_SET",
-            "value": 0
-        },
-        {
-            "name": "OCI_SYSDATE",
-            "value": "SYSDATE"
-        },
-        {
-            "name": "OCI_SYSDBA",
-            "value": 2
-        },
-        {
-            "name": "OCI_SYSOPER",
-            "value": 4
-        },
-        {
-            "name": "OCI_TEMP_BLOB",
-            "value": 1
-        },
-        {
-            "name": "OCI_TEMP_CLOB",
-            "value": 2
-        },
-        {
-            "name": "OPENSSL_ALGO_RMD160",
-            "value": 10
-        },
-        {
-            "name": "OPENSSL_ALGO_SHA512",
-            "value": 9
-        },
-        {
-            "name": "OPENSSL_ALGO_SHA384",
-            "value": 8
-        },
-        {
-            "name": "OPENSSL_ALGO_SHA256",
-            "value": 7
-        },
-        {
-            "name": "OPENSSL_ALGO_SHA224",
-            "value": 6
-        },
-        {
-            "name": "OPENSSL_ALGO_DSS1",
-            "value": 5
-        },
-        {
-            "name": "OPENSSL_ALGO_MD2",
-            "value": 4
-        },
-        {
-            "name": "OPENSSL_ALGO_MD4",
-            "value": 3
-        },
-        {
-            "name": "OPENSSL_ALGO_MD5",
-            "value": 2
-        },
-        {
-            "name": "OPENSSL_ALGO_SHA1",
-            "value": 1
-        },
-        {
-            "name": "OPENSSL_CIPHER_3DES",
-            "value": 4
-        },
-        {
-            "name": "OPENSSL_CIPHER_DES",
-            "value": 3
-        },
-        {
-            "name": "OPENSSL_CIPHER_RC2_128",
-            "value": 1
-        },
-        {
-            "name": "OPENSSL_CIPHER_RC2_40",
-            "value": 0
-        },
-        {
-            "name": "OPENSSL_CIPHER_RC2_64",
-            "value": 2
-        },
-        {
-            "name": "OPENSSL_KEYTYPE_DH",
-            "value": 2
-        },
-        {
-            "name": "OPENSSL_KEYTYPE_DSA",
-            "value": 1
-        },
-        {
-            "name": "OPENSSL_KEYTYPE_EC",
-            "value": 3
-        },
-        {
-            "name": "OPENSSL_KEYTYPE_RSA",
-            "value": 0
-        },
-        {
-            "name": "OPENSSL_NO_PADDING",
-            "value": 3
-        },
-        {
-            "name": "OPENSSL_PKCS1_OAEP_PADDING",
-            "value": 4
-        },
-        {
-            "name": "OPENSSL_PKCS1_PADDING",
-            "value": 1
-        },
-        {
-            "name": "OPENSSL_SSLV23_PADDING",
-            "value": 2
-        },
-        {
-            "name": "OPENSSL_VERSION_NUMBER",
-            "value": 9469999
-        },
-        {
-            "name": "OPENSSL_VERSION_TEXT",
-            "value": "OpenSSL 0.9.8b 04 May 2006"
         },
         {
             "name": "OP_ANONYMOUS",
@@ -4920,6 +2967,14 @@
             "value": 16
         },
         {
+            "name": "PASSWORD_BCRYPT",
+            "value": 1
+        },
+        {
+            "name": "PASSWORD_DEFAULT",
+            "value": 1
+        },
+        {
             "name": "PATHINFO_BASENAME",
             "value": 2
         },
@@ -4940,10 +2995,6 @@
             "value": ":"
         },
         {
-            "name": "PCRE_VERSION",
-            "value": "7.3 2007-08-28"
-        },
-        {
             "name": "PEAR_EXTENSION_DIR",
             "value": ""
         },
@@ -4954,10 +3005,6 @@
         {   "name": "PHP_BINARY",
             "type": "String",
             "desc": "Dynamic constant - current_executable_path()"
-        },
-        {
-            "name": "PHP_BINARY_READ",
-            "value": 2
         },
         {
             "name": "PHP_BINDIR",
@@ -5001,25 +3048,9 @@
             "value": ""
         },
         {
-            "name": "PHP_NORMAL_READ",
-            "value": 1
-        },
-        {
             "name": "PHP_OS",
             "type": "String",
             "desc": "Dynamic constant - php_uname()"
-        },
-        {
-            "name": "PHP_OUTPUT_HANDLER_CONT",
-            "value": 2
-        },
-        {
-            "name": "PHP_OUTPUT_HANDLER_END",
-            "value": 4
-        },
-        {
-            "name": "PHP_OUTPUT_HANDLER_START",
-            "value": 1
         },
         {
             "name": "PHP_PREFIX",
@@ -5034,40 +3065,8 @@
             "value": ""
         },
         {
-            "name": "PHP_URL_FRAGMENT",
-            "value": 7
-        },
-        {
-            "name": "PHP_URL_HOST",
-            "value": 1
-        },
-        {
-            "name": "PHP_URL_PASS",
-            "value": 4
-        },
-        {
-            "name": "PHP_URL_PATH",
-            "value": 5
-        },
-        {
-            "name": "PHP_URL_PORT",
-            "value": 2
-        },
-        {
-            "name": "PHP_URL_QUERY",
-            "value": 6
-        },
-        {
-            "name": "PHP_URL_SCHEME",
-            "value": 0
-        },
-        {
-            "name": "PHP_URL_USER",
-            "value": 3
-        },
-        {
             "name": "PHP_VERSION",
-            "value": "5.4.999-hiphop"
+            "value": "5.6.99-hhvm"
         },
         {
             "name": "PHP_MAJOR_VERSION",
@@ -5075,55 +3074,19 @@
         },
         {
             "name": "PHP_MINOR_VERSION",
-            "value": 4
+            "value": 6
         },
         {
             "name": "PHP_RELEASE_VERSION",
-            "value": 999
+            "value": 99
         },
         {
             "name": "PHP_VERSION_ID",
-            "value": 504999
+            "value": 50699
         },
         {
             "name": "PHP_EXTRA_VERSION",
-            "value": ""
-        },
-        {
-            "name": "PKCS7_BINARY",
-            "value": 128
-        },
-        {
-            "name": "PKCS7_DETACHED",
-            "value": 64
-        },
-        {
-            "name": "PKCS7_NOATTR",
-            "value": 256
-        },
-        {
-            "name": "PKCS7_NOCERTS",
-            "value": 2
-        },
-        {
-            "name": "PKCS7_NOCHAIN",
-            "value": 8
-        },
-        {
-            "name": "PKCS7_NOINTERN",
-            "value": 16
-        },
-        {
-            "name": "PKCS7_NOSIGS",
-            "value": 4
-        },
-        {
-            "name": "PKCS7_NOVERIFY",
-            "value": 32
-        },
-        {
-            "name": "PKCS7_TEXT",
-            "value": 1
+            "value": "hhvm"
         },
         {
             "name": "PM_STR",
@@ -5156,54 +3119,6 @@
         {
             "name": "PNG_NO_FILTER",
             "value": 0
-        },
-        {
-            "name": "PREG_BACKTRACK_LIMIT_ERROR",
-            "value": 2
-        },
-        {
-            "name": "PREG_BAD_UTF8_ERROR",
-            "value": 4
-        },
-        {
-            "name": "PREG_GREP_INVERT",
-            "value": 1
-        },
-        {
-            "name": "PREG_INTERNAL_ERROR",
-            "value": 1
-        },
-        {
-            "name": "PREG_NO_ERROR",
-            "value": 0
-        },
-        {
-            "name": "PREG_OFFSET_CAPTURE",
-            "value": 256
-        },
-        {
-            "name": "PREG_PATTERN_ORDER",
-            "value": 1
-        },
-        {
-            "name": "PREG_RECURSION_LIMIT_ERROR",
-            "value": 3
-        },
-        {
-            "name": "PREG_SET_ORDER",
-            "value": 2
-        },
-        {
-            "name": "PREG_SPLIT_DELIM_CAPTURE",
-            "value": 2
-        },
-        {
-            "name": "PREG_SPLIT_NO_EMPTY",
-            "value": 1
-        },
-        {
-            "name": "PREG_SPLIT_OFFSET_CAPTURE",
-            "value": 4
         },
         {
             "name": "PRIO_PGRP",
@@ -5444,6 +3359,18 @@
         {
             "name": "SIG_IGN",
             "value": 1
+        },
+        {
+            "name": "SIG_BLOCK",
+            "value": 0
+        },
+        {
+            "name": "SIG_UNBLOCK",
+            "value": 1
+        },
+        {
+            "name": "SIG_SETMASK",
+            "value": 2
         },
         {
             "name": "SOAP_1_1",
@@ -5938,42 +3865,6 @@
             "value": 54
         },
         {
-            "name": "SOCK_DGRAM",
-            "value": 2
-        },
-        {
-            "name": "SOCK_RAW",
-            "value": 3
-        },
-        {
-            "name": "SOCK_RDM",
-            "value": 4
-        },
-        {
-            "name": "SOCK_SEQPACKET",
-            "value": 5
-        },
-        {
-            "name": "SOCK_STREAM",
-            "value": 1
-        },
-        {
-            "name": "SOL_SOCKET",
-            "value": 1
-        },
-        {
-            "name": "SOL_TCP",
-            "value": 6
-        },
-        {
-            "name": "SOL_UDP",
-            "value": 17
-        },
-        {
-            "name": "SOMAXCONN",
-            "value": 128
-        },
-        {
             "name": "SORTARRIVAL",
             "value": 1
         },
@@ -6010,8 +3901,16 @@
             "value": 3
         },
         {
+            "name": "SORT_FLAG_CASE",
+            "value": 8
+        },
+        {
             "name": "SORT_LOCALE_STRING",
             "value": 5
+        },
+        {
+            "name": "SORT_NATURAL",
+            "value": 6
         },
         {
             "name": "SORT_NUMERIC",
@@ -6026,72 +3925,12 @@
             "value": 2
         },
         {
-            "name": "SO_BROADCAST",
-            "value": 6
-        },
-        {
-            "name": "SO_DEBUG",
-            "value": 1
-        },
-        {
-            "name": "SO_DONTROUTE",
-            "value": 5
-        },
-        {
-            "name": "SO_ERROR",
-            "value": 4
-        },
-        {
             "name": "SO_FREE",
             "value": 8
         },
         {
-            "name": "SO_KEEPALIVE",
-            "value": 9
-        },
-        {
-            "name": "SO_LINGER",
-            "value": 13
-        },
-        {
             "name": "SO_NOSERVER",
             "value": 16
-        },
-        {
-            "name": "SO_OOBINLINE",
-            "value": 10
-        },
-        {
-            "name": "SO_RCVBUF",
-            "value": 8
-        },
-        {
-            "name": "SO_RCVLOWAT",
-            "value": 18
-        },
-        {
-            "name": "SO_RCVTIMEO",
-            "value": 20
-        },
-        {
-            "name": "SO_REUSEADDR",
-            "value": 2
-        },
-        {
-            "name": "SO_SNDBUF",
-            "value": 7
-        },
-        {
-            "name": "SO_SNDLOWAT",
-            "value": 19
-        },
-        {
-            "name": "SO_SNDTIMEO",
-            "value": 21
-        },
-        {
-            "name": "SO_TYPE",
-            "value": 3
         },
         {
             "name": "SQLT_AFC",
@@ -6232,18 +4071,6 @@
         {
             "name": "STREAM_ENFORCE_SAFE_MODE",
             "value": 4
-        },
-        {
-            "name": "STREAM_FILTER_ALL",
-            "value": 3
-        },
-        {
-            "name": "STREAM_FILTER_READ",
-            "value": 1
-        },
-        {
-            "name": "STREAM_FILTER_WRITE",
-            "value": 2
         },
         {
             "name": "STREAM_IGNORE_URL",
@@ -6398,14 +4225,6 @@
             "value": 1
         },
         {
-            "name": "STREAM_URL_STAT_LINK",
-            "value": 1
-        },
-        {
-            "name": "STREAM_URL_STAT_QUIET",
-            "value": 2
-        },
-        {
             "name": "STREAM_USE_PATH",
             "value": 1
         },
@@ -6527,6 +4346,10 @@
         },
         {
             "name": "T_BREAK",
+            "type": "Int64"
+        },
+        {
+            "name": "T_CALLABLE",
             "type": "Int64"
         },
         {
@@ -6702,6 +4525,10 @@
             "type": "Int64"
         },
         {
+            "name": "T_FINALLY",
+            "type": "Int64"
+        },
+        {
             "name": "T_FMT",
             "value": 3
         },
@@ -6874,6 +4701,10 @@
             "type": "Int64"
         },
         {
+            "name": "T_ONUMBER",
+            "type": "Int64"
+        },
+        {
             "name": "T_OPEN_TAG",
             "type": "Int64"
         },
@@ -6891,6 +4722,14 @@
         },
         {
             "name": "T_PLUS_EQUAL",
+            "type": "Int64"
+        },
+        {
+            "name": "T_POW",
+            "type": "Int64"
+        },
+        {
+            "name": "T_POW_EQUAL",
             "type": "Int64"
         },
         {
@@ -7006,6 +4845,46 @@
             "type": "Int64"
         },
         {
+            "name": "T_XHP_ATTRIBUTE",
+            "type": "Int64"
+        },
+        {
+            "name": "T_XHP_CATEGORY",
+            "type": "Int64"
+        },
+        {
+            "name": "T_XHP_CATEGORY_LABEL",
+            "type": "Int64"
+        },
+        {
+            "name": "T_XHP_CHILDREN",
+            "type": "Int64"
+        },
+        {
+            "name": "T_ENUM",
+            "type": "Int64"
+        },
+        {
+            "name": "T_XHP_LABEL",
+            "type": "Int64"
+        },
+        {
+            "name": "T_XHP_REQUIRED",
+            "type": "Int64"
+        },
+        {
+            "name": "T_XHP_TAG_LT",
+            "type": "Int64"
+        },
+        {
+            "name": "T_XHP_TAG_GT",
+            "type": "Int64"
+        },
+        {
+            "name": "T_XHP_TEXT",
+            "type": "Int64"
+        },
+        {
             "name": "T_XOR_EQUAL",
             "type": "Int64"
         },
@@ -7014,12 +4893,8 @@
             "type": "Int64"
         },
         {
-            "name": "ULOC_ACTUAL_LOCALE",
-            "value": 0
-        },
-        {
-            "name": "ULOC_VALID_LOCALE",
-            "value": 1
+            "name": "T_ELLIPSIS",
+            "type": "Int64"
         },
         {
             "name": "UNKNOWN_TYPE",

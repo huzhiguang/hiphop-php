@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -28,7 +28,10 @@ const char *Statement::Names[] = {
 };
 
 Statement::Statement(STATEMENT_CONSTRUCTOR_BASE_PARAMETERS)
-    : Construct(scope, loc), m_kindOf(kindOf) {
+  : Construct(scope, loc),
+    m_kindOf(kindOf),
+    m_labelScope(labelScope) {
+  assert(m_labelScope != nullptr);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

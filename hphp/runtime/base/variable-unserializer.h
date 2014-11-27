@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,6 +18,7 @@
 #define incl_HPHP_VARIABLE_UNSERIALIZER_H_
 
 #include "hphp/runtime/base/types.h"
+#include "hphp/runtime/base/type-variant.h"
 #include "hphp/runtime/base/smart-containers.h"
 
 namespace HPHP {
@@ -31,6 +32,7 @@ public:
   enum class Type {
     Serialize,
     APCSerialize,
+    DebuggerSerialize
   };
 
 public:
@@ -41,20 +43,21 @@ public:
    */
   VariableUnserializer(const char *str, size_t len, Type type,
                        bool allowUnknownSerializableClass = false,
-                       CArrRef class_whitelist = null_array)
+                       const Array& class_whitelist = null_array)
       : m_type(type), m_buf(str), m_end(str + len),
         m_unknownSerializable(allowUnknownSerializableClass),
         m_classWhiteList(class_whitelist) {}
   VariableUnserializer(const char *str, const char *end, Type type,
                        bool allowUnknownSerializableClass = false,
-                       CArrRef class_whitelist = null_array)
+                       const Array& class_whitelist = null_array)
       : m_type(type), m_buf(str), m_end(end),
         m_unknownSerializable(allowUnknownSerializableClass),
         m_classWhiteList(class_whitelist) {}
 
+  void set(const char *buf, const char *end);
   Type getType() const { return m_type;}
   bool allowUnknownSerializableClass() const { return m_unknownSerializable;}
-  bool isWhitelistedClass(CStrRef cls_name) const;
+  bool isWhitelistedClass(const String& cls_name) const;
 
   Variant unserialize();
   Variant unserializeKey();
@@ -134,7 +137,7 @@ public:
   smart::vector<RefInfo> m_refs;
   smart::list<Variant> m_vars;
   bool m_unknownSerializable;
-  CArrRef m_classWhiteList;    // classes allowed to be unserialized
+  const Array& m_classWhiteList;    // classes allowed to be unserialized
 
   void check() {
     if (m_buf >= m_end) {

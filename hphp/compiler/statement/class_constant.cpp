@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -31,9 +31,9 @@ using namespace HPHP;
 
 ClassConstant::ClassConstant
 (STATEMENT_CONSTRUCTOR_PARAMETERS, std::string typeConstraint,
-  ExpressionListPtr exp)
+ ExpressionListPtr exp, bool abstract)
   : Statement(STATEMENT_CONSTRUCTOR_PARAMETER_VALUES(ClassConstant)),
-    m_typeConstraint(typeConstraint), m_exp(exp) {
+    m_typeConstraint(typeConstraint), m_exp(exp), m_abstract(abstract) {
 }
 
 StatementPtr ClassConstant::clone() {
@@ -54,20 +54,35 @@ void ClassConstant::onParseRecur(AnalysisResultConstPtr ar,
                    "Traits cannot have constants");
   }
 
-  for (int i = 0; i < m_exp->getCount(); i++) {
-    AssignmentExpressionPtr assignment =
-      dynamic_pointer_cast<AssignmentExpression>((*m_exp)[i]);
+  if (isAbstract()) {
+    for (int i = 0; i < m_exp->getCount(); i++) {
+      ConstantExpressionPtr exp =
+        dynamic_pointer_cast<ConstantExpression>((*m_exp)[i]);
+      const std::string &name = exp->getName();
+      if (constants->isPresent(name)) {
+        exp->parseTimeFatal(Compiler::DeclaredConstantTwice,
+                                   "Cannot redeclare %s::%s",
+                                   scope->getOriginalName().c_str(),
+                                   name.c_str());
+      }
+      // Unlike below, there's no reason to call parseRecur
+    }
+  } else {
+    for (int i = 0; i < m_exp->getCount(); i++) {
+      AssignmentExpressionPtr assignment =
+        dynamic_pointer_cast<AssignmentExpression>((*m_exp)[i]);
 
-    ExpressionPtr var = assignment->getVariable();
-    const std::string &name =
-      dynamic_pointer_cast<ConstantExpression>(var)->getName();
-    if (constants->isPresent(name)) {
-      assignment->parseTimeFatal(Compiler::DeclaredConstantTwice,
-                                 "Cannot redeclare %s::%s",
-                                 scope->getOriginalName().c_str(),
-                                 name.c_str());
-    } else {
-      assignment->onParseRecur(ar, scope);
+      ExpressionPtr var = assignment->getVariable();
+      const std::string &name =
+        dynamic_pointer_cast<ConstantExpression>(var)->getName();
+      if (constants->isPresent(name)) {
+        assignment->parseTimeFatal(Compiler::DeclaredConstantTwice,
+                                   "Cannot redeclare %s::%s",
+                                   scope->getOriginalName().c_str(),
+                                   name.c_str());
+      } else {
+        assignment->onParseRecur(ar, scope);
+      }
     }
   }
 }
@@ -106,36 +121,52 @@ void ClassConstant::setNthKid(int n, ConstructPtr cp) {
 }
 
 StatementPtr ClassConstant::preOptimize(AnalysisResultConstPtr ar) {
-  for (int i = 0; i < m_exp->getCount(); i++) {
-    AssignmentExpressionPtr assignment =
-      dynamic_pointer_cast<AssignmentExpression>((*m_exp)[i]);
+  if (!isAbstract()) {
+    for (int i = 0; i < m_exp->getCount(); i++) {
+      AssignmentExpressionPtr assignment =
+        dynamic_pointer_cast<AssignmentExpression>((*m_exp)[i]);
 
-    ExpressionPtr var = assignment->getVariable();
-    ExpressionPtr val = assignment->getValue();
+      ExpressionPtr var = assignment->getVariable();
+      ExpressionPtr val = assignment->getValue();
 
-    const std::string &name =
-      dynamic_pointer_cast<ConstantExpression>(var)->getName();
+      const std::string &name =
+        dynamic_pointer_cast<ConstantExpression>(var)->getName();
 
-    Symbol *sym = getScope()->getConstants()->getSymbol(name);
-    Lock lock(BlockScope::s_constMutex);
-    if (sym->getValue() != val) {
-      getScope()->addUpdates(BlockScope::UseKindConstRef);
-      sym->setValue(val);
+      Symbol *sym = getScope()->getConstants()->getSymbol(name);
+      Lock lock(BlockScope::s_constMutex);
+      if (sym->getValue() != val) {
+        getScope()->addUpdates(BlockScope::UseKindConstRef);
+        sym->setValue(val);
+      }
     }
   }
   return StatementPtr();
 }
 
-void ClassConstant::inferTypes(AnalysisResultPtr ar) {
-  m_exp->inferAndCheck(ar, Type::Some, false);
+///////////////////////////////////////////////////////////////////////////////
+
+void ClassConstant::outputCodeModel(CodeGenerator &cg) {
+  auto numProps = m_typeConstraint.empty() ? 2 : 3;
+  cg.printObjectHeader("ConstantStatement", numProps);
+  if (!m_typeConstraint.empty()) {
+    cg.printPropertyHeader("typeAnnotation");
+    cg.printTypeExpression(m_typeConstraint);
+  }
+  cg.printPropertyHeader("expressions");
+  cg.printExpressionVector(m_exp);
+  cg.printPropertyHeader("sourceLocation");
+  cg.printLocation(this->getLocation());
+  cg.printObjectFooter();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // code generation functions
 
 void ClassConstant::outputPHP(CodeGenerator &cg, AnalysisResultPtr ar) {
+  if (isAbstract()) {
+    cg_printf("abstract ");
+  }
   cg_printf("const ");
   m_exp->outputPHP(cg, ar);
   cg_printf(";\n");
 }
-

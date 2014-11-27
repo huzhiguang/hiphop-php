@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,18 +19,35 @@
 #include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/file.h"
 #include "hphp/runtime/base/stream-wrapper.h"
+#include "hphp/runtime/base/user-file.h"
+#include "hphp/runtime/base/user-directory.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class UserStreamWrapper : public Stream::Wrapper {
- public:
-  UserStreamWrapper(CStrRef name, CStrRef clsname);
-  virtual File* open(CStrRef filename, CStrRef mode,
-                     int options, CVarRef context);
- private:
+struct UserStreamWrapper final : Stream::Wrapper {
+  UserStreamWrapper(const String& name, Class*, int flags);
+
+  File* open(const String& filename, const String& mode,
+             int options, const Variant& context) override;
+  int access(const String& path, int mode) override;
+  int lstat(const String& path, struct stat* buf) override;
+  int stat(const String& path, struct stat* buf) override;
+  int unlink(const String& path) override;
+  int rename(const String& oldname, const String& newname) override;
+  int mkdir(const String& path, int mode, int options) override;
+  int rmdir(const String& path, int options) override;
+  Directory* opendir(const String& path) override;
+  bool touch(const String& path, int64_t mtime, int64_t atime);
+  bool chmod(const String& path, int64_t mode);
+  bool chown(const String& path, int64_t uid);
+  bool chown(const String& path, const String& uid);
+  bool chgrp(const String& path, int64_t gid);
+  bool chgrp(const String& path, const String& gid);
+
+private:
   String m_name;
-  Class *m_cls;
+  LowClassPtr m_cls;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,8 +17,14 @@
 #ifndef incl_HPHP_STACKTRACE_H_
 #define incl_HPHP_STACKTRACE_H_
 
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "hphp/util/portability.h"
+#include "hphp/util/compatibility.h"
+
 #include <dlfcn.h>
-#include "hphp/util/base.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -28,7 +34,6 @@ namespace HPHP {
  */
 class StackTraceBase {
 public:
-  DECLARE_BOOST_TYPES(Frame);
   class Frame {
   public:
     explicit Frame(void *_bt) : bt(_bt), lineno(0), offset(0) {}
@@ -42,6 +47,8 @@ public:
 
 public:
   static bool Enabled;
+  static const char** FunctionBlacklist;
+  static unsigned int FunctionBlacklistCount;
 
 protected:
   StackTraceBase();
@@ -68,7 +75,6 @@ protected:
 
 class StackTrace : public StackTraceBase {
 public:
-  DECLARE_BOOST_TYPES(Frame);
   class Frame : public StackTraceBase::Frame {
   public:
     explicit Frame(void *_bt) : StackTraceBase::Frame(_bt) {}
@@ -84,7 +90,7 @@ public:
   /**
    * Translate a frame pointer to file name and line number pair.
    */
-  static FramePtr Translate(void *bt);
+  static std::shared_ptr<Frame> Translate(void *bt);
 
   /**
    * Translate the frame pointer of a PHP function using the perf map.
@@ -117,7 +123,7 @@ public:
    * Get frames in raw pointers or translated frames.
    */
   void get(std::vector<void*> &bt) const { bt = m_bt_pointers;}
-  void get(FramePtrVec &frames) const;
+  void get(std::vector<std::shared_ptr<Frame>> &frames) const;
   std::string hexEncode(int minLevel = 0, int maxLevel = 999) const;
 
 private:
@@ -147,8 +153,8 @@ public:
   /**
    * Log stacktrace into the given file.
    */
-  void log(const char *errorType, const char * fname, const char *pid,
-           const char *buildId, int debuggerCount) const;
+  void log(const char *errorType, int fd, const char *buildId,
+           int debuggerCount) const;
 
   /**
    * Add extra information to log together with a crash stacktrace log.

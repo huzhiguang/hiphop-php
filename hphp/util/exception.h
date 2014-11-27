@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,14 +13,15 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #ifndef incl_HPHP_EXCEPTION_H_
 #define incl_HPHP_EXCEPTION_H_
 
-#include "hphp/util/stack-trace.h"
+#include <string>
+#include <stdexcept>
 #include <stdarg.h>
 
-#include <string>
+#include "hphp/util/portability.h"
+#include "hphp/util/stack-trace.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -34,23 +35,14 @@ namespace HPHP {
     throw *this; \
   }
 
-class Exception : public std::exception {
-public:
-  Exception(const char *fmt, ...) ATTRIBUTE_PRINTF(2,3);
+struct Exception : std::exception {
+  explicit Exception() = default;
+  explicit Exception(const char *fmt, ...) ATTRIBUTE_PRINTF(2,3);
   explicit Exception(const std::string& msg);
   Exception(const Exception &e);
-  Exception();
 
-  /**
-   * Subclass can call this function to format variable length of parameters.
-   *
-   * class MyException : public Exception {
-   * public:
-   *   MyException(const char *fmt, ...) {
-   *     va_list ap; va_start(ap, fmt); Format(fmt, ap); va_end(ap);
-   *   }
-   * };
-   */
+  // Try not to use this function (or the other varargs-based things) in new
+  // code.  (You probably shouldn't be using Exception directly either.)
   void format(const char *fmt, va_list ap) ATTRIBUTE_PRINTF(2,0);
 
   void setMessage(const char *msg) { m_msg = msg ? msg : "";}
@@ -73,7 +65,6 @@ public:
   const std::string &getMessage() const { return m_msg;}
 
 protected:
-  mutable bool m_handled;
   mutable std::string m_msg;
   mutable std::string m_what;
 };
@@ -82,8 +73,8 @@ protected:
 
 class FileOpenException : public Exception {
 public:
-  explicit FileOpenException(const char *filename)
-      : Exception("Unable to open file %s", filename) {
+  explicit FileOpenException(const std::string& filename)
+      : Exception("Unable to open file %s", filename.c_str()) {
   }
 
   EXCEPTION_COMMON_IMPL(FileOpenException);

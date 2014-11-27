@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,13 +15,19 @@
 */
 
 #include "hphp/runtime/base/variable-unserializer.h"
+#include <algorithm>
 #include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/base/zend-strtod.h"
 #include "hphp/runtime/base/array-iterator.h"
-#include "hphp/runtime/ext/ext_class.h"
+#include "hphp/runtime/ext/std/ext_std_classobj.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
+
+void VariableUnserializer::set(const char *buf, const char *end) {
+  m_buf = buf;
+  m_end = end;
+}
 
 Variant VariableUnserializer::unserialize() {
   Variant v;
@@ -69,14 +75,14 @@ Variant &VariableUnserializer::addVar() {
   return m_vars.back();
 }
 
-bool VariableUnserializer::isWhitelistedClass(CStrRef cls_name) const {
+bool VariableUnserializer::isWhitelistedClass(const String& cls_name) const {
   if (m_type != Type::Serialize || m_classWhiteList.isNull()) {
     return true;
   }
   if (!m_classWhiteList.isNull() && !m_classWhiteList.empty()) {
     for (ArrayIter iter(m_classWhiteList); iter; ++iter) {
-      CVarRef value(iter.secondRef());
-      if (f_is_subclass_of(cls_name, value.toString()) ||
+      const Variant& value(iter.secondRef());
+      if (HHVM_FN(is_subclass_of)(cls_name, value.toString()) ||
           same(value, cls_name)) {
         return true;
       }

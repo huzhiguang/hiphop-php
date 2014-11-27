@@ -1,10 +1,22 @@
 DateTime
-object(DateTime)#1 (0) {
+object(DateTime)#2 (3) {
+  ["date"]=>
+  string(26) "%s"
+  ["timezone_type"]=>
+  int(3)
+  ["timezone"]=>
+  string(%d) "%s"
 }
-string(19) "O:8:"DateTime":0:{}"
-object(DateTime)#2 (0) {
+string(%d) "O:8:"DateTime":3:{s:4:"date";s:%d:"%s";s:13:"timezone_type";i:3;s:8:"timezone";s:%d:"%s";}"
+object(DateTime)#3 (3) {
+  ["date"]=>
+  string(26) "%s"
+  ["timezone_type"]=>
+  int(3)
+  ["timezone"]=>
+  string(%d) "%s"
 }
-array(16) {
+array(19) {
   [0]=>
   string(3) "add"
   [1]=>
@@ -37,19 +49,33 @@ array(16) {
   string(11) "setTimezone"
   [15]=>
   string(3) "sub"
+  [16]=>
+  string(7) "__sleep"
+  [17]=>
+  string(8) "__wakeup"
+  [18]=>
+  string(11) "__debugInfo"
 }
 ================
 A_DateTime
-object(A_DateTime)#3 (1) {
-  ["___x"]=>
-  NULL
+object(A_DateTime)#5 (3) {
+  ["date"]=>
+  string(26) "%s"
+  ["timezone_type"]=>
+  int(3)
+  ["timezone"]=>
+  string(%d) "%s"
 }
-string(35) "O:10:"A_DateTime":1:{s:4:"___x";N;}"
-object(A_DateTime)#4 (1) {
-  ["___x"]=>
-  NULL
+string(%d) "O:10:"A_DateTime":3:{s:4:"date";s:%d:"%s";s:13:"timezone_type";i:3;s:8:"timezone";s:%d:"%s";}"
+object(A_DateTime)#6 (3) {
+  ["date"]=>
+  string(26) "%s"
+  ["timezone_type"]=>
+  int(3)
+  ["timezone"]=>
+  string(%d) "%s"
 }
-array(17) {
+array(20) {
   [0]=>
   string(7) "__clone"
   [1]=>
@@ -84,19 +110,30 @@ array(17) {
   string(11) "setTimezone"
   [16]=>
   string(3) "sub"
+  [17]=>
+  string(7) "__sleep"
+  [18]=>
+  string(8) "__wakeup"
+  [19]=>
+  string(11) "__debugInfo"
 }
 ================
-object(A_DateTime)#3 (2) {
-  ["___x"]=>
-  NULL
-  ["___y"]=>
-  int(73)
+object(A_DateTime)#5 (3) {
+  ["date"]=>
+  string(26) "%s"
+  ["timezone_type"]=>
+  int(3)
+  ["timezone"]=>
+  string(%d) "%s"
 }
 string(10) "2012-06-23"
-object(A_DateTime)#4 (2) {
-  ["___x"]=>
-  int(1)
-  ["___y"]=>
-  int(74)
+object(A_DateTime)#6 (3) {
+  ["date"]=>
+  string(26) "%s"
+  ["timezone_type"]=>
+  int(3)
+  ["timezone"]=>
+  string(%d) "%s"
 }
 string(10) "2012-06-26"
+================

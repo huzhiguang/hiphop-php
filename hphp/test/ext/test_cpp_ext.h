@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,9 +18,8 @@
 #define incl_HPHP_TEST_CPP_EXT_H_
 
 #include "hphp/test/ext/test_cpp_base.h"
-#include "hphp/runtime/ext/ext_variable.h" // we frequently need to call f_var_dump()
 #include "hphp/runtime/base/program-functions.h"
-#include "hphp/runtime/ext/ext_misc.h"
+#include "hphp/runtime/ext/std/ext_std_misc.h"
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -32,10 +31,18 @@ public:
   TestCppExt();
 };
 
+inline void evalCodeForCppExt(const String& code_str) {
+  String prefixedCode = concat("<?php ", code_str);
+  Unit* unit = g_context->compileEvalString(prefixedCode.get());
+  TypedValue retVal;
+  g_context->invokeUnit(&retVal, unit);
+  tvRefcountedDecRef(&retVal);
+}
+
 #define DECLARE_TEST_FUNCTIONS(s)                                       \
   char *argv[] = { const_cast<char*>(which.c_str()), nullptr };         \
-  execute_command_line_begin(1, argv, false);                           \
-  f_eval(s);                                                            \
+  execute_command_line_begin(1, argv, false, {});                       \
+  evalCodeForCppExt(s);                                                 \
                                                                         \
   SCOPE_EXIT {                                                          \
     execute_command_line_end(0, false, which.c_str());                  \

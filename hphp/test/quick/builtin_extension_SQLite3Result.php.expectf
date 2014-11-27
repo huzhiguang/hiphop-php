@@ -1,9 +1,10 @@
 SQLite3Result
 object(SQLite3Result)#1 (0) {
 }
-string(25) "O:13:"SQLite3Result":0:{}"
-object(SQLite3Result)#2 (0) {
-}
+
+Warning: Attempted to serialize unserializable builtin class SQLite3Result in %s/builtin_extensions.inc on line 8
+string(2) "N;"
+NULL
 array(7) {
   [0]=>
   string(11) "__construct"
@@ -22,15 +23,14 @@ array(7) {
 }
 ================
 A_SQLite3Result
-object(A_SQLite3Result)#3 (1) {
+object(A_SQLite3Result)#2 (1) {
   ["___x"]=>
   NULL
 }
-string(40) "O:15:"A_SQLite3Result":1:{s:4:"___x";N;}"
-object(A_SQLite3Result)#4 (1) {
-  ["___x"]=>
-  NULL
-}
+
+Warning: Attempted to serialize unserializable builtin class A_SQLite3Result in %s/builtin_extensions.inc on line 26
+string(2) "N;"
+NULL
 array(7) {
   [0]=>
   string(11) "__construct"

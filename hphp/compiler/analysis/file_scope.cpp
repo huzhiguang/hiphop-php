@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,9 +13,14 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/compiler/analysis/file_scope.h"
+
+#include <sys/stat.h>
+#include <map>
+#include <folly/ScopeGuard.h>
+
 #include "hphp/compiler/analysis/code_error.h"
+#include "hphp/compiler/analysis/lambda_names.h"
 #include "hphp/compiler/analysis/analysis_result.h"
 #include "hphp/compiler/analysis/class_scope.h"
 #include "hphp/compiler/statement/statement_list.h"
@@ -23,11 +28,9 @@
 #include "hphp/compiler/option.h"
 #include "hphp/compiler/analysis/constant_table.h"
 #include "hphp/compiler/analysis/function_scope.h"
-#include <sys/stat.h>
 #include "hphp/compiler/parser/parser.h"
 #include "hphp/util/logger.h"
-#include "hphp/util/util.h"
-#include "hphp/util/base.h"
+#include "hphp/util/deprecated/base.h"
 #include "hphp/compiler/expression/expression_list.h"
 #include "hphp/compiler/statement/function_statement.h"
 #include "hphp/compiler/analysis/variable_table.h"
@@ -36,15 +39,15 @@
 #include "hphp/compiler/expression/user_attribute.h"
 #include "hphp/runtime/base/complex-types.h"
 
-using namespace HPHP;
+namespace HPHP {
 
 ///////////////////////////////////////////////////////////////////////////////
 
 FileScope::FileScope(const string &fileName, int fileSize, const MD5 &md5)
   : BlockScope("", "", StatementPtr(), BlockScope::FileScope),
-    m_size(fileSize), m_md5(md5), m_module(false), m_privateInclude(false),
-    m_externInclude(false),
-    m_includeState(0), m_fileName(fileName), m_redeclaredFunctions(0) {
+    m_size(fileSize), m_md5(md5), m_includeState(0), m_system(false),
+    m_isHHFile(false), m_preloadPriority(0),
+    m_fileName(fileName), m_redeclaredFunctions(0) {
   pushAttribute(); // for global scope
 }
 
@@ -66,6 +69,15 @@ void FileScope::setFileLevel(StatementListPtr stmtList) {
   }
 }
 
+void FileScope::setSystem() {
+  m_fileName = "/:" + m_fileName;
+  m_system = true;
+}
+
+void FileScope::setHHFile() {
+  m_isHHFile = true;
+}
+
 FunctionScopePtr FileScope::setTree(AnalysisResultConstPtr ar,
                                     StatementListPtr tree) {
   m_tree = tree;
@@ -73,11 +85,10 @@ FunctionScopePtr FileScope::setTree(AnalysisResultConstPtr ar,
   return createPseudoMain(ar);
 }
 
-void FileScope::cleanupForError(AnalysisResultConstPtr ar,
-                                int line, const string &msg) {
+void FileScope::cleanupForError(AnalysisResultConstPtr ar) {
   for (StringToClassScopePtrVecMap::const_iterator iter = m_classes.begin();
        iter != m_classes.end(); ++iter) {
-    BOOST_FOREACH(ClassScopePtr cls, iter->second) {
+    for (ClassScopePtr cls: iter->second) {
       cls->getVariables()->cleanupForError(ar);
     }
   }
@@ -90,8 +101,17 @@ void FileScope::cleanupForError(AnalysisResultConstPtr ar,
   StringToClassScopePtrVecMap().swap(m_classes);
   m_pseudoMain.reset();
   m_tree.reset();
+}
+
+template <class Meth>
+void makeFatalMeth(FileScope& file,
+                   AnalysisResultConstPtr ar,
+                   const std::string& msg,
+                   int line,
+                   Meth meth) {
   LocationPtr loc(new Location());
-  loc->file = m_fileName.c_str();
+  LabelScopePtr labelScope(new LabelScope());
+  loc->file = file.getName().c_str();
   loc->first(line, 0);
   loc->last(line, 0);
   BlockScopePtr scope;
@@ -100,16 +120,30 @@ void FileScope::cleanupForError(AnalysisResultConstPtr ar,
   SimpleFunctionCallPtr e(
     new SimpleFunctionCall(scope, loc, "throw_fatal", false, args,
       ExpressionPtr()));
-  e->setThrowFatal();
-  ExpStatementPtr exp(new ExpStatement(scope, loc, e));
-  StatementListPtr stmts(new StatementList(scope, loc));
+  meth(e);
+  ExpStatementPtr exp(new ExpStatement(scope, labelScope, loc, e));
+  StatementListPtr stmts(new StatementList(scope, labelScope, loc));
   stmts->addElement(exp);
 
-  FunctionScopePtr fs = setTree(ar, stmts);
-  fs->setOuterScope(shared_from_this());
+  FunctionScopePtr fs = file.setTree(ar, stmts);
+  fs->setOuterScope(file.shared_from_this());
   fs->getStmt()->resetScope(fs);
   fs->getStmt()->setLocation(loc);
-  setOuterScope(const_cast<AnalysisResult*>(ar.get())->shared_from_this());
+  file.setOuterScope(const_cast<AnalysisResult*>(ar.get())->shared_from_this());
+}
+
+void FileScope::makeFatal(AnalysisResultConstPtr ar,
+                          const std::string& msg,
+                          int line) {
+  auto meth = [](SimpleFunctionCallPtr e) { e->setThrowFatal(); };
+  makeFatalMeth(*this, ar, msg, line, meth);
+}
+
+void FileScope::makeParseFatal(AnalysisResultConstPtr ar,
+                               const std::string& msg,
+                               int line) {
+  auto meth = [](SimpleFunctionCallPtr e) { e->setThrowParseFatal(); };
+  makeFatalMeth(*this, ar, msg, line, meth);
 }
 
 bool FileScope::addFunction(AnalysisResultConstPtr ar,
@@ -155,7 +189,7 @@ int FileScope::getFunctionCount() const {
   int total = FunctionContainer::getFunctionCount();
   for (StringToClassScopePtrVecMap::const_iterator iter = m_classes.begin();
        iter != m_classes.end(); ++iter) {
-    BOOST_FOREACH(ClassScopePtr cls, iter->second) {
+    for (ClassScopePtr cls: iter->second) {
       total += cls->getFunctionCount();
     }
   }
@@ -166,7 +200,7 @@ void FileScope::countReturnTypes(std::map<std::string, int> &counts) {
   FunctionContainer::countReturnTypes(counts, m_redeclaredFunctions);
   for (StringToClassScopePtrVecMap::const_iterator iter = m_classes.begin();
        iter != m_classes.end(); ++iter) {
-    BOOST_FOREACH(ClassScopePtr cls, iter->second) {
+    for (ClassScopePtr cls: iter->second) {
       cls->countReturnTypes(counts, 0);
     }
   }
@@ -233,9 +267,10 @@ void FileScope::addConstantDependency(AnalysisResultPtr ar,
 }
 
 void FileScope::analyzeProgram(AnalysisResultPtr ar) {
-  if (m_pseudoMain) {
-    m_pseudoMain->getStmt()->analyzeProgram(ar);
-  }
+  if (!m_pseudoMain) return;
+  m_pseudoMain->getStmt()->analyzeProgram(ar);
+
+  resolve_lambda_names(ar, shared_from_this());
 }
 
 ClassScopeRawPtr FileScope::resolveClass(ClassScopeRawPtr cls) {
@@ -300,80 +335,80 @@ bool FileScope::insertClassUtil(AnalysisResultPtr ar,
 
 void FileScope::analyzeIncludesHelper(AnalysisResultPtr ar) {
   m_includeState = 1;
-  if (m_pseudoMain) {
-    StatementList &stmts = *getStmt();
-    bool hoistOnly = false;
-    for (int i = 0, n = stmts.getCount(); i < n; i++) {
-      StatementPtr s = stmts[i];
-      if (!s) continue;
-      if (s->is(Statement::KindOfClassStatement) ||
-          s->is(Statement::KindOfInterfaceStatement)) {
+  SCOPE_EXIT { m_includeState = 2; };
 
-        ClassScopeRawPtr cls(
-          static_pointer_cast<InterfaceStatement>(s)->getClassScope());
-        if (hoistOnly) {
-          const string &parent = cls->getOriginalParent();
-          if (cls->getBases().size() > (parent.empty() ? 0 : 1)) {
-            continue;
-          }
-          if (!parent.empty()) {
-            ClassScopeRawPtr c = ar->findClass(parent);
-            if (!c || (c->isVolatile() &&
-                       !resolveClass(c) && !checkClass(parent))) {
-              continue;
-            }
-          }
+  if (!m_pseudoMain) return;
+
+  StatementList &stmts = *getStmt();
+  bool hoistOnly = false;
+
+  for (int i = 0, n = stmts.getCount(); i < n; i++) {
+    StatementPtr s = stmts[i];
+    if (!s) continue;
+
+    if (s->is(Statement::KindOfClassStatement) ||
+        s->is(Statement::KindOfInterfaceStatement)) {
+      ClassScopeRawPtr cls(
+        static_pointer_cast<InterfaceStatement>(s)->getClassScope());
+      if (hoistOnly) {
+        const string &parent = cls->getOriginalParent();
+        if (cls->getBases().size() > (parent.empty() ? 0 : 1)) {
+          continue;
         }
-        if (cls->isVolatile()) {
-          insertClassUtil(ar, cls, true);
-        }
-        continue;
-      }
-      if (s->is(Statement::KindOfFunctionStatement)) {
-        FunctionScopeRawPtr func(
-          static_pointer_cast<FunctionStatement>(s)->getFunctionScope());
-        if (func->isVolatile()) m_providedDefs.insert(func);
-        continue;
-      }
-      if (!hoistOnly && s->is(Statement::KindOfExpStatement)) {
-        ExpressionRawPtr exp(
-          static_pointer_cast<ExpStatement>(s)->getExpression());
-        if (exp && exp->is(Expression::KindOfIncludeExpression)) {
-          FileScopeRawPtr fs(
-            static_pointer_cast<IncludeExpression>(exp)->getIncludedFile(ar));
-          if (fs && fs->m_includeState != 1) {
-            if (!fs->m_includeState) {
-              if (m_module && fs->m_privateInclude) {
-                BOOST_FOREACH(BlockScopeRawPtr bs, m_providedDefs) {
-                  fs->m_providedDefs.insert(bs);
-                }
-              }
-              fs->analyzeIncludesHelper(ar);
-            }
-            BOOST_FOREACH(BlockScopeRawPtr bs, fs->m_providedDefs) {
-              m_providedDefs.insert(bs);
-            }
+        if (!parent.empty()) {
+          ClassScopeRawPtr c = ar->findClass(parent);
+          if (!c || (c->isVolatile() &&
+                     !resolveClass(c) && !checkClass(parent))) {
             continue;
           }
         }
       }
-      hoistOnly = true;
+      if (cls->isVolatile()) {
+        insertClassUtil(ar, cls, true);
+      }
+      continue;
     }
+
+    if (s->is(Statement::KindOfFunctionStatement)) {
+      FunctionScopeRawPtr func(
+        static_pointer_cast<FunctionStatement>(s)->getFunctionScope());
+      if (func->isVolatile()) m_providedDefs.insert(func);
+      continue;
+    }
+
+    if (!hoistOnly && s->is(Statement::KindOfExpStatement)) {
+      ExpressionRawPtr exp(
+        static_pointer_cast<ExpStatement>(s)->getExpression());
+      if (exp && exp->is(Expression::KindOfIncludeExpression)) {
+        FileScopeRawPtr fs(
+          static_pointer_cast<IncludeExpression>(exp)->getIncludedFile(ar));
+        if (fs && fs->m_includeState != 1) {
+          if (!fs->m_includeState) {
+            fs->analyzeIncludesHelper(ar);
+          }
+          for (BlockScopeRawPtr bs: fs->m_providedDefs) {
+            m_providedDefs.insert(bs);
+          }
+          continue;
+        }
+      }
+    }
+
+    hoistOnly = true;
   }
+
   m_includeState = 2;
 }
 
 void FileScope::analyzeIncludes(AnalysisResultPtr ar) {
-  if (!m_privateInclude && !m_includeState) {
+  if (!m_includeState) {
     analyzeIncludesHelper(ar);
   }
 }
 
-
 void FileScope::visit(AnalysisResultPtr ar,
                       void (*cb)(AnalysisResultPtr, StatementPtr, void*),
-                      void *data)
-{
+                      void *data) {
   if (m_pseudoMain) {
     cb(ar, m_pseudoMain->getStmt(), data);
   }
@@ -388,8 +423,11 @@ const string &FileScope::pseudoMainName() {
 
 FunctionScopePtr FileScope::createPseudoMain(AnalysisResultConstPtr ar) {
   StatementListPtr st = m_tree;
+  LabelScopePtr labelScope(new LabelScope());
   FunctionStatementPtr f
-    (new FunctionStatement(BlockScopePtr(), LocationPtr(),
+    (new FunctionStatement(BlockScopePtr(),
+                           labelScope,
+                           LocationPtr(),
                            ModifierExpressionPtr(),
                            false, pseudoMainName(),
                            ExpressionListPtr(), TypeAnnotationPtr(),
@@ -425,24 +463,18 @@ string FileScope::outputFilebase() const {
 
 static void getFuncScopesSet(BlockScopeRawPtrQueue &v,
                              const StringToFunctionScopePtrMap &funcMap) {
-  for (StringToFunctionScopePtrMap::const_iterator
-         iter = funcMap.begin(), end = funcMap.end();
-       iter != end; ++iter) {
-    FunctionScopePtr f = iter->second;
-    if (f->isUserFunction()) {
+  for (const auto& iter : funcMap) {
+    FunctionScopePtr f = iter.second;
+    if (!f->isBuiltin()) {
       v.push_back(f);
     }
   }
 }
 
 void FileScope::getScopesSet(BlockScopeRawPtrQueue &v) {
-  const StringToClassScopePtrVecMap &classes = getClasses();
-  for (StringToClassScopePtrVecMap::const_iterator iter = classes.begin(),
-         end = classes.end(); iter != end; ++iter) {
-    for (ClassScopePtrVec::const_iterator it = iter->second.begin(),
-           e = iter->second.end(); it != e; ++it) {
-      ClassScopePtr cls = *it;
-      if (cls->isUserClass()) {
+  for (const auto& clsVec : getClasses()) {
+    for (const auto cls : clsVec.second) {
+      if (cls->getStmt()) {
         v.push_back(cls);
         getFuncScopesSet(v, cls->getFunctions());
       }
@@ -450,20 +482,17 @@ void FileScope::getScopesSet(BlockScopeRawPtrQueue &v) {
   }
 
   getFuncScopesSet(v, getFunctions());
-  if (const StringToFunctionScopePtrVecMap *redec = m_redeclaredFunctions) {
-    for (StringToFunctionScopePtrVecMap::const_iterator iter = redec->begin(),
-           end = redec->end(); iter != end; ++iter) {
-      FunctionScopePtrVec::const_iterator i = iter->second.begin(),
-        e = iter->second.end();
+  if (const auto redec = m_redeclaredFunctions) {
+    for (const auto& funcVec : *redec) {
+      auto i = funcVec.second.begin(), e = funcVec.second.end();
       v.insert(v.end(), ++i, e);
     }
   }
 }
 
 void FileScope::getClassesFlattened(ClassScopePtrVec &classes) const {
-  for (StringToClassScopePtrVecMap::const_iterator it = m_classes.begin();
-       it != m_classes.end(); ++it) {
-    BOOST_FOREACH(ClassScopePtr cls, it->second) {
+  for (const auto& clsVec : m_classes) {
+    for (auto cls : clsVec.second) {
       classes.push_back(cls);
     }
   }
@@ -486,3 +515,4 @@ void FileScope::serialize(JSON::DocTarget::OutputStream &out) const {
   ms.done();
 }
 
+}

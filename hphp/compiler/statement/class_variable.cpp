@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -75,13 +75,33 @@ void ClassVariable::onParseRecur(AnalysisResultConstPtr ar,
     scope->setModifiers(m_modifiers);
 
   if (m_modifiers->isAbstract()) {
-    parseTimeFatal(Compiler::InvalidAttribute,
-                   "Properties cannot be declared abstract");
+    m_modifiers->parseTimeFatal(Compiler::InvalidAttribute,
+                                "Properties cannot be declared abstract");
   }
 
   if (m_modifiers->isFinal()) {
-    parseTimeFatal(Compiler::InvalidAttribute,
-                   "Properties cannot be declared final");
+    m_modifiers->parseTimeFatal(Compiler::InvalidAttribute,
+                                "Properties cannot be declared final");
+  }
+
+  if (!m_modifiers->isStatic() && scope->isStaticUtil()) {
+    m_modifiers->parseTimeFatal(
+      Compiler::InvalidAttribute,
+      "Class %s contains non-static property declaration and "
+      "therefore cannot be declared 'abstract final'",
+      scope->getOriginalName().c_str()
+    );
+  }
+
+  if ((m_modifiers->isExplicitlyPublic() +
+       m_modifiers->isProtected() +
+       m_modifiers->isPrivate()) > 1) {
+    m_modifiers->parseTimeFatal(
+      Compiler::InvalidAttribute,
+      "%s: properties of %s",
+      Strings::PICK_ACCESS_MODIFIER,
+      scope->getOriginalName().c_str()
+    );
   }
 
   for (int i = 0; i < m_declaration->getCount(); i++) {
@@ -241,31 +261,22 @@ StatementPtr ClassVariable::preOptimize(AnalysisResultConstPtr ar) {
   return StatementPtr();
 }
 
-void ClassVariable::inferTypes(AnalysisResultPtr ar) {
-  assert(getScope().get() == getClassScope().get());
-  IMPLEMENT_INFER_AND_CHECK_ASSERT(getScope());
+///////////////////////////////////////////////////////////////////////////////
 
-  // assignments will ignore the passed in type,
-  // but we need to ensure that Null is applied to
-  // the simple variables.
-  m_declaration->inferAndCheck(ar, Type::Null, false);
-
-  if (m_modifiers->isStatic()) {
-    ClassScopePtr scope = getClassScope();
-    for (int i = 0; i < m_declaration->getCount(); i++) {
-      ExpressionPtr exp = (*m_declaration)[i];
-      SimpleVariablePtr var;
-      if (exp->is(Expression::KindOfAssignmentExpression)) {
-        AssignmentExpressionPtr assignment =
-          dynamic_pointer_cast<AssignmentExpression>(exp);
-        ExpressionPtr value = assignment->getValue();
-        if (value->containsDynamicConstant(ar)) {
-          scope->getVariables()->
-            setAttribute(VariableTable::ContainsDynamicStatic);
-        }
-      }
-    }
+void ClassVariable::outputCodeModel(CodeGenerator &cg) {
+  auto numProps = m_typeConstraint.empty() ? 3 : 4;
+  cg.printObjectHeader("ClassVariableStatement", numProps);
+  cg.printPropertyHeader("modifiers");
+  m_modifiers->outputCodeModel(cg);
+  if (!m_typeConstraint.empty()) {
+    cg.printPropertyHeader("typeAnnotation");
+    cg.printTypeExpression(m_typeConstraint);
   }
+  cg.printPropertyHeader("expressions");
+  cg.printExpressionVector(m_declaration);
+  cg.printPropertyHeader("sourceLocation");
+  cg.printLocation(this->getLocation());
+  cg.printObjectFooter();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

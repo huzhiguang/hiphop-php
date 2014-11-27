@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,18 +17,16 @@
 #ifndef incl_HPHP_VM_CHECK_H_
 #define incl_HPHP_VM_CHECK_H_
 
-namespace HPHP {
-namespace JIT {
+namespace HPHP { namespace jit {
 
-class IRTrace;
-class IRFactory;
+class IRUnit;
 struct RegAllocInfo;
 
 /*
  * Ensure valid SSA properties; each SSATmp must be defined exactly once,
  * only used in positions dominated by the definition.
  */
-bool checkCfg(IRTrace*, const IRFactory&);
+bool checkCfg(const IRUnit&);
 
 /*
  * We can't have SSATmps spanning php-level calls, except for frame
@@ -37,13 +35,7 @@ bool checkCfg(IRTrace*, const IRFactory&);
  * We have no callee-saved registers in php, and there'd be nowhere to
  * spill these because all translations share the spill space.
  */
-bool checkTmpsSpanningCalls(IRTrace*, const IRFactory&);
-
-/*
- * Check register and spill slot assignments; registers and spill slots must
- * contain the correct SSATmp value at every point of use.
- */
-bool checkRegisters(IRTrace*, const IRFactory&, const RegAllocInfo&);
+bool checkTmpsSpanningCalls(const IRUnit&);
 
 }}
 

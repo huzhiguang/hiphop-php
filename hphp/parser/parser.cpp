@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,9 +13,13 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "parser.h"
+
+#include <folly/Conv.h>
+#include <folly/Format.h>
+
 #include "hphp/util/hash.h"
+
 #include <boost/algorithm/string/predicate.hpp>
 
 namespace HPHP {
@@ -26,15 +30,26 @@ bool ParserBase::IsClosureName(const std::string &name) {
 }
 
 std::string ParserBase::newClosureName(
+    const std::string &namespaceName,
     const std::string &className,
     const std::string &funcName) {
+  // Closure names must be globally unique.  The easiest way to do
+  // this is include a hash of the filename.
+  int64_t hash = hash_string_cs(m_fileName, strlen(m_fileName));
+
   std::string name = "Closure$";
   if (!className.empty()) {
     name += className + "::";
+  } else if (!namespaceName.empty()) {
+    // If className is present, it already includes the namespace
+    name += namespaceName + "\\";
   }
   name += funcName;
 
   int id = ++m_seenClosures[name];
+
+  folly::format(&name, ";{}", hash);
+
   if (id > 1) {
     // we've seen the same name before, uniquify
     name = name + '#' + std::to_string(id);
@@ -58,7 +73,7 @@ ParserBase::~ParserBase() {
 }
 
 std::string ParserBase::getMessage(bool filename /* = false */) const {
-  string ret = m_scanner.getError();
+  std::string ret = m_scanner.getError();
   if (!ret.empty()) {
     ret += " ";
   }
@@ -70,12 +85,12 @@ std::string ParserBase::getMessage(Location *loc,
                                    bool filename /* = false */) const {
   int line = loc->line1;
   int column = loc->char1;
-  string ret = "(";
+  std::string ret = "(";
   if (filename) {
-    ret += string("File: ") + file() + ", ";
+    ret += std::string("File: ") + file() + ", ";
   }
-  ret += string("Line: ") + boost::lexical_cast<string>(line);
-  ret += ", Char: " + boost::lexical_cast<string>(column) + ")";
+  ret += std::string("Line: ") + folly::to<std::string>(line);
+  ret += ", Char: " + folly::to<std::string>(column) + ")";
   return ret;
 }
 

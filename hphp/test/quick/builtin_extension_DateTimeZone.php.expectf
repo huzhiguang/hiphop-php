@@ -1,10 +1,12 @@
 DateTimeZone
-HipHop Warning: DateTimeZone::__construct() expects exactly 1 parameter, 0 given in %s/test/quick/builtin_extensions.inc on line 5
+
+Warning: DateTimeZone::__construct() expects exactly 1 parameter, 0 given in %s/builtin_extensions.inc on line 5
 object(DateTimeZone)#1 (0) {
 }
-string(24) "O:12:"DateTimeZone":0:{}"
-object(DateTimeZone)#2 (0) {
-}
+
+Warning: Attempted to serialize unserializable builtin class DateTimeZone in %s/builtin_extensions.inc on line 8
+string(2) "N;"
+NULL
 array(7) {
   [0]=>
   string(11) "__construct"
@@ -23,16 +25,16 @@ array(7) {
 }
 ================
 A_DateTimeZone
-HipHop Warning: DateTimeZone::__construct() expects exactly 1 parameter, 0 given in %s/test/quick/builtin_extensions.inc on line 23
-object(A_DateTimeZone)#3 (1) {
+
+Warning: DateTimeZone::__construct() expects exactly 1 parameter, 0 given in %s/builtin_extensions.inc on line 23
+object(A_DateTimeZone)#2 (1) {
   ["___x"]=>
   NULL
 }
-string(39) "O:14:"A_DateTimeZone":1:{s:4:"___x";N;}"
-object(A_DateTimeZone)#4 (1) {
-  ["___x"]=>
-  NULL
-}
+
+Warning: Attempted to serialize unserializable builtin class A_DateTimeZone in %s/builtin_extensions.inc on line 26
+string(2) "N;"
+NULL
 array(7) {
   [0]=>
   string(11) "__construct"

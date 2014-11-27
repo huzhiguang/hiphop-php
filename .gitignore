@@ -1,12 +1,9 @@
 *.[oad]
 *.hhbc
-/bin*-g
-/bin*-O
-/bin/*.so
-/bin/hphp_options
-/bin/systemlib.php
 .mkdir
+.DS_Store
 hphp.log
+/build
 
 /hphp/test/test
 /hphp/test/test_fast.inc
@@ -26,58 +23,68 @@ hphp.log
 /hphp/test/vm/perf/*.perf
 /hphp/runtime/ext_hhvm/ext_noinline.cpp
 /hphp/compiler/analysis/code_error.inc
+/hphp/runtime/ext/*/CMakeLists.txt
+/hphp/runtime/ext/*/*.so
 
 /hphp/runtime/tmp/Test*
 /hphp/runtime/tmp/run
 /hphp/runtime/tmp/run.sh
 /hphp/runtime/tmp/libtest.so
-/hphp/hphp-build-info.cpp
-/hphp/hphp-repo-schema.h
 
 /hphp/hhvm/gen
-/hphp/hhvm/hhvm
 
-/hphp/runtime/ext/*.ext_hhvm.cpp
-/hphp/runtime/ext/*.ext_hhvm.h
-/hphp/runtime/ext/*/*.ext_hhvm.cpp
-/hphp/runtime/ext/*/*.ext_hhvm.h
-/hphp/runtime/ext_zend_compat/*/*.ext_hhvm.cpp
-/hphp/runtime/ext_zend_compat/*/*.ext_hhvm.h
-/hphp/runtime/ext_zend_compat/*/*/*.ext_hhvm.cpp
-/hphp/runtime/ext_zend_compat/*/*/*.ext_hhvm.h
-/hphp/runtime/base/builtin-functions.cpp.ext_hhvm.cpp
-/hphp/runtime/base/builtin-functions.cpp.ext_hhvm.h
-/hphp/runtime/ext_hhvm/ext_hhvm_infotabs.cpp
-/hphp/runtime/ext_hhvm/ext_hhvm_infotabs.h
+*.ext_hhvm.cpp
+*.ext_hhvm.h
 
 /hphp/tools/shmw/shmw
 
 /hphp/ffi/java/classes
 /hphp/ffi/java/hphp_ffi_java.h
 
-# Ignore all makefiles generated for fbcode's third-party repo
-/bin/*.mk
-!/bin/run.mk
-
-CMakeFiles
-CMakeCache.txt
-cmake_install.cmake
-install_manifest.txt
-
+/bin
 /output_gd/
 
+# tags files
 /hphp/TAGS
+tags
+TAGS
 
-# Generated makefiles
-/hphp/runtime/ext_hhvm/Makefile
-/hphp/test/Makefile
-/hphp/hphp/Makefile
-/hphp/hhvm/Makefile
-/hphp/compiler/Makefile
-/hphp/Makefile
-/Makefile
+# old directories with makefiles
+/hphp/submodules
+/hphp/third_party
+/third-party/libzip/libzip.dylib
 
 # eclipse files
 .project
 .cproject
 .settings
+
+# vim files
+.*.swp
+.*.swo
+*.vimrc
+.syntastic_cpp_config
+*~
+
+# CMake
+CMakeCache.txt
+CMakeFiles
+Makefile
+cmake_install.cmake
+install_manifest.txt
+
+# CPack
+CPackConfig.cmake
+CPackSourceConfig.cmake
+
+# Ninja
+.ninja_deps
+.ninja_log
+*.ninja
+
+# windows files
+*.exe
+*.rc
+
+# python scripts
+*.pyc

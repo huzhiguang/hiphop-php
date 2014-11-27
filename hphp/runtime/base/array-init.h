@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,261 +16,228 @@
 #ifndef incl_HPHP_ARRAY_INIT_H_
 #define incl_HPHP_ARRAY_INIT_H_
 
+#include <type_traits>
+
 #include "hphp/runtime/base/array-data.h"
 #include "hphp/runtime/base/complex-types.h"
-#include "hphp/runtime/base/hphp-array.h"
+#include "hphp/runtime/base/mixed-array.h"
+#include "hphp/runtime/base/packed-array.h"
+#include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/thread-info.h"
 
 namespace HPHP {
-///////////////////////////////////////////////////////////////////////////////
-// macros for creating vectors or maps
 
-#define CREATE_VECTOR1(e)                                               \
-  PackedArrayInit(1).add(e).toArray()
-#define CREATE_VECTOR2(e1, e2)                                          \
-  PackedArrayInit(2).add(e1).add(e2).toArray()
-#define CREATE_VECTOR3(e1, e2, e3)                                      \
-  PackedArrayInit(3).add(e1).add(e2).add(e3).toArray()
-#define CREATE_VECTOR4(e1, e2, e3, e4)                                  \
-  PackedArrayInit(4).add(e1).add(e2).add(e3).add(e4).toArray()
-#define CREATE_VECTOR5(e1, e2, e3, e4, e5)                              \
-  PackedArrayInit(5).add(e1).add(e2).add(e3).add(e4).add(e5).toArray()
-#define CREATE_VECTOR6(e1, e2, e3, e4, e5, e6)                          \
-  PackedArrayInit(6).add(e1).add(e2).add(e3).add(e4).add(e5).add(e6).toArray()
+//////////////////////////////////////////////////////////////////////
 
-inline String initkey(const char* s) { return String(s); }
-inline int64_t initkey(int k) { return k; }
-inline int64_t initkey(int64_t k) { return k; }
-inline CStrRef initkey(CStrRef k) { return k; }
-
-#define CREATE_MAP1(n, e) Array(ArrayInit(1).set(initkey(n), e).create())
-#define CREATE_MAP2(n1, e1, n2, e2)\
-  Array(ArrayInit(2).set(initkey(n1), e1)\
-                    .set(initkey(n2), e2).create())
-#define CREATE_MAP3(n1, e1, n2, e2, n3, e3)\
-  Array(ArrayInit(3).set(initkey(n1), e1)\
-                    .set(initkey(n2), e2)\
-                    .set(initkey(n3), e3).create())
-#define CREATE_MAP4(n1, e1, n2, e2, n3, e3, n4, e4)\
-  Array(ArrayInit(4).set(initkey(n1), e1)\
-                    .set(initkey(n2), e2)\
-                    .set(initkey(n3), e3)\
-                    .set(initkey(n4), e4).create())
-#define CREATE_MAP5(n1, e1, n2, e2, n3, e3, n4, e4, n5, e5)\
-  Array(ArrayInit(5).set(initkey(n1), e1)\
-                    .set(initkey(n2), e2)\
-                    .set(initkey(n3), e3)\
-                    .set(initkey(n4), e4)\
-                    .set(initkey(n5), e5).create())
-#define CREATE_MAP6(n1, e1, n2, e2, n3, e3, n4, e4, n5, e5, n6, e6)\
-  Array(ArrayInit(6).set(initkey(n1), e1)\
-                    .set(initkey(n2), e2)\
-                    .set(initkey(n3), e3)\
-                    .set(initkey(n4), e4)\
-                    .set(initkey(n5), e5)\
-                    .set(initkey(n6), e6).create())
-
-///////////////////////////////////////////////////////////////////////////////
-// ArrayInit
-
-/**
- * When an Array is created, ArrayInit completely skips the use of
- * ArrayElement, (the set methods mimic the constructors of ArrayElement).
- * The setRef method handles the case where the value needs to be a reference.
- *
- * For arrays that need to have C++ references/pointers to their elements for
- * an extended period of time, set keepRef to true, so that there will not
- * be reference-breaking escalation.
+/*
+ * Flag indicating whether this allocation should be pre-checked for OOM.
  */
-class ArrayInit {
-public:
-  enum MapInit { mapInit };
+enum class CheckAllocation {};
 
-  explicit ArrayInit(ssize_t n);
+struct ArrayInit {
+  enum class Map {};
+  // This is the same as map right now, but is here for documentation
+  // so we can find them later.
+  using Mixed = Map;
 
-  ArrayInit(ssize_t n, MapInit);
+  /*
+   * When you create an ArrayInit, you must specify the "kind" of
+   * array you are creating, for performance reasons.  "Kinds" that
+   * are relevant to know about for extension code:
+   *
+   *   Packed -- a vector-like array: don't use ArrayInit, use PackedArrayInit
+   *   Map    -- you expect only string keys and any value type
+   *   Mixed  -- you expect either integer keys, mixed keys
+   *
+   * Also, generally it's preferable to use make_map_array or
+   * make_packed_array when it's easy, since you don't have to get 'n'
+   * right in that case.
+   *
+   * For large array allocations, consider passing CheckAllocation, which will
+   * throw if the allocation would OOM the request.
+   */
+  ArrayInit(size_t n, Map);
+  ArrayInit(size_t n, Map, CheckAllocation);
 
-  ArrayInit(ArrayInit&& other) : m_data(other.m_data) {
+  ArrayInit(ArrayInit&& other) noexcept
+    : m_data(other.m_data)
+#ifndef NDEBUG
+    , m_addCount(other.m_addCount)
+    , m_expectedCount(other.m_expectedCount)
+#endif
+  {
     other.m_data = nullptr;
+#ifndef NDEBUG
+    other.m_expectedCount = 0;
+#endif
   }
 
   ArrayInit(const ArrayInit&) = delete;
   ArrayInit& operator=(const ArrayInit&) = delete;
 
   ~ArrayInit() {
-    // In case an exception interrupts the initialization.
+    // Use non-specialized release call so ArrayTracer can track its destruction
     if (m_data) m_data->release();
   }
 
-  ArrayInit &set(CVarRef v) {
-    m_data->append(v, false);
+  ArrayInit& set(const Variant& v) = delete;
+
+  ArrayInit& append(const Variant& v) {
+    performOp([&]{
+      return MixedArray::Append(m_data, v, false);
+    });
     return *this;
   }
 
-  ArrayInit &set(RefResult v) {
-    setRef(variant(v));
+  ArrayInit& setRef(Variant& v) = delete;
+  ArrayInit& appendRef(Variant& v) {
+    performOp([&]{ return MixedArray::AppendRef(m_data, v, false); });
     return *this;
   }
 
-  ArrayInit &set(CVarWithRefBind v) {
-    m_data->appendWithRef(variant(v), false);
+  ArrayInit& set(int64_t name, const Variant& v,
+                 bool keyConverted) = delete;
+  ArrayInit& set(int64_t name, const Variant& v) {
+    performOp([&]{
+      return MixedArray::SetInt(m_data, name, v.asInitCellTmp(), false);
+    });
     return *this;
   }
 
-  ArrayInit &setRef(CVarRef v) {
-    m_data->appendRef(v, false);
+  // set(const char*) deprecated.  Use set(CStrRef) with a
+  // StaticString, if you have a literal, or String otherwise.  Also
+  // don't try to pass a bool.
+  ArrayInit& set(const char*, const Variant& v, bool keyConverted) = delete;
+  ArrayInit& set(const String& name, const Variant& v,
+                 bool keyConverted) = delete;
+
+  ArrayInit& set(const String& name, const Variant& v) {
+    performOp([&]{
+      return MixedArray::SetStr(m_data, name.get(), v.asInitCellTmp(), false);
+    });
     return *this;
   }
 
-  ArrayInit &set(int64_t name, CVarRef v, bool keyConverted = false) {
-    m_data->set(name, v, false);
+  ArrayInit& set(const Variant& name, const Variant& v,
+                 bool keyConverted) = delete;
+  ArrayInit& set(const Variant& name, const Variant& v) {
+    performOp([&]{ return m_data->set(name, v, false); });
     return *this;
   }
 
-  // set(const char*) deprecated.  Use set(CStrRef) with a StaticString,
-  // if you have a literal, or String otherwise.
-  ArrayInit &set(const char*, CVarRef v, bool keyConverted = false) = delete;
+  /*
+   * This function is deprecated and exists for backward compatibility
+   * with the ArrayInit api.  Generally you should be able to figure
+   * out if your key is a pure string (not-integer-like) or not when
+   * using ArrayInit, and if not you should probably use toKey
+   * yourself.
+   */
+  ArrayInit& setKeyUnconverted(const Variant& name, const Variant& v) {
+    VarNR k(name.toKey());
+    // XXX: the old semantics of ArrayInit used to check if k.isNull
+    // and do nothing, but that's not php semantics so we're not doing
+    // that anymore.
+    performOp([&]{ return m_data->set(k, v, false); });
+    return *this;
+  }
 
-  ArrayInit &set(CStrRef name, CVarRef v, bool keyConverted = false) {
+  template<class T>
+  ArrayInit& set(const T& name, const Variant& v, bool) = delete;
+
+  template<class T>
+  ArrayInit& set(const T& name, const Variant& v) {
+    performOp([&]{ return m_data->set(name, v, false); });
+    return *this;
+  }
+
+  ArrayInit& add(int64_t name, const Variant& v, bool keyConverted = false) {
+    performOp([&]{
+      return MixedArray::AddInt(m_data, name, v.asInitCellTmp(), false);
+    });
+    return *this;
+  }
+
+  ArrayInit& add(const String& name, const Variant& v, bool keyConverted = false) {
     if (keyConverted) {
-      m_data->set(name, v, false);
+      performOp([&]{
+        return MixedArray::AddStr(m_data, name.get(),
+          v.asInitCellTmp(), false);
+      });
     } else if (!name.isNull()) {
-      m_data->set(name.toKey(), v, false);
+      performOp([&]{ return m_data->add(name.toKey(), v, false); });
     }
     return *this;
   }
 
-  ArrayInit &set(CVarRef name, CVarRef v, bool keyConverted = false) {
+  ArrayInit& add(const Variant& name, const Variant& v, bool keyConverted = false) {
     if (keyConverted) {
-      m_data->set(name, v, false);
+      performOp([&]{ return m_data->add(name, v, false); });
     } else {
       VarNR k(name.toKey());
       if (!k.isNull()) {
-        m_data->set(k, v, false);
+        performOp([&]{ return m_data->add(k, v, false); });
       }
     }
     return *this;
   }
 
   template<typename T>
-  ArrayInit &set(const T &name, CVarRef v, bool keyConverted = false) {
+  ArrayInit& add(const T &name, const Variant& v, bool keyConverted = false) {
     if (keyConverted) {
-      m_data->set(name, v, false);
+      performOp([&]{ return m_data->add(name, v, false); });
     } else {
       VarNR k(Variant(name).toKey());
       if (!k.isNull()) {
-        m_data->set(k, v, false);
+        performOp([&]{ return m_data->add(k, v, false); });
       }
     }
     return *this;
   }
 
-  ArrayInit &set(CStrRef name, RefResult v, bool keyConverted = false) {
-    if (keyConverted) {
-      m_data->setRef(name, variant(v), false);
-    } else if (!name.isNull()) {
-      m_data->setRef(name.toKey(), variant(v), false);
-    }
+  ArrayInit& setRef(int64_t name,
+                    Variant& v,
+                    bool keyConverted = false) {
+    performOp([&]{ return MixedArray::SetRefInt(m_data, name, v, false); });
     return *this;
   }
 
-  ArrayInit &set(CVarRef name, RefResult v, bool keyConverted = false) {
+  ArrayInit& setRef(const String& name,
+                    Variant& v,
+                    bool keyConverted = false) {
     if (keyConverted) {
-      m_data->setRef(name, variant(v), false);
+      performOp([&]{
+        return MixedArray::SetRefStr(m_data, name.get(), v, false);
+      });
     } else {
-      VarNR k(name.toKey());
-      if (!k.isNull()) {
-        m_data->setRef(k, variant(v), false);
-      }
+      performOp([&]{ return m_data->setRef(name.toKey(), v, false); });
     }
     return *this;
   }
 
-  template<typename T>
-  ArrayInit &set(const T &name, RefResult v, bool keyConverted = false) {
+  ArrayInit& setRef(const Variant& name,
+                    Variant& v,
+                    bool keyConverted = false) {
     if (keyConverted) {
-      m_data->setRef(name, variant(v), false);
-    } else {
-      VarNR k(Variant(name).toKey());
-      if (!k.isNull()) {
-        m_data->setRef(k, variant(v), false);
-      }
-    }
-    return *this;
-  }
-
-  ArrayInit &add(int64_t name, CVarRef v, bool keyConverted = false) {
-    m_data->add(name, v, false);
-    return *this;
-  }
-
-  ArrayInit &add(CStrRef name, CVarRef v, bool keyConverted = false) {
-    if (keyConverted) {
-      m_data->add(name, v, false);
-    } else if (!name.isNull()) {
-      m_data->add(name.toKey(), v, false);
-    }
-    return *this;
-  }
-
-  ArrayInit &add(CVarRef name, CVarRef v, bool keyConverted = false) {
-    if (keyConverted) {
-      m_data->add(name, v, false);
-    } else {
-      VarNR k(name.toKey());
-      if (!k.isNull()) {
-        m_data->add(k, v, false);
-      }
-    }
-    return *this;
-  }
-
-  template<typename T>
-  ArrayInit &add(const T &name, CVarRef v, bool keyConverted = false) {
-    if (keyConverted) {
-      m_data->add(name, v, false);
-    } else {
-      VarNR k(Variant(name).toKey());
-      if (!k.isNull()) {
-        m_data->add(k, v, false);
-      }
-    }
-    return *this;
-  }
-
-  ArrayInit &setRef(int64_t name, CVarRef v, bool keyConverted = false) {
-    m_data->setRef(name, v, false);
-    return *this;
-  }
-
-  ArrayInit &setRef(CStrRef name, CVarRef v, bool keyConverted = false) {
-    if (keyConverted) {
-      m_data->setRef(name, v, false);
-    } else {
-      m_data->setRef(name.toKey(), v, false);
-    }
-    return *this;
-  }
-
-  ArrayInit &setRef(CVarRef name, CVarRef v, bool keyConverted = false) {
-    if (keyConverted) {
-      m_data->setRef(name, v, false);
+      performOp([&]{ return m_data->setRef(name, v, false); });
     } else {
       Variant key(name.toKey());
       if (!key.isNull()) {
-        m_data->setRef(key, v, false);
+        performOp([&]{ return m_data->setRef(key, v, false); });
       }
     }
     return *this;
   }
 
   template<typename T>
-  ArrayInit &setRef(const T &name, CVarRef v, bool keyConverted = false) {
+  ArrayInit& setRef(const T &name,
+                    Variant& v,
+                    bool keyConverted = false) {
     if (keyConverted) {
-      m_data->setRef(name, v, false);
+      performOp([&]{ return m_data->setRef(name, v, false); });
     } else {
       VarNR key(Variant(name).toKey());
       if (!key.isNull()) {
-        m_data->setRef(key, v, false);
+        performOp([&]{ return m_data->setRef(key, v, false); });
       }
     }
     return *this;
@@ -278,37 +245,99 @@ public:
 
   // Prefer toArray() in new code---it can save a null check when the
   // compiler can't prove m_data hasn't changed.
-  ArrayData *create() {
-    ArrayData *ret = m_data;
+  ArrayData* create() {
+    auto const ret = m_data;
     m_data = nullptr;
+#ifndef NDEBUG
+    m_expectedCount = 0; // reset; no more adds allowed
+#endif
     return ret;
   }
 
   Array toArray() {
     auto ptr = m_data;
     m_data = nullptr;
+#ifndef NDEBUG
+    m_expectedCount = 0; // reset; no more adds allowed
+#endif
     return Array(ptr, Array::ArrayInitCtor::Tag);
   }
 
   Variant toVariant() {
     auto ptr = m_data;
     m_data = nullptr;
-    return Variant(ptr, Variant::ArrayInitCtor::Tag);
+#ifndef NDEBUG
+    m_expectedCount = 0; // reset; no more adds allowed
+#endif
+    return Variant(ptr, Variant::ArrayInitCtor{});
+  }
+
+private:
+  template<class Operation>
+  ALWAYS_INLINE void performOp(Operation oper) {
+    DEBUG_ONLY auto newp = oper();
+    // Array escalation must not happen during these reserved
+    // initializations.
+    assert(newp == m_data);
+    // You cannot add/set more times than you reserved with ArrayInit.
+    assert(++m_addCount <= m_expectedCount);
   }
 
 private:
   ArrayData* m_data;
+#ifndef NDEBUG
+  size_t m_addCount;
+  size_t m_expectedCount;
+#endif
 };
+
+//////////////////////////////////////////////////////////////////////
 
 /*
  * Initializer for a vector-shaped array.
  */
 class PackedArrayInit {
 public:
-  explicit PackedArrayInit(size_t n) : m_vec(ArrayData::Make(n)) {}
+  explicit PackedArrayInit(size_t n)
+    : m_vec(MixedArray::MakeReserve(n))
+#ifndef NDEBUG
+    , m_addCount(0)
+    , m_expectedCount(n)
+#endif
+  {
+    m_vec->setRefCount(0);
+  }
 
-  PackedArrayInit(PackedArrayInit&& other) : m_vec(other.m_vec) {
+  /*
+   * Before allocating, check if the allocation would cause the request to OOM.
+   *
+   * @throws RequestMemoryExceededException if allocating would OOM.
+   */
+  PackedArrayInit(size_t n, CheckAllocation) {
+    auto allocsz = sizeof(ArrayData) + sizeof(TypedValue) * n;
+    if (UNLIKELY(allocsz > kMaxSmartSize && MM().preAllocOOM(allocsz))) {
+      check_request_surprise_unlikely();
+    }
+    m_vec = MixedArray::MakeReserve(n);
+#ifndef NDEBUG
+    m_addCount = 0;
+    m_expectedCount = n;
+#endif
+    m_vec->setRefCount(0);
+    check_request_surprise_unlikely();
+  }
+
+  PackedArrayInit(PackedArrayInit&& other) noexcept
+    : m_vec(other.m_vec)
+#ifndef NDEBUG
+    , m_addCount(other.m_addCount)
+    , m_expectedCount(other.m_expectedCount)
+#endif
+  {
     other.m_vec = nullptr;
+#ifndef NDEBUG
+    other.m_expectedCount = 0;
+#endif
   }
 
   PackedArrayInit(const PackedArrayInit&) = delete;
@@ -319,44 +348,149 @@ public:
     if (m_vec) m_vec->release();
   }
 
-  PackedArrayInit& add(CVarRef v) {
-    m_vec->nvAppend(v.asTypedValue());
+  /*
+   * Append a new element to the packed array.
+   */
+  PackedArrayInit& append(const Variant& v) {
+    performOp([&]{ return PackedArray::Append(m_vec, v, false); });
     return *this;
   }
 
-  PackedArrayInit& add(CVarWithRefBind v) {
-    HphpArray::AppendWithRefPacked(m_vec, variant(v), false);
+  /*
+   * Box v if it is not already boxed, and append a new element that
+   * is KindOfRef and points to the same RefData as v.
+   *
+   * Post: v.getRawType() == KindOfRef
+   */
+  PackedArrayInit& appendRef(Variant& v) {
+    performOp([&]{ return PackedArray::AppendRef(m_vec, v, false); });
     return *this;
   }
 
-  PackedArrayInit& add(RefResult v) {
-    HphpArray::AppendRefPacked(m_vec, variant(v), false);
+  /*
+   * Append v, preserving references in the way php does.  That is, if
+   * v is a KindOfRef with refcount > 1, the new element in *this will
+   * be KindOfRef and share the same RefData.  Otherwise, the new
+   * element is split.
+   */
+  PackedArrayInit& appendWithRef(const Variant& v) {
+    performOp([&]{ return PackedArray::AppendWithRef(m_vec, v, false); });
     return *this;
   }
 
   Variant toVariant() {
     auto ptr = m_vec;
     m_vec = nullptr;
-    return Variant(ptr, Variant::ArrayInitCtor::Tag);
+#ifndef NDEBUG
+    m_expectedCount = 0; // reset; no more adds allowed
+#endif
+    return Variant(ptr, Variant::ArrayInitCtor{});
   }
 
   Array toArray() {
     ArrayData* ptr = m_vec;
     m_vec = nullptr;
+#ifndef NDEBUG
+    m_expectedCount = 0; // reset; no more adds allowed
+#endif
     return Array(ptr, Array::ArrayInitCtor::Tag);
   }
 
   ArrayData *create() {
     auto ptr = m_vec;
     m_vec = nullptr;
+#ifndef NDEBUG
+    m_expectedCount = 0; // reset; no more adds allowed
+#endif
     return ptr;
   }
 
 private:
-  HphpArray* m_vec;
+  template<class Operation>
+  ALWAYS_INLINE void performOp(Operation oper) {
+    DEBUG_ONLY auto newp = oper();
+    // Array escalation must not happen during these reserved
+    // initializations.
+    assert(newp == m_vec);
+    // You cannot add/set more times than you reserved with ArrayInit.
+    assert(++m_addCount <= m_expectedCount);
+  }
+
+private:
+  ArrayData* m_vec;
+#ifndef NDEBUG
+  size_t m_addCount;
+  size_t m_expectedCount;
+#endif
 };
 
-///////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////
+
+namespace make_array_detail {
+
+  inline void packed_impl(PackedArrayInit&) {}
+
+  template<class Val, class... Vals>
+  void packed_impl(PackedArrayInit& init, Val&& val, Vals&&... vals) {
+    init.append(std::forward<Val>(val));
+    packed_impl(init, std::forward<Vals>(vals)...);
+  }
+
+  inline String init_key(const char* s) { return String(s); }
+  inline int64_t init_key(int k) { return k; }
+  inline int64_t init_key(int64_t k) { return k; }
+  inline const String& init_key(const String& k) { return k; }
+
+  inline void map_impl(ArrayInit&) {}
+
+  template<class Key, class Val, class... KVPairs>
+  void map_impl(ArrayInit& init, Key&& key, Val&& val, KVPairs&&... kvpairs) {
+    init.set(init_key(std::forward<Key>(key)), std::forward<Val>(val));
+    map_impl(init, std::forward<KVPairs>(kvpairs)...);
+  }
+
 }
 
-#endif /* incl_HPHP_ARRAY_INIT_H_ */
+/*
+ * Helper for creating packed arrays (vector-like) that don't contain
+ * references.
+ *
+ * Usage:
+ *
+ *   auto newArray = make_packed_array(1, 2, 3, 4);
+ *
+ * If you need to deal with references, you currently have to use
+ * PackedArrayInit directly.
+ */
+template<class... Vals>
+Array make_packed_array(Vals&&... vals) {
+  static_assert(sizeof...(vals), "use Array::Create() instead");
+  PackedArrayInit init(sizeof...(vals));
+  make_array_detail::packed_impl(init, std::forward<Vals>(vals)...);
+  return init.toArray();
+}
+
+/*
+ * Helper for creating map-like arrays (kMixedKind).  Takes pairs of
+ * arguments for the keys and values.
+ *
+ * Usage:
+ *
+ *   auto newArray = make_map_array(keyOne, valueOne,
+ *                                  otherKey, otherValue);
+ *
+ */
+template<class... KVPairs>
+Array make_map_array(KVPairs&&... kvpairs) {
+  static_assert(
+    sizeof...(kvpairs) % 2 == 0, "make_map_array needs key value pairs");
+  ArrayInit init(sizeof...(kvpairs) / 2, ArrayInit::Map{});
+  make_array_detail::map_impl(init, std::forward<KVPairs>(kvpairs)...);
+  return init.toArray();
+}
+
+//////////////////////////////////////////////////////////////////////
+
+}
+
+#endif

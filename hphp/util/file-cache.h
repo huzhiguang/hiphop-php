@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,9 +17,8 @@
 #ifndef incl_HPHP_FILE_CACHE_H_
 #define incl_HPHP_FILE_CACHE_H_
 
+#include <memory>
 #include <string>
-
-#include "hphp/util/base.h"
 
 namespace HPHP {
 
@@ -27,11 +26,13 @@ namespace HPHP {
  * Stores file contents in memory. Used by web server for faster static
  * content serving.
  */
-DECLARE_BOOST_TYPES(FileCache);
+
+class CacheManager;
 
 class FileCache {
  public:
   static std::string SourceRoot;
+  static bool UseNewCache;
 
  public:
   FileCache();
@@ -41,19 +42,15 @@ class FileCache {
    * Archiving data.
    */
 
-  void write(const char *name, bool addDirectories = true);
+  void write(const char *name);   // just the name
   void write(const char *name, const char *fullpath); // name + data
-
 
   void save(const char *filename);
 
   /**
    * Reading data.
    */
-  short getVersion(const char *filename);
-  void load(const char *filename, bool onDemandUncompress, short version);
-  void loadMmap(const char *filename, short version);
-  void adviseOutMemory();
+  void loadMmap(const char *filename);
   bool fileExists(const char *name, bool isRelative = true) const;
   bool dirExists(const char *name, bool isRelative = true) const;
   bool exists(const char *name, bool isRelative = true) const;
@@ -64,20 +61,7 @@ class FileCache {
   static std::string GetRelativePath(const char *path);
 
  private:
-  struct Buffer {
-    int len;     // uncompressed len     -1: PHP file, -2: directories
-    char *data;  // uncompressed data
-    int clen;    // compressed len
-    char *cdata; // compressed data
-  };
-  typedef hphp_hash_map<std::string, Buffer, string_hash> FileMap;
-
-  FileMap m_files;
-  int m_fd;
-  int m_size;
-  void *m_addr;
-
-  void writeDirectories(const char *name);
+  std::unique_ptr<CacheManager> cache_manager_;
 };
 
 }   // namespace HPHP

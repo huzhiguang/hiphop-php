@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,43 +16,143 @@
 
 #include "hphp/runtime/vm/debug/debug.h"
 #include "hphp/runtime/vm/debug/gdb-jit.h"
+#include "hphp/runtime/vm/jit/mc-generator.h"
 
 #include "hphp/runtime/base/execution-context.h"
+
+#include "hphp/util/current-executable.h"
 
 #include <sys/types.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <cxxabi.h>
+#include <bfd.h>
 
-#include "hphp/runtime/vm/jit/translator-x64.h"
-
-using namespace HPHP::Transl;
+using namespace HPHP::jit;
 
 namespace HPHP {
 namespace Debug {
 
+void* DebugInfo::pidMapOverlayStart;
+void* DebugInfo::pidMapOverlayEnd;
+
 DebugInfo* DebugInfo::Get() {
-  return tx64->getDebugInfo();
+  return mcg->getDebugInfo();
 }
 
-DebugInfo::DebugInfo() {
+DebugInfo::DebugInfo() : m_perfMap(0), m_dataMap(0) {
   snprintf(m_perfMapName,
            sizeof m_perfMapName,
            "/tmp/perf-%d.map", getpid());
-  m_perfMap = fopen(m_perfMapName, "w");
+  if (RuntimeOption::EvalPerfPidMap) {
+    m_perfMap = fopen(m_perfMapName, "w");
+  }
+  snprintf(m_dataMapName,
+           sizeof m_dataMapName,
+           "/tmp/perf-data-%d.map", getpid());
+  if (RuntimeOption::EvalPerfDataMap) {
+    m_dataMap = fopen(m_dataMapName, "w");
+  }
+  generatePidMapOverlay();
 }
 
 DebugInfo::~DebugInfo() {
-  if (m_perfMap) fclose(m_perfMap);
-  if (!RuntimeOption::EvalKeepPerfPidMap) {
-    unlink(m_perfMapName);
+  if (m_perfMap) {
+    fclose(m_perfMap);
+    if (!RuntimeOption::EvalKeepPerfPidMap) {
+      unlink(m_perfMapName);
+    }
+  }
+
+  if (m_dataMap) {
+    fclose(m_dataMap);
+    if (!RuntimeOption::EvalKeepPerfPidMap) {
+      unlink(m_dataMapName);
+    }
   }
 }
 
+void DebugInfo::generatePidMapOverlay() {
+  if (!m_perfMap || !pidMapOverlayStart) return;
+
+  std::string self = current_executable_path();
+  bfd* abfd = bfd_openr(self.c_str(), nullptr);
+#ifdef BFD_DECOMPRESS
+  abfd->flags |= BFD_DECOMPRESS;
+#endif
+  char **match = nullptr;
+  if (!bfd_check_format(abfd, bfd_archive) &&
+      bfd_check_format_matches(abfd, bfd_object, &match)) {
+
+    std::vector<asymbol*> sorted;
+    long storage_needed = bfd_get_symtab_upper_bound (abfd);
+
+    if (storage_needed <= 0) return;
+
+    auto symbol_table = (asymbol**)malloc(storage_needed);
+
+    long number_of_symbols = bfd_canonicalize_symtab(abfd, symbol_table);
+
+    for (long i = 0; i < number_of_symbols; i++) {
+      auto sym = symbol_table[i];
+      if (sym->flags &
+          (BSF_INDIRECT |
+           BSF_SECTION_SYM |
+           BSF_FILE |
+           BSF_DEBUGGING_RELOC |
+           BSF_OBJECT)) {
+        continue;
+      }
+      auto sec = sym->section;
+      if (!(sec->flags & (SEC_ALLOC|SEC_LOAD|SEC_CODE))) continue;
+      auto addr = sec->vma + sym->value;
+      if (addr < uintptr_t(pidMapOverlayStart) ||
+          addr >= uintptr_t(pidMapOverlayEnd)) {
+        continue;
+      }
+      sorted.push_back(sym);
+    }
+
+    std::sort(sorted.begin(), sorted.end(), [](asymbol* a, asymbol* b) {
+        auto addra = a->section->vma + a->value;
+        auto addrb = b->section->vma + b->value;
+        if (addra != addrb) return addra < addrb;
+        return strncmp("_ZN4HPHP", a->name, 8) &&
+          !strncmp("_ZN4HPHP", b->name, 8);
+      });
+
+    for (size_t i = 0; i < sorted.size(); i++) {
+      auto sym = sorted[i];
+      auto addr = sym->section->vma + sym->value;
+      int status;
+      char* demangled =
+        abi::__cxa_demangle(sym->name, nullptr, nullptr, &status);
+      if (status != 0) demangled = const_cast<char*>(sym->name);
+      unsigned size;
+      if (i + 1 < sorted.size()) {
+        auto s2 = sorted[i + 1];
+        size = s2->section->vma + s2->value - addr;
+      } else {
+        size = uintptr_t(pidMapOverlayEnd) - addr;
+      }
+      if (!size) continue;
+      fprintf(m_perfMap, "%lx %x %s\n",
+              long(addr), size, demangled);
+      if (status == 0) free(demangled);
+    }
+
+    free(symbol_table);
+    free(match);
+  }
+  bfd_close(abfd);
+  return;
+}
+
 void DebugInfo::recordStub(TCRange range, const char* name) {
-  if (range.isAstubs()) {
-    m_astubsDwarfInfo.addTracelet(range, name, nullptr, nullptr, false, false);
+  if (range.isAcold()) {
+    m_acoldDwarfInfo.addTracelet(range, name, nullptr, nullptr, false, false);
   } else {
     m_aDwarfInfo.addTracelet(range, name, nullptr, nullptr, false, false);
   }
@@ -78,10 +178,10 @@ void DebugInfo::recordBCInstr(TCRange range, uint32_t op) {
 #undef O
   };
 
-  static const char* astubOpcodeName[] = {
-    "OpAstubStart",
+  static const char* acoldOpcodeName[] = {
+    "OpAcoldStart",
 #define O(name, imm, push, pop, flags) \
-#name "-Astub",
+#name "-Acold",
     OPCODES
 #undef O
   };
@@ -100,28 +200,46 @@ void DebugInfo::recordBCInstr(TCRange range, uint32_t op) {
     const char* name;
     if (op < Op_count) {
       name = opcodeName[op];
-    } else if (op < OpAstubCount) {
-      name = astubOpcodeName[op - OpAstubStart];
+    } else if (op < OpAcoldCount) {
+      name = acoldOpcodeName[op - OpAcoldStart];
     } else {
       name = highOpcodeName[op - OpHighStart];
     }
     fprintf(m_perfMap, "%lx %x %s\n",
             uintptr_t(range.begin()), range.size(), name);
+    fflush(m_perfMap);
   }
 }
 
 void DebugInfo::recordTracelet(TCRange range, const Func* func,
-    const Opcode *instr, bool exit, bool inPrologue) {
-  if (range.isAstubs()) {
-    m_astubsDwarfInfo.addTracelet(range, nullptr, func, instr, exit, inPrologue);
+    const Op* instr, bool exit, bool inPrologue) {
+  if (range.isAcold()) {
+    m_acoldDwarfInfo.addTracelet(range, nullptr, func,
+                                  instr, exit, inPrologue);
   } else {
     m_aDwarfInfo.addTracelet(range, nullptr, func, instr, exit, inPrologue);
   }
 }
 
+void DebugInfo::recordDataMap(void* from, void* to, const std::string& desc) {
+  if (!mcg) return;
+  return Get()->recordDataMapImpl(from, to, desc);
+}
+
+void DebugInfo::recordDataMapImpl(void* from, void* to,
+                                  const std::string& desc) {
+  if (m_dataMap) {
+    fprintf(m_dataMap, "%" PRIxPTR " %" PRIx64 " %s\n",
+            uintptr_t(from),
+            uint64_t((char*)to - (char*)from),
+            desc.c_str());
+    fflush(m_dataMap);
+  }
+}
+
 void DebugInfo::debugSync() {
   m_aDwarfInfo.syncChunks();
-  m_astubsDwarfInfo.syncChunks();
+  m_acoldDwarfInfo.syncChunks();
 }
 
 std::string lookupFunction(const Func* f,

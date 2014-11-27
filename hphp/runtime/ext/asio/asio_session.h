@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -26,14 +26,15 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-FORWARD_DECLARE_CLASS_BUILTIN(WaitHandle);
-FORWARD_DECLARE_CLASS_BUILTIN(GenArrayWaitHandle);
-FORWARD_DECLARE_CLASS_BUILTIN(GenMapWaitHandle);
-FORWARD_DECLARE_CLASS_BUILTIN(GenVectorWaitHandle);
-FORWARD_DECLARE_CLASS_BUILTIN(SetResultToRefWaitHandle);
-FORWARD_DECLARE_CLASS_BUILTIN(ContinuationWaitHandle);
+struct ActRec;
+FORWARD_DECLARE_CLASS(WaitHandle);
+FORWARD_DECLARE_CLASS(AwaitAllWaitHandle);
+FORWARD_DECLARE_CLASS(GenArrayWaitHandle);
+FORWARD_DECLARE_CLASS(GenMapWaitHandle);
+FORWARD_DECLARE_CLASS(GenVectorWaitHandle);
+FORWARD_DECLARE_CLASS(ResumableWaitHandle);
 
-class AsioSession {
+class AsioSession final {
   public:
     static void Init();
     static AsioSession* Get() { return s_current.get(); }
@@ -42,7 +43,7 @@ class AsioSession {
     void operator delete(void* ptr) { smart_free(ptr); }
 
     // context
-    void enterContext();
+    void enterContext(ActRec* savedFP);
     void exitContext();
 
     bool isInContext() {
@@ -64,21 +65,43 @@ class AsioSession {
       return static_cast<context_idx_t>(m_contexts.size());
     }
 
-    c_ContinuationWaitHandle* getCurrentWaitHandle() {
-      assert(!isInContext() || getCurrentContext()->isRunning());
-      return isInContext() ? getCurrentContext()->getCurrent() : nullptr;
-    }
-
-    uint16_t getCurrentWaitHandleDepth();
-
-    // external thread events
+    // External thread events.
     AsioExternalThreadEventQueue* getExternalThreadEventQueue() {
       return &m_externalThreadEventQueue;
     }
 
-    // abrupt interrupt exception
-    CObjRef getAbruptInterruptException() {
-      return m_abruptInterruptException;
+    // Meager time abstractions.
+    typedef std::chrono::time_point<std::chrono::steady_clock> TimePoint;
+
+    // The latest time we will wait for an I/O operation to complete.  If this
+    // time is exceeded, onIOWaitExit will throw after checking surprise.
+    static TimePoint getLatestWakeTime() {
+      auto now = std::chrono::steady_clock::now();
+      auto info = ThreadInfo::s_threadInfo.getNoCheck();
+      auto& data = info->m_reqInjectionData;
+      if (!data.getTimeout()) {
+        // Don't wait for over nine thousand hours.
+        return now + std::chrono::hours(9000);
+      }
+      auto remaining = int64_t(data.getRemainingTime());
+      return now + std::chrono::seconds(remaining);
+    }
+
+    // Sleep event management.
+    struct sleep_wh_greater {
+      bool operator() (const c_SleepWaitHandle* x, const c_SleepWaitHandle* y);
+    };
+
+    smart::priority_queue<c_SleepWaitHandle*, sleep_wh_greater>&
+    getSleepEventQueue() {
+      return m_sleepEventQueue;
+    }
+
+    bool processSleepEvents();
+
+    // Abrupt interrupt exception.
+    ObjectData* getAbruptInterruptException() {
+      return m_abruptInterruptException.get();
     }
 
     bool hasAbruptInterruptException() {
@@ -87,79 +110,70 @@ class AsioSession {
 
     void initAbruptInterruptException();
 
-    // callback: on failed
-    void setOnFailedCallback(ObjectData* on_failed_callback) {
-      assert(!on_failed_callback || on_failed_callback->instanceof(c_Closure::s_cls));
-      m_onFailedCallback = on_failed_callback;
-    }
-    void onFailed(CObjRef exception);
-
-    // ContinuationWaitHandle callbacks:
-    void setOnContinuationCreateCallback(ObjectData* on_start) {
-      assert(!on_start || on_start->instanceof(c_Closure::s_cls));
-      m_onContinuationCreateCallback = on_start;
-    }
-    void setOnContinuationYieldCallback(ObjectData* on_yield) {
-      assert(!on_yield || on_yield->instanceof(c_Closure::s_cls));
-      m_onContinuationYieldCallback = on_yield;
-    }
-    void setOnContinuationSuccessCallback(ObjectData* on_success) {
-      assert(!on_success || on_success->instanceof(c_Closure::s_cls));
-      m_onContinuationSuccessCallback = on_success;
-    }
-    void setOnContinuationFailCallback(ObjectData* on_fail) {
-      assert(!on_fail || on_fail->instanceof(c_Closure::s_cls));
-      m_onContinuationFailCallback = on_fail;
-    }
-    bool hasOnContinuationCreateCallback() { return m_onContinuationCreateCallback.get(); }
-    bool hasOnContinuationYieldCallback() { return m_onContinuationYieldCallback.get(); }
-    bool hasOnContinuationSuccessCallback() { return m_onContinuationSuccessCallback.get(); }
-    bool hasOnContinuationFailCallback() { return m_onContinuationFailCallback.get(); }
-    void onContinuationCreate(c_ContinuationWaitHandle* cont);
-    void onContinuationYield(c_ContinuationWaitHandle* cont, c_WaitHandle* child);
-    void onContinuationSuccess(c_ContinuationWaitHandle* cont, CVarRef result);
-    void onContinuationFail(c_ContinuationWaitHandle* cont, CObjRef exception);
-
     // WaitHandle callbacks:
-    void setOnJoinCallback(ObjectData* on_join) {
-      assert(!on_join || on_join->instanceof(c_Closure::s_cls));
-      m_onJoinCallback = on_join;
-    }
+    void setOnIOWaitEnterCallback(const Variant& callback);
+    void setOnIOWaitExitCallback(const Variant& callback);
+    void setOnJoinCallback(const Variant& callback);
+    bool hasOnIOWaitEnterCallback() { return m_onIOWaitEnterCallback.get(); }
+    bool hasOnIOWaitExitCallback() { return m_onIOWaitExitCallback.get(); }
     bool hasOnJoinCallback() { return m_onJoinCallback.get(); }
-    void onJoin(c_WaitHandle* wait_handle);
+    void onIOWaitEnter();
+    void onIOWaitExit();
+    void onJoin(c_WaitHandle* waitHandle);
+
+    // ResumableWaitHandle callbacks:
+    void setOnResumableCreateCallback(const Variant& callback);
+    void setOnResumableAwaitCallback(const Variant& callback);
+    void setOnResumableSuccessCallback(const Variant& callback);
+    void setOnResumableFailCallback(const Variant& callback);
+    bool hasOnResumableCreateCallback() { return m_onResumableCreateCallback.get(); }
+    bool hasOnResumableAwaitCallback() { return m_onResumableAwaitCallback.get(); }
+    bool hasOnResumableSuccessCallback() { return m_onResumableSuccessCallback.get(); }
+    bool hasOnResumableFailCallback() { return m_onResumableFailCallback.get(); }
+    void onResumableCreate(c_ResumableWaitHandle* cont, c_WaitableWaitHandle* child);
+    void onResumableAwait(c_ResumableWaitHandle* cont, c_WaitableWaitHandle* child);
+    void onResumableSuccess(c_ResumableWaitHandle* cont, const Variant& result);
+    void onResumableFail(c_ResumableWaitHandle* cont, const Object& exception);
+    void updateEventHookState();
+
+    // AwaitAllWaitHandle callbacks:
+    void setOnAwaitAllCreateCallback(const Variant& callback);
+    bool hasOnAwaitAllCreateCallback() { return m_onAwaitAllCreateCallback.get(); }
+    void onAwaitAllCreate(c_AwaitAllWaitHandle* wait_handle, const Variant& dependencies);
 
     // GenArrayWaitHandle callbacks:
-    void setOnGenArrayCreateCallback(ObjectData* on_create) {
-      assert(!on_create || on_create->instanceof(c_Closure::s_cls));
-      m_onGenArrayCreateCallback = on_create;
-    }
+    void setOnGenArrayCreateCallback(const Variant& callback);
     bool hasOnGenArrayCreateCallback() { return m_onGenArrayCreateCallback.get(); }
-    void onGenArrayCreate(c_GenArrayWaitHandle* wait_handle, CVarRef dependencies);
+    void onGenArrayCreate(c_GenArrayWaitHandle* waitHandle, const Variant& dependencies);
 
     // GenMapWaitHandle callbacks:
-    void setOnGenMapCreateCallback(ObjectData* on_create) {
-      assert(!on_create || on_create->instanceof(c_Closure::s_cls));
-      m_onGenMapCreateCallback = on_create;
-    }
+    void setOnGenMapCreateCallback(const Variant& callback);
     bool hasOnGenMapCreateCallback() { return m_onGenMapCreateCallback.get(); }
-    void onGenMapCreate(c_GenMapWaitHandle* wait_handle, CVarRef dependencies);
+    void onGenMapCreate(c_GenMapWaitHandle* waitHandle, const Variant& dependencies);
 
     // GenVectorWaitHandle callbacks:
-    void setOnGenVectorCreateCallback(ObjectData* on_create) {
-      assert(!on_create || on_create->instanceof(c_Closure::s_cls));
-      m_onGenVectorCreateCallback = on_create;
-    }
+    void setOnGenVectorCreateCallback(const Variant& callback);
     bool hasOnGenVectorCreateCallback() { return m_onGenVectorCreateCallback.get(); }
-    void onGenVectorCreate(c_GenVectorWaitHandle* wait_handle, CVarRef dependencies);
+    void onGenVectorCreate(c_GenVectorWaitHandle* waitHandle, const Variant& dependencies);
 
-    // SetResultToRefWaitHandle callbacks:
-    void setOnSetResultToRefCreateCallback(ObjectData* on_create) {
-      assert(!on_create || on_create->instanceof(c_Closure::s_cls));
-      m_onSetResultToRefCreateCallback = on_create;
-    }
-    bool hasOnSetResultToRefCreateCallback() { return m_onSetResultToRefCreateCallback.get(); }
-    void onSetResultToRefCreate(c_SetResultToRefWaitHandle* wait_handle, CObjRef child);
+    // ExternalThreadEventWaitHandle callbacks:
+    void setOnExternalThreadEventCreateCallback(const Variant& callback);
+    void setOnExternalThreadEventSuccessCallback(const Variant& callback);
+    void setOnExternalThreadEventFailCallback(const Variant& callback);
+    bool hasOnExternalThreadEventCreateCallback() { return m_onExternalThreadEventCreateCallback.get(); }
+    bool hasOnExternalThreadEventSuccessCallback() { return m_onExternalThreadEventSuccessCallback.get(); }
+    bool hasOnExternalThreadEventFailCallback() { return m_onExternalThreadEventFailCallback.get(); }
+    void onExternalThreadEventCreate(c_ExternalThreadEventWaitHandle* waitHandle);
+    void onExternalThreadEventSuccess(c_ExternalThreadEventWaitHandle* waitHandle, const Variant& result);
+    void onExternalThreadEventFail(c_ExternalThreadEventWaitHandle* waitHandle, const Object& exception);
 
+    // SleepWaitHandle callbacks:
+    void setOnSleepCreateCallback(const Variant& callback);
+    void setOnSleepSuccessCallback(const Variant& callback);
+    bool hasOnSleepCreateCallback() { return m_onSleepCreateCallback.get(); }
+    bool hasOnSleepSuccessCallback() { return m_onSleepSuccessCallback.get(); }
+    void onSleepCreate(c_SleepWaitHandle* waitHandle);
+    void onSleepSuccess(c_SleepWaitHandle* waitHandle);
 
   private:
     static DECLARE_THREAD_LOCAL_PROXY(AsioSession, false, s_current);
@@ -167,23 +181,28 @@ class AsioSession {
     AsioSession();
 
     smart::vector<AsioContext*> m_contexts;
-
+    smart::priority_queue<c_SleepWaitHandle*,
+                          sleep_wh_greater> m_sleepEventQueue;
     AsioExternalThreadEventQueue m_externalThreadEventQueue;
 
     Object m_abruptInterruptException;
 
-    Object m_onContinuationCreateCallback;
-    Object m_onContinuationYieldCallback;
-    Object m_onContinuationSuccessCallback;
-    Object m_onContinuationFailCallback;
+    Object m_onIOWaitEnterCallback;
+    Object m_onIOWaitExitCallback;
+    Object m_onJoinCallback;
+    Object m_onResumableCreateCallback;
+    Object m_onResumableAwaitCallback;
+    Object m_onResumableSuccessCallback;
+    Object m_onResumableFailCallback;
+    Object m_onAwaitAllCreateCallback;
     Object m_onGenArrayCreateCallback;
     Object m_onGenMapCreateCallback;
     Object m_onGenVectorCreateCallback;
-    Object m_onSetResultToRefCreateCallback;
-    Object m_onJoinCallback;
-
-    // Legacy callback for backwards compatibility.
-    Object m_onFailedCallback;
+    Object m_onExternalThreadEventCreateCallback;
+    Object m_onExternalThreadEventSuccessCallback;
+    Object m_onExternalThreadEventFailCallback;
+    Object m_onSleepCreateCallback;
+    Object m_onSleepSuccessCallback;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

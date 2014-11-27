@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -19,6 +19,8 @@
 #define incl_HPHP_FBSERIALIZE_INL_H_
 
 #include <folly/Bits.h>
+#include <folly/Conv.h>
+#include <algorithm>
 
 namespace HPHP { namespace serialize {
 
@@ -35,7 +37,8 @@ struct UnserializeError : std::runtime_error {
 };
 
 template <class V>
-void FBSerializer<V>::serialize(const typename V::VariantType& thing,
+template <typename Variant>
+void FBSerializer<V>::serialize(const Variant& thing,
                                 char* out) {
   FBSerializer<V> serializer(out);
   serializer.doSerialize(thing);
@@ -46,7 +49,8 @@ FBSerializer<V>::FBSerializer(char* out) : out_(out) {
 }
 
 template <class V>
-void FBSerializer<V>::doSerialize(const typename V::VariantType& thing) {
+template <typename Variant>
+void FBSerializer<V>::doSerialize(const Variant& thing) {
   serializeThing(thing, 0);
 }
 
@@ -97,7 +101,8 @@ void FBSerializer<V>::serializeDouble(double val) {
 }
 
 template <class V>
-void FBSerializer<V>::serializeString(const typename V::StringType& str) {
+template <typename String>
+void FBSerializer<V>::serializeString(const String& str) {
   size_t len = V::stringLen(str);
 
   if (len == (size_t)(uint8_t)len) {
@@ -113,8 +118,8 @@ void FBSerializer<V>::serializeString(const typename V::StringType& str) {
 }
 
 template <class V>
-void FBSerializer<V>::serializeMap(const typename V::MapType& map,
-                                   size_t depth) {
+template <typename Map>
+void FBSerializer<V>::serializeMap(const Map& map, size_t depth) {
   writeCode(FB_SERIALIZE_STRUCT);
   for (auto it = V::mapIterator(map); V::mapNotEnd(map, it); V::mapNext(it)) {
     auto key = V::mapKey(it);
@@ -134,8 +139,8 @@ void FBSerializer<V>::serializeMap(const typename V::MapType& map,
 }
 
 template <class V>
-void FBSerializer<V>::serializeVector(const typename V::VectorType& vec,
-                                      size_t depth) {
+template <typename Vector>
+void FBSerializer<V>::serializeVector(const Vector& vec, size_t depth) {
   writeCode(FB_SERIALIZE_STRUCT);
 
   size_t index = 0;
@@ -149,8 +154,8 @@ void FBSerializer<V>::serializeVector(const typename V::VectorType& vec,
 }
 
 template <class V>
-void FBSerializer<V>::serializeThing(const typename V::VariantType& thing,
-                                     size_t depth) {
+template <typename Variant>
+void FBSerializer<V>::serializeThing(const Variant& thing, size_t depth) {
   if (depth > 256) {
     throw SerializeError("link depth > 256");
   }
@@ -185,12 +190,13 @@ void FBSerializer<V>::serializeThing(const typename V::VariantType& thing,
       break;
 
     default:
-      throw UnserializeError("Unknown type");
+      throw SerializeError("Unknown type");
   }
 }
 
 template <class V>
-size_t FBSerializer<V>::serializedSize(const typename V::VariantType& thing) {
+template <typename Variant>
+size_t FBSerializer<V>::serializedSize(const Variant& thing) {
   return serializedSizeThing(thing, 0);
 }
 
@@ -232,7 +238,7 @@ size_t FBSerializer<V>::serializedSizeThing(const Variant& thing,
       break;
 
     default:
-      throw UnserializeError("Unknown type");
+      throw SerializeError("Unknown type");
   }
 }
 
@@ -304,29 +310,20 @@ size_t FBSerializer<V>::serializedSizeVector(const Vector& vec, size_t depth) {
 
 template <class V>
 inline typename V::VariantType FBUnserializer<V>::unserialize(
-  const folly::StringPiece& serialized) {
+  folly::StringPiece serialized) {
 
-  FBUnserializer<V> unserializer;
-  return unserializer.doUnserialize(serialized);
+  FBUnserializer<V> unserializer(serialized);
+  return unserializer.unserializeThing();
 }
 
 template <class V>
-FBUnserializer<V>::FBUnserializer() {
+FBUnserializer<V>::FBUnserializer(folly::StringPiece serialized) :
+    p_(serialized.data()), end_(p_ + serialized.size()) {
 }
 
 template <class V>
-inline typename V::VariantType FBUnserializer<V>::doUnserialize(
-  const folly::StringPiece& serialized) {
-
-  p_ = serialized.data();
-  end_ = p_ + serialized.size();
-
-  return unserializeThing();
-}
-
-template <class V>
-inline void FBUnserializer<V>::need(size_t n) {
-  if (UNLIKELY(p_ + n > end_)) {
+inline void FBUnserializer<V>::need(size_t n) const {
+  if (UNLIKELY(n > end_ - p_)) {
     throw UnserializeError("Unexpected end");
   }
 }
@@ -395,6 +392,12 @@ inline double FBUnserializer<V>::unserializeDouble() {
 
 template <class V>
 inline typename V::StringType FBUnserializer<V>::unserializeString() {
+  auto s = unserializeStringPiece();
+  return V::stringFromData(s.data(), s.size());
+}
+
+template <class V>
+inline folly::StringPiece FBUnserializer<V>::unserializeStringPiece() {
   size_t code = *p_;
   p_ += CODE_SIZE;
   size_t data_size = 0;
@@ -416,9 +419,15 @@ inline typename V::StringType FBUnserializer<V>::unserializeString() {
   }
 
   need(data_size);
-  auto ret = V::stringFromData(p_, data_size);
+  folly::StringPiece ret(p_, data_size);
   p_ += data_size;
   return ret;
+}
+
+template <class V>
+inline FBSerializeBase::Code FBUnserializer<V>::nextCode() const {
+  need(CODE_SIZE);
+  return static_cast<Code>(*p_);
 }
 
 template <class V>
@@ -427,9 +436,8 @@ inline typename V::MapType FBUnserializer<V>::unserializeMap() {
 
   typename V::MapType ret = V::createMap();
 
-  need(CODE_SIZE);
-  while (*p_ != FB_SERIALIZE_STOP) {
-    size_t code = *p_;
+  size_t code = nextCode();
+  while (code != FB_SERIALIZE_STOP) {
     switch (code) {
       case FB_SERIALIZE_VARCHAR:
       case FB_SERIALIZE_STRING:
@@ -447,7 +455,7 @@ inline typename V::MapType FBUnserializer<V>::unserializeMap() {
         }
     }
 
-    need(CODE_SIZE);
+    code = nextCode();
   }
   p_ += CODE_SIZE;
 
@@ -455,9 +463,63 @@ inline typename V::MapType FBUnserializer<V>::unserializeMap() {
 }
 
 template <class V>
+inline folly::StringPiece FBUnserializer<V>::getSerializedMap() {
+  const char* head = p_;
+  p_ += CODE_SIZE;
+
+  size_t code = nextCode();
+  while (code != FB_SERIALIZE_STOP) {
+    switch (code) {
+      case FB_SERIALIZE_BYTE:
+        p_ += (CODE_SIZE + INT8_SIZE);
+        break;
+      case FB_SERIALIZE_I16:
+        p_ += (CODE_SIZE + INT16_SIZE);
+        break;
+      case FB_SERIALIZE_I32:
+        p_ += (CODE_SIZE + INT32_SIZE);
+        break;
+      case FB_SERIALIZE_I64:
+        p_ += (CODE_SIZE + INT64_SIZE);
+        break;
+      case FB_SERIALIZE_VARCHAR:
+      case FB_SERIALIZE_STRING:
+        unserializeStringPiece();
+        break;
+      case FB_SERIALIZE_STRUCT:
+        {
+          getSerializedMap();
+          break;
+        }
+      case FB_SERIALIZE_NULL:
+        {
+           p_ += CODE_SIZE;
+           break;
+        }
+      case FB_SERIALIZE_DOUBLE:
+        {
+          p_ += (CODE_SIZE + DOUBLE_SIZE);
+          break;
+        }
+      case FB_SERIALIZE_BOOLEAN:
+        {
+          p_ += (CODE_SIZE + BOOLEAN_SIZE);
+          break;
+        }
+      default:
+        throw UnserializeError("Invalid code: " + folly::to<std::string>(code)
+                               + " at location " + folly::to<std::string>(p_));
+    }
+    code = nextCode();
+  }
+  p_ += CODE_SIZE;
+  const char* tail = p_;
+  return folly::StringPiece(head, tail);
+}
+
+template <class V>
 inline typename V::VariantType FBUnserializer<V>::unserializeThing() {
-  need(CODE_SIZE);
-  size_t code = *p_;
+  size_t code = nextCode();
 
   switch (code) {
     case FB_SERIALIZE_BYTE:
@@ -481,6 +543,11 @@ inline typename V::VariantType FBUnserializer<V>::unserializeThing() {
       throw UnserializeError("Invalid code: " + folly::to<std::string>(code)
                              + " at location " + folly::to<std::string>(p_));
   }
+}
+
+template <class V>
+inline void FBUnserializer<V>::advance(size_t delta) {
+  p_ += delta;
 }
 
 }}

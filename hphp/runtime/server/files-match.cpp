@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,14 +18,15 @@
 #include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/server/virtual-host.h"
 #include "hphp/runtime/base/preg.h"
-#include "hphp/util/util.h"
+#include "hphp/runtime/base/config.h"
+#include "hphp/util/text-util.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-FilesMatch::FilesMatch(Hdf vh) {
-  m_pattern = Util::format_pattern(vh["pattern"].get(""), true);
-  vh["headers"].get(m_headers);
+FilesMatch::FilesMatch(const IniSetting::Map& ini, Hdf vh) {
+  m_pattern = format_pattern(Config::Get(ini, vh["pattern"], ""), true);
+  Config::Get(ini, vh["headers"], m_headers);
 }
 
 bool FilesMatch::match(const std::string &filename) const {

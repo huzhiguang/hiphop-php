@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,23 +15,40 @@
 */
 
 #include "hphp/runtime/vm/jit/trans-cfg.h"
+#include <algorithm>
 
-namespace HPHP {
-namespace JIT {
+#include <folly/MapUtil.h>
 
-static const Trace::Module TRACEMOD = Trace::pgo;
+#include "hphp/runtime/vm/jit/prof-data.h"
+#include "hphp/runtime/vm/jit/region-selection.h"
 
-static TransIDSet findPredTrans(const SrcRec* sr,
+namespace HPHP { namespace jit {
+
+TRACE_SET_MOD(pgo);
+
+static TransIDSet findPredTrans(TransID dstID,
+                                const ProfData* profData,
+                                const SrcDB& srcDB,
                                 const TcaTransIDMap& jmpToTransID) {
-  assert(sr);
+  SrcKey dstSK = profData->transSrcKey(dstID);
+  const SrcRec* dstSR = srcDB.find(dstSK);
+  assert(dstSR);
   TransIDSet predSet;
 
-  for (auto inBr : sr->incomingBranches()) {
-    TransID srcId = mapGet(jmpToTransID, inBr.toSmash(), InvalidID);
-    FTRACE(5, "findPredTrans: toSmash = {}   srcId = {}\n",
-           inBr.toSmash(), srcId);
-    if (srcId != InvalidID) {
-      predSet.insert(srcId);
+  for (auto& inBr : dstSR->incomingBranches()) {
+    TransID srcID = folly::get_default(jmpToTransID, inBr.toSmash(),
+                                       kInvalidTransID);
+    FTRACE(5, "findPredTrans: toSmash = {}   srcID = {}\n",
+           inBr.toSmash(), srcID);
+    if (srcID != kInvalidTransID && profData->isKindProfile(srcID)) {
+      auto srcSuccOffsets = profData->transLastSrcKey(srcID).succOffsets();
+      if (srcSuccOffsets.count(dstSK.offset())) {
+        predSet.insert(srcID);
+      } else {
+        FTRACE(5, "findPredTrans: WARNING: incoming branch with impossible "
+               "control flow between translations: {} -> {}"
+               "(probably due to side exit)\n", srcID, dstID);
+      }
     }
   }
 
@@ -76,10 +93,11 @@ TransCFG::TransCFG(FuncId funcId,
   assert(profData);
 
   // add nodes
-  for (TransID tid = 0; tid < profData->numTrans(); tid++) {
-    if (profData->transKind(tid) == TransProfile &&
-        profData->transRegion(tid) != nullptr &&
-        profData->transFuncId(tid) == funcId) {
+  for (auto tid : profData->funcProfTransIDs(funcId)) {
+    assert(profData->transRegion(tid) != nullptr);
+    // This will skip DV Funclets if they were already
+    // retranslated w/ the prologues:
+    if (!profData->optimized(profData->transSrcKey(tid))) {
       int64_t counter = profData->transCounter(tid);
       int64_t weight  = RuntimeOption::EvalJitPGOThreshold - counter;
       addNode(tid, weight);
@@ -89,13 +107,20 @@ TransCFG::TransCFG(FuncId funcId,
   // add arcs
   for (TransID dstId : nodes()) {
     SrcKey dstSK = profData->transSrcKey(dstId);
-    const SrcRec* dstSR = srcDB.find(dstSK);
+    RegionDesc::BlockPtr dstBlock = profData->transRegion(dstId)->entry();
     FTRACE(5, "TransCFG: adding incoming arcs in dstId = {}\n", dstId);
-    TransIDSet predIDs = findPredTrans(dstSR, jmpToTransID);
+    TransIDSet predIDs = findPredTrans(dstId, profData, srcDB, jmpToTransID);
     for (auto predId : predIDs) {
       if (hasNode(predId)) {
-        FTRACE(5, "TransCFG: adding arc {} -> {}\n", predId, dstId);
-        addArc(predId, dstId, TransCFG::Arc::kUnknownWeight);
+        auto predPostConds =
+          profData->transRegion(predId)->blocks().back()->postConds();
+        SrcKey predSK = profData->transSrcKey(predId);
+        if (preCondsAreSatisfied(dstBlock, predPostConds) &&
+            predSK.resumed() == dstSK.resumed()) {
+          FTRACE(5, "TransCFG: adding arc {} -> {} ({} -> {})\n",
+                 predId, dstId, showShort(predSK), showShort(dstSK));
+          addArc(predId, dstId, TransCFG::Arc::kUnknownWeight);
+        }
       }
     }
   }
@@ -125,19 +150,19 @@ TransCFG::TransCFG(FuncId funcId,
 
 int64_t TransCFG::weight(TransID id) const {
   assert(hasNode(id));
-  size_t idx = mapGet(m_idToIdx, id);
+  size_t idx = folly::get_default(m_idToIdx, id);
   return m_nodeInfo[idx].weight();
 }
 
 const TransCFG::ArcPtrVec& TransCFG::inArcs(TransID id) const {
   assert(hasNode(id));
-  size_t idx = mapGet(m_idToIdx, id);
+  size_t idx = folly::get_default(m_idToIdx, id);
   return m_nodeInfo[idx].inArcs();
 }
 
 const TransCFG::ArcPtrVec& TransCFG::outArcs(TransID id) const {
   assert(hasNode(id));
-  size_t idx = mapGet(m_idToIdx, id);
+  size_t idx = folly::get_default(m_idToIdx, id);
   return m_nodeInfo[idx].outArcs();
 }
 
@@ -158,6 +183,15 @@ bool TransCFG::hasNode(TransID id) const {
   return m_idToIdx.find(id) != m_idToIdx.end();
 }
 
+TransCFG::ArcPtrVec TransCFG::arcs() const {
+  ArcPtrVec arcs;
+  for (auto node : nodes()) {
+    const ArcPtrVec& nodeOutArcs = outArcs(node);
+    arcs.insert(arcs.end(), nodeOutArcs.begin(), nodeOutArcs.end());
+  }
+  return arcs;
+}
+
 void TransCFG::addArc(TransID srcId, TransID dstId, int64_t weight) {
   assert(hasNode(srcId));
   assert(hasNode(dstId));
@@ -168,12 +202,25 @@ void TransCFG::addArc(TransID srcId, TransID dstId, int64_t weight) {
   m_nodeInfo[dstIdx].addInArc(arc);
 }
 
-void TransCFG::print(std::string fileName, const ProfData* profData,
+bool TransCFG::hasArc(TransID srcId, TransID dstId) const {
+  assert(hasNode(srcId));
+  assert(hasNode(dstId));
+  for (auto arc : outArcs(srcId)) {
+    if (arc->dst() == dstId) return true;
+  }
+  return false;
+}
+
+void TransCFG::print(std::string fileName, FuncId funcId,
+                     const ProfData* profData,
                      const TransIDSet* selected) const {
   FILE* file = fopen(fileName.c_str(), "wt");
   if (!file) return;
 
   fprintf(file, "digraph CFG {\n");
+
+  fprintf(file, "# function: %s\n",
+          Func::fromFuncId(funcId)->fullName()->data());
 
   // find max node weight
   int64_t maxWeight = 1; // 1 to avoid div by 0
@@ -188,10 +235,11 @@ void TransCFG::print(std::string fileName, const ProfData* profData,
     uint32_t coldness  = 255 - (255 * w / maxWeight);
     Offset bcStart = profData->transStartBcOff(tid);
     Offset bcStop  = profData->transStopBcOff(tid);
-    const char* shape = selected && setContains(*selected, tid) ? "oval"
-                                                                : "box";
+    const char* shape = selected && selected->count(tid) ? "oval"
+                                                         : "box";
     fprintf(file,
-            "t%u [shape=%s,label=\"T: %u\\np: %" PRId64 "\\nbc: [0x%x-0x%x)\","
+            "t%u [shape=%s,label=\"T: %u\\np: %" PRId64 "\\n"
+            "bc: [%" PRIu32 "-%" PRIu32 ")\","
             "style=filled,fillcolor=\"#ff%02x%02x\"];\n", tid, shape, tid, w,
             bcStart, bcStop, coldness, coldness);
   }

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,21 +17,33 @@
 #ifndef HPHP_IDL_H
 #define HPHP_IDL_H
 
-#include "folly/Conv.h"
-#include "folly/DynamicConverter.h"
-#include "folly/FBString.h"
-#include "folly/FBVector.h"
+#include <folly/Conv.h>
+#include <folly/DynamicConverter.h>
+#include <folly/FBString.h>
+#include <folly/FBVector.h>
 
 #include "hphp/runtime/base/datatype.h"
 
 using folly::fbstring;
 using folly::fbvector;
 
+#define KindOfInvalid kInvalidDataType
+#define KindOfAny     static_cast<DataType>(-8)
+
 namespace HPHP { namespace IDL {
 /////////////////////////////////////////////////////////////////////////////
 
+void makeInvocationTrace(fbstring& invocation_trace,
+                         int argc,
+                         const char* argv[]);
+
+void brandOutputFile(std::ostream& out,
+                     const char* short_name,
+                     const fbstring& invocation_trace);
+
 enum FuncFlags {
-  ZendParamMode                 = (1 <<  0),
+  ParamCoerceModeNull           = (1 <<  0),
+  CppCustomDelete               = (1 <<  1),
   IsAbstract                    = (1 <<  4),
   IsFinal                       = (1 <<  5),
   IsPublic                      = (1 <<  6),
@@ -41,14 +53,12 @@ enum FuncFlags {
   IsStatic                      = (1 <<  9),
   IsCppAbstract                 = (1 << 10),
   IsReference                   = (1 << 11),
-  IsConstructor                 = (1 << 12),
   IsNothing                     = (1 << 13),
   ZendCompat                    = (1 << 14),
   IsCppSerializable             = (1 << 15),
   HipHopSpecific                = (1 << 16),
   VariableArguments             = (1 << 17),
   RefVariableArguments          = (1 << 18),
-  MixedVariableArguments        = (1 << 19),
   FunctionIsFoldable            = (1 << 20),
   NoEffect                      = (1 << 21),
   NoInjection                   = (1 << 22),
@@ -59,19 +69,18 @@ enum FuncFlags {
   NoDefaultSweep                = (1 << 27),
   IsSystem                      = (1 << 28),
   IsTrait                       = (1 << 29),
-  NeedsActRec                   = (1 << 31),
+  ParamCoerceModeFalse          = (1 << 30),
+  NoFCallBuiltin                = (1 << 31),
 };
 
-#define VarArgsMask (VariableArguments | \
-                     RefVariableArguments | \
-                     MixedVariableArguments)
+#define VarArgsMask (VariableArguments | RefVariableArguments)
 
 bool isKindOfIndirect(DataType kindof);
 
 static inline fbstring kindOfString(DataType t) {
-  switch (t) {
+  switch ((int)t) {
+    case KindOfInvalid:      return "Unknown";
     case KindOfAny:          return "Any";
-    case KindOfUnknown:      return "Unknown";
     case KindOfNull:         return "Null";
     case KindOfBoolean:      return "Boolean";
     case KindOfInt64:        return "Int64";
@@ -128,7 +137,8 @@ fbstring phpSerialize(const folly::dynamic& d);
 
 enum class ParamMode {
   CoerceAndCall,
-  Zend
+  ZendNull,
+  ZendFalse
 };
 
 class PhpConst {
@@ -150,7 +160,7 @@ class PhpConst {
     auto it = m_constant.find("value");
     assert(it != m_constant.items().end());
     auto v = it->second;
-    return v.isNull() ? "uninit_null()" : v.asString();
+    return v.isNull() ? "init_null()" : v.asString();
   }
 
   fbstring serialize() const { return phpSerialize(m_constant["value"]); }
@@ -192,9 +202,7 @@ class PhpParam {
   bool hasDefault() const {
     return m_param.find("value") != m_param.items().end();
   }
-  fbstring getDefault() const {
-    return hasDefault() ? m_param["value"].asString() : "";
-  }
+  fbstring getDefault() const;
   fbstring getDefaultSerialized() const;
   fbstring getDefaultPhp() const;
 
@@ -221,14 +229,14 @@ class PhpFunc {
  public:
   PhpFunc(const folly::dynamic& d, const fbstring& className);
 
-  fbstring name() const { return m_name; }
-  fbstring lowerName() const {
-    fbstring name = m_name;
-    for (char& c : name) {
-      c = tolower(c);
-    }
+  fbstring getPhpName() const { return m_phpName; }
+  fbstring getCppName() const { return m_cppName; }
+  fbstring lowerCppName() const {
+    fbstring name = m_cppName;
+    for (char& c : name) { c = tolower(c); }
     return name;
   }
+
   fbstring className() const { return m_className; }
   fbstring getDesc() const { return m_desc; }
 
@@ -238,29 +246,30 @@ class PhpFunc {
 
   bool isMagicMethod() const {
     return (isMethod() && (
-        (m_name == "__get") ||
-        (m_name == "__set") ||
-        (m_name == "__isset") ||
-        (m_name == "__unset") ||
-        (m_name == "__call")));
+              (m_idlName == "__get") ||
+              (m_idlName == "__set") ||
+              (m_idlName == "__isset") ||
+              (m_idlName == "__unset") ||
+              (m_idlName == "__call")));
   }
 
-  fbstring getCppSig() const;
+  fbstring getCppSig(bool fullyQualified = true) const;
+  fbstring getPrefixedCppName(bool fullyQualified = true) const;
 
   fbstring getPrettyName() const {
     if (isMethod()) {
-      return m_className + "::" + m_name;
+      return m_className + "::" + getPhpName();
     } else {
-      return m_name;
+      return getPhpName();
     }
   }
 
   fbstring getUniqueName() const {
     if (isMethod()) {
       return folly::to<fbstring>(m_className.length(), m_className,
-                                 '_', m_name);
+                                 '_', getCppName());
     } else {
-      return m_name;
+      return getCppName();
     }
   }
 
@@ -272,7 +281,7 @@ class PhpFunc {
 
   bool isIndirectReturn() const { return isKindOfIndirect(returnKindOf()); }
 
-  bool isCtor() const { return isMethod() && (m_name == "__construct"); }
+  bool isCtor() const { return isMethod() && (m_idlName == "__construct"); }
   bool isStatic() const { return m_flags & IsStatic; }
   bool isVarArgs() const { return m_flags & VarArgsMask; }
   bool usesThis() const { return isMethod() && !isStatic(); }
@@ -294,7 +303,9 @@ class PhpFunc {
   }
 
 private:
-  fbstring m_name;
+  fbstring m_idlName;
+  fbstring m_phpName;
+  fbstring m_cppName;
   fbstring m_className;
   folly::dynamic m_func;
   unsigned long m_flags;
@@ -335,7 +346,9 @@ class PhpClass {
  public:
   explicit PhpClass(const folly::dynamic &c);
 
-  fbstring name() const { return m_name; }
+  fbstring getPhpName() const { return m_phpName; };
+  fbstring getCppName() const { return m_cppName; };
+
   fbstring parent() const {
     auto p = m_class.find("parent");
     if (p == m_class.items().end()) {
@@ -371,7 +384,12 @@ class PhpClass {
 
  private:
   folly::dynamic m_class;
-  fbstring m_name;
+  // The name in the IDL file. Use '\\' for namespaces.
+  fbstring m_idlName;
+  // The name in PHP land.
+  fbstring m_phpName;
+  // The name in the IDL with namespaces stripped.
+  fbstring m_cppName;
   fbvector<fbstring> m_ifaces;
   fbvector<PhpFunc> m_methods;
   fbvector<PhpConst> m_constants;

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,18 +17,22 @@
 #ifndef incl_HPHP_VM_REPO_HELPERS_H_
 #define incl_HPHP_VM_REPO_HELPERS_H_
 
+#include "hphp/runtime/base/types.h"
+
+#include "hphp/util/md5.h"
+#include "hphp/util/portability.h"
+
 #include <boost/noncopyable.hpp>
 #include <sqlite3.h>
-
-#include "hphp/runtime/base/md5.h"
-#include "hphp/runtime/base/complex-types.h"
 
 namespace HPHP {
 
 // Forward declaration.
-class Repo;
-class BlobEncoder;
 class BlobDecoder;
+class BlobEncoder;
+struct StringData;
+struct TypedValue;
+class Repo;
 
 enum RepoId {
   RepoIdInvalid = -1,
@@ -99,6 +103,7 @@ class RepoQuery {
   void bindText(const char* paramName, const char* text, size_t size,
                 bool isStatic=false);
   void bindStaticString(const char* paramName, const StringData* sd);
+  void bindStdString(const char* paramName, const std::string& s);
   void bindDouble(const char* paramName, double val);
   void bindInt(const char* paramName, int val);
   void bindId(const char* paramName, Id id);
@@ -129,6 +134,7 @@ class RepoQuery {
   void getText(int iCol, const char*& text);
   void getText(int iCol, const char*& text, size_t& size);
   void getStaticString(int iCol, StringData*& s);
+  void getStdString(int iCol, std::string& s);
   void getDouble(int iCol, double& val);
   void getInt(int iCol, int& val);
   void getId(int iCol, Id& id);

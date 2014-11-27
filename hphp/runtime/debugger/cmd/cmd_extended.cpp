@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,6 +15,8 @@
 */
 
 #include "hphp/runtime/debugger/cmd/cmd_extended.h"
+#include <memory>
+#include <vector>
 #include "hphp/runtime/debugger/cmd/all.h"
 #include "hphp/util/logger.h"
 
@@ -38,9 +40,9 @@ void CmdExtended::list(DebuggerClient &client) {
   }
 }
 
-static string format_unique_prefix(const std::string &cmd,
-                                   const std::string &prev,
-                                   const std::string &next) {
+static std::string format_unique_prefix(const std::string &cmd,
+                                        const std::string &prev,
+                                        const std::string &next) {
   for (unsigned int i = 1; i < cmd.size(); i++) {
     if (strncasecmp(cmd.c_str(), prev.c_str(), i) &&
         strncasecmp(cmd.c_str(), next.c_str(), i)) {
@@ -53,8 +55,8 @@ static string format_unique_prefix(const std::string &cmd,
 void CmdExtended::helpImpl(DebuggerClient &client, const char *name) {
   const char *cmd = "{cmd} {arg1} {arg2} ...";
   const char *help = "invoke specified command";
-  client.helpCmds((string(name) + " " + cmd).c_str(), help,
-                   (string(name) + cmd).c_str(), help,
+  client.helpCmds((std::string(name) + " " + cmd).c_str(), help,
+                   (std::string(name) + cmd).c_str(), help,
                    nullptr);
 
   const ExtendedCommandMap &cmds = getCommandMap();
@@ -62,7 +64,7 @@ void CmdExtended::helpImpl(DebuggerClient &client, const char *name) {
     client.help("%s", "");
     client.help("where {cmd} can be:");
     client.help("%s", "");
-    vector<string> vcmds;
+    std::vector<std::string> vcmds;
     for (ExtendedCommandMap::const_iterator iter = cmds.begin();
          iter != cmds.end(); ++iter) {
       vcmds.push_back(iter->first);
@@ -143,7 +145,7 @@ const ExtendedCommandMap &CmdExtended::getCommandMap() {
   return GetExtendedCommandMap();
 }
 
-void CmdExtended::invokeList(DebuggerClient &client, const std::string &cls){
+void CmdExtended::invokeList(DebuggerClient &client, const std::string &cls) {
   DebuggerCommandPtr cmd = CreateExtendedCommand(cls);
   if (cmd) {
     cmd->list(client);
@@ -159,7 +161,7 @@ bool CmdExtended::invokeHelp(DebuggerClient &client, const std::string &cls) {
   return false;
 }
 
-bool CmdExtended::invokeClient(DebuggerClient &client, const std::string &cls){
+bool CmdExtended::invokeClient(DebuggerClient &client, const std::string &cls) {
   client.usageLogCommand("extended", cls);
   DebuggerCommandPtr cmd = CreateExtendedCommand(cls);
   if (cmd) {
@@ -180,22 +182,18 @@ const ExtendedCommandMap &CmdExtended::GetExtendedCommandMap() {
   static ExtendedCommandMap s_command_map = {
     { "ample"    , "CmdExample" },
     { "tension"  , "CmdExtension" },
-    { "heaptrace", "CmdHeaptrace" }
   };
   return s_command_map;
 }
 
 #define ELSE_IF_CMD(name) \
-  } else if (cls == "Cmd" #name) { ret = CmdExtendedPtr(new Cmd ## name());
+  } else if (cls == "Cmd" #name) { ret = std::make_shared<Cmd##name>()
 
 DebuggerCommandPtr CmdExtended::CreateExtendedCommand(const std::string &cls) {
-  CmdExtendedPtr ret;
+  std::shared_ptr<CmdExtended> ret;
   if (cls.empty()) {
-
-    // add one line for each command
     ELSE_IF_CMD(Example);
     ELSE_IF_CMD(Extension);
-    ELSE_IF_CMD(Heaptrace);
   }
 
   if (ret) {

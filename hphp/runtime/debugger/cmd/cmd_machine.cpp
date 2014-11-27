@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -108,7 +108,7 @@ void CmdMachine::help(DebuggerClient &client) {
 bool CmdMachine::processList(DebuggerClient &client,
                              bool output /* = true */) {
   m_body = "list";
-  CmdMachinePtr res = client.xend<CmdMachine>(this);
+  auto res = client.xend<CmdMachine>(this);
   client.updateSandboxes(res->m_sandboxes);
   if (!output) return true;
 
@@ -138,7 +138,7 @@ bool CmdMachine::AttachSandbox(DebuggerClient &client,
                                const char *user /* = NULL */,
                                const char *name /* = NULL */,
                                bool force /* = false */) {
-  string login;
+  std::string login;
   if (user == nullptr) {
     user = client.getCurrentUser().c_str();
   }
@@ -164,7 +164,7 @@ bool CmdMachine::AttachSandbox(DebuggerClient &client,
 
   client.info("Attaching to %s and pre-loading, please wait...",
                sandbox->desc().c_str());
-  CmdMachinePtr cmdMachine = client.xend<CmdMachine>(&cmd);
+  auto cmdMachine = client.xend<CmdMachine>(&cmd);
   if (cmdMachine->m_succeed) {
     client.setSandbox(sandbox);
     client.playMacro("startup");
@@ -196,7 +196,7 @@ void CmdMachine::UpdateIntercept(DebuggerClient &client,
                                  const std::string &host, int port) {
   CmdMachine cmd;
   cmd.m_body = "rpc";
-  cmd.m_rpcConfig = CREATE_MAP4
+  cmd.m_rpcConfig = make_map_array
     (s_host, String(host),
      s_port, port ? port : RuntimeOption::DebuggerDefaultRpcPort,
      s_auth, String(RuntimeOption::DebuggerDefaultRpcAuth),
@@ -217,10 +217,10 @@ void CmdMachine::onClient(DebuggerClient &client) {
       help(client);
       return;
     }
-    string host = client.argValue(2);
+    std::string host = client.argValue(2);
     int port = 0;
     size_t pos = host.find(":");
-    if (pos != string::npos) {
+    if (pos != std::string::npos) {
       if (!DebuggerClient::IsValidNumber(host.substr(pos + 1))) {
         client.error("Port needs to be a number");
         help(client);
@@ -263,7 +263,7 @@ void CmdMachine::onClient(DebuggerClient &client) {
   if (client.arg(1, "attach")) {
     DSandboxInfoPtr sandbox;
 
-    string snum = client.argValue(2);
+    std::string snum = client.argValue(2);
     if (DebuggerClient::IsValidNumber(snum)) {
       int num = atoi(snum.c_str());
       sandbox = client.getSandbox(num);

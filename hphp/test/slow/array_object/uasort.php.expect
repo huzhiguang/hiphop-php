@@ -12,8 +12,6 @@ ArrayObject Object
             [h] => -4
         )
 
-    [flags:ArrayObject:private] => 0
-    [iteratorClass:ArrayObject:private] => ArrayIterator
 )
 ArrayObject Object
 (
@@ -29,6 +27,4 @@ ArrayObject Object
             [b] => 8
         )
 
-    [flags:ArrayObject:private] => 0
-    [iteratorClass:ArrayObject:private] => ArrayIterator
 )

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,6 +18,10 @@
 #define incl_HPHP_SWITCH_STATEMENT_H_
 
 #include "hphp/compiler/statement/statement.h"
+#include <map>
+#include <memory>
+#include <utility>
+#include <vector>
 #include "hphp/compiler/statement/case_statement.h"
 
 namespace HPHP {
@@ -41,7 +45,7 @@ public:
 private:
   typedef std::pair<int, CaseStatementPtr> StatementPtrWithPos;
   typedef std::vector<StatementPtrWithPos> StatementPtrWithPosVec;
-  typedef boost::shared_ptr<StatementPtrWithPosVec> 
+  typedef std::shared_ptr<StatementPtrWithPosVec> 
     StatementPtrWithPosVecPtr;
 	typedef std::map<uint64_t, StatementPtrWithPosVecPtr> 
     MapIntToStatementPtrWithPosVec; 

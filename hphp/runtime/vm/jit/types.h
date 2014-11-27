@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,15 +17,19 @@
 #ifndef incl_HPHP_TRANSL_TYPES_H_
 #define incl_HPHP_TRANSL_TYPES_H_
 
-#include "hphp/util/base.h"
+#include <vector>
 
-namespace HPHP {
-namespace Transl {
+#include "hphp/util/assertions.h"
+#include "hphp/util/hash-map-typedefs.h"
+
+#include "hphp/runtime/base/types.h"
+
+namespace HPHP { namespace jit {
 
 /*
  * Core types.
  */
-typedef unsigned char* TCA; // "Translation cache adddress."
+typedef unsigned char* TCA; // "Translation cache address."
 typedef const unsigned char* CTCA;
 
 struct ctca_identity_hash {
@@ -39,22 +43,21 @@ struct ctca_identity_hash {
   }
 };
 
-typedef uint32_t               TransID;
 typedef hphp_hash_set<TransID> TransIDSet;
-
-const TransID InvalidID = -1LL;
+typedef std::vector<TransID>   TransIDVec;
 
 /**
  * The different kinds of translations that the JIT generates:
  *
  *   - Anchor   : a service request for retranslating
  *   - Prologue : function prologue
- *   - Interp   : a service to interpret at least one instruction
+ *   - Interp   : a service request to interpret at least one instruction
  *   - Live     : translate one tracelet by inspecting live VM state
  *   - Profile  : translate one block by inspecting live VM state and
  *                inserting profiling counters
  *   - Optimize : translate one region performing optimizations that may
  *                leverage data collected by Profile translations
+ *   - Proflogue: a profiling function prologue
  */
 #define TRANS_KINDS \
     DO(Anchor)      \
@@ -63,13 +66,63 @@ const TransID InvalidID = -1LL;
     DO(Live)        \
     DO(Profile)     \
     DO(Optimize)    \
+    DO(Proflogue)   \
     DO(Invalid)     \
 
-enum TransKind {
-#define DO(KIND) Trans##KIND,
+enum class TransKind {
+#define DO(KIND) KIND,
   TRANS_KINDS
 #undef DO
 };
+
+constexpr size_t NumTransKinds =
+#define DO(KIND) + 1
+  TRANS_KINDS
+#undef DO
+  ;
+
+inline std::string show(TransKind k) {
+#define DO(name) case TransKind::name: return "Trans" #name;
+  switch (k) { TRANS_KINDS }
+#undef DO
+  not_reached();
+}
+
+/*
+ * Compact flags which may be threaded through a service request to provide
+ * hints or demands for retranslations.
+ */
+struct TransFlags {
+  explicit TransFlags(uint64_t flags = 0) : packed(flags) {}
+
+  union {
+    struct {
+      bool noinlineSingleton : 1;
+    };
+    uint64_t packed;
+  };
+};
+
+static_assert(sizeof(TransFlags) <= sizeof(uint64_t), "Too many TransFlags!");
+
+// Enumeration representing the various areas that we emit code.
+enum class AreaIndex : unsigned { Main, Cold, Frozen, Max };
+
+inline std::string areaAsString(AreaIndex area) {
+  switch (area) {
+  case AreaIndex::Main:
+    return "Main";
+  case AreaIndex::Cold:
+    return "Cold";
+  case AreaIndex::Frozen:
+    return "Frozen";
+  case AreaIndex::Max:
+    not_reached();
+    return "";
+  }
+  not_reached();
+  return "";
+}
 
 }}
 

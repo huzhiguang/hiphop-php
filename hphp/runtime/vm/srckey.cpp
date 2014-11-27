@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,7 +16,7 @@
 
 #include "hphp/runtime/vm/srckey.h"
 
-#include "folly/Format.h"
+#include <folly/Format.h>
 
 #include "hphp/runtime/vm/hhbc.h"
 
@@ -33,17 +33,19 @@ std::string show(SrcKey sk) {
   if (unit->filepath()->data() && unit->filepath()->size()) {
     filepath = unit->filepath()->data();
   }
-  return folly::format("{}:{} in {}(id 0x{:#x})@{: >6}",
+  return folly::format("{}:{} in {}(id 0x{:#x})@{: >6}{}",
                        filepath, unit->getLineNumber(sk.offset()),
                        func->isPseudoMain() ? "pseudoMain"
                                             : func->fullName()->data(),
-                       (unsigned long long)sk.getFuncId(), sk.offset()).str();
+                       (uint32_t)sk.getFuncId(), sk.offset(),
+                       sk.resumed() ? "r" : "").str();
 }
 
 std::string showShort(SrcKey sk) {
-  return folly::format("{}(id 0x{:#x})@{}",
+  if (!sk.valid()) return "<invalid SrcKey>";
+  return folly::format("{}(id {:#x})@{}{}",
                        sk.func()->fullName()->data(), sk.getFuncId(),
-                       sk.offset()).str();
+                       sk.offset(), sk.resumed() ? "r" : "").str();
 }
 
 void sktrace(SrcKey sk, const char *fmt, ...) {
@@ -62,30 +64,31 @@ std::string SrcKey::getSymbol() const {
   const Unit* u = unit();
 
   if (f->isBuiltin()) {
-    return f->name()->data();
+    return f->fullName()->data();
   }
 
   if (f->isPseudoMain()) {
     return folly::format(
       "{{pseudo-main}}::{}::line-{}",
       u->filepath()->data(),
-      u->getLineNumber(m_offset)
+      u->getLineNumber(offset())
     ).str();
   }
 
-  if (f->isMethod()) {
+  if (f->isMethod() && !f->cls()) {
     return folly::format(
       "{}::{}::line-{}",
-      f->cls()->name()->data(),
+      f->preClass()->name()->data(),
       f->name()->data(),
-      u->getLineNumber(m_offset)
+      u->getLineNumber(offset())
     ).str();
   }
 
+  // methods with a cls() and functions
   return folly::format(
     "{}::line-{}",
-    f->name()->data(),
-    u->getLineNumber(m_offset)
+    f->fullName()->data(),
+    u->getLineNumber(offset())
   ).str();
 }
 

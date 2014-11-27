@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -32,7 +32,8 @@ namespace HPHP {
   }
 
 bool SystemLib::s_inited = false;
-string SystemLib::s_source = "";
+bool SystemLib::s_anyNonPersistentBuiltins = false;
+std::string SystemLib::s_source = "";
 HPHP::Unit* SystemLib::s_unit = nullptr;
 HPHP::Unit* SystemLib::s_hhas_unit = nullptr;
 HPHP::Unit* SystemLib::s_nativeFuncUnit = nullptr;
@@ -60,7 +61,7 @@ ObjectData* SystemLib::AllocPinitSentinel() {
     /* Increment refcount across call to ctor, so the object doesn't */     \
     /* get destroyed when ctor's frame is torn down */                      \
     CountableHelper cnt(inst);                                              \
-    g_vmContext->invokeFunc(&ret,                                           \
+    g_context->invokeFunc(&ret,                                           \
                             SystemLib::s_##clsname##Class->getCtor(),       \
                             params,                                         \
                             inst);                                          \
@@ -68,60 +69,55 @@ ObjectData* SystemLib::AllocPinitSentinel() {
   tvRefcountedDecRef(&ret);                                                 \
   return inst;
 
-ObjectData* SystemLib::AllocExceptionObject(CVarRef message) {
-  CREATE_AND_CONSTRUCT(Exception, CREATE_VECTOR1(message));
+ObjectData* SystemLib::AllocExceptionObject(const Variant& message) {
+  CREATE_AND_CONSTRUCT(Exception, make_packed_array(message));
 }
 
-ObjectData* SystemLib::AllocBadMethodCallExceptionObject(CVarRef message) {
-  CREATE_AND_CONSTRUCT(BadMethodCallException, CREATE_VECTOR1(message));
+ObjectData* SystemLib::AllocBadMethodCallExceptionObject(const Variant& message) {
+  CREATE_AND_CONSTRUCT(BadMethodCallException, make_packed_array(message));
 }
 
-ObjectData* SystemLib::AllocInvalidArgumentExceptionObject(CVarRef message) {
-  CREATE_AND_CONSTRUCT(InvalidArgumentException, CREATE_VECTOR1(message));
+ObjectData* SystemLib::AllocInvalidArgumentExceptionObject(const Variant& message) {
+  CREATE_AND_CONSTRUCT(InvalidArgumentException, make_packed_array(message));
 }
 
-ObjectData* SystemLib::AllocRuntimeExceptionObject(CVarRef message) {
-  CREATE_AND_CONSTRUCT(RuntimeException, CREATE_VECTOR1(message));
+ObjectData* SystemLib::AllocRuntimeExceptionObject(const Variant& message) {
+  CREATE_AND_CONSTRUCT(RuntimeException, make_packed_array(message));
 }
 
-ObjectData* SystemLib::AllocOutOfBoundsExceptionObject(CVarRef message) {
-  CREATE_AND_CONSTRUCT(OutOfBoundsException, CREATE_VECTOR1(message));
+ObjectData* SystemLib::AllocOutOfBoundsExceptionObject(const Variant& message) {
+  CREATE_AND_CONSTRUCT(OutOfBoundsException, make_packed_array(message));
 }
 
-ObjectData* SystemLib::AllocInvalidOperationExceptionObject(CVarRef message) {
-  CREATE_AND_CONSTRUCT(InvalidOperationException, CREATE_VECTOR1(message));
+ObjectData* SystemLib::AllocInvalidOperationExceptionObject(const Variant& message) {
+  CREATE_AND_CONSTRUCT(InvalidOperationException, make_packed_array(message));
 }
 
-ObjectData* SystemLib::AllocDOMDocumentObject(CStrRef version,
-                                              CStrRef encoding) {
-  CREATE_AND_CONSTRUCT(DOMDocument, CREATE_VECTOR2(version, encoding));
-}
-
-ObjectData* SystemLib::AllocDOMExceptionObject(CVarRef message, CVarRef code) {
-  CREATE_AND_CONSTRUCT(DOMException, CREATE_VECTOR2(message, code));
+ObjectData* SystemLib::AllocDOMExceptionObject(const Variant& message, const Variant& code) {
+  CREATE_AND_CONSTRUCT(DOMException, make_packed_array(message, code));
 }
 
 ObjectData*
-SystemLib::AllocSoapFaultObject(CVarRef code,
-                                CVarRef message,
-                                CVarRef actor /* = null_variant */,
-                                CVarRef detail /* = null_variant */,
-                                CVarRef name /* = null_variant */,
-                                CVarRef header /* = null_variant */) {
-  CREATE_AND_CONSTRUCT(SoapFault, CREATE_VECTOR6(code, message, actor,
+SystemLib::AllocSoapFaultObject(const Variant& code,
+                                const Variant& message,
+                                const Variant& actor /* = null_variant */,
+                                const Variant& detail /* = null_variant */,
+                                const Variant& name /* = null_variant */,
+                                const Variant& header /* = null_variant */) {
+  CREATE_AND_CONSTRUCT(SoapFault, make_packed_array(code, message, actor,
                                                  detail, name, header));
 }
 
-ObjectData* SystemLib::AllocLazyKVZipIterableObject(CVarRef mp) {
-  CREATE_AND_CONSTRUCT(LazyKVZipIterable, CREATE_VECTOR1(mp));
+ObjectData* SystemLib::AllocLazyKVZipIterableObject(const Variant& mp) {
+  CREATE_AND_CONSTRUCT(LazyKVZipIterable, make_packed_array(mp));
 }
 
-ObjectData* SystemLib::AllocLazyIterableViewObject(CVarRef iterable) {
-  CREATE_AND_CONSTRUCT(LazyIterableView, CREATE_VECTOR1(iterable));
+ObjectData* SystemLib::AllocLazyIterableViewObject(const Variant& iterable) {
+  CREATE_AND_CONSTRUCT(LazyIterableView, make_packed_array(iterable));
 }
 
-ObjectData* SystemLib::AllocLazyKeyedIterableViewObject(CVarRef iterable) {
-  CREATE_AND_CONSTRUCT(LazyKeyedIterableView, CREATE_VECTOR1(iterable));
+ObjectData* SystemLib::AllocLazyKeyedIterableViewObject(const Variant& iterable) {
+  CREATE_AND_CONSTRUCT(LazyKeyedIterableView, make_packed_array(iterable));
 }
 
 #undef CREATE_AND_CONSTRUCT

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,7 +22,6 @@
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
 
-DECLARE_BOOST_TYPES(CmdInfo);
 class CmdInfo : public DebuggerCommand {
 public:
   static void UpdateLiveLists(DebuggerClient &client);
@@ -41,7 +40,7 @@ public:
   bool parseZeroArg(DebuggerClient &client);
   void parseOneArg(DebuggerClient &client, std::string &subsymbol);
   Array getInfo() { return m_info; }
-  static String FindSubSymbol(CArrRef symbols, const std::string &symbol);
+  static String FindSubSymbol(const Array& symbols, const std::string &symbol);
 
 protected:
   virtual void sendImpl(DebuggerThriftBuffer &thrift);
@@ -61,21 +60,23 @@ private:
   Array  m_info;
   DebuggerClient::LiveListsPtr m_acLiveLists;
 
-  static String GetParams(CArrRef params, bool varg, bool detailed = false);
-  static String GetModifier(CArrRef info, CStrRef);
+  static String GetParams(const Array& params, bool varg, bool detailed = false);
+  static String GetParam(const Array& params, int index);
+  static String GetModifier(const Array& info, const String&);
+  static String GetTypeProfilingInfo(const Array& profilingArray, const Array& params);
 
-  static bool TryConstant(StringBuffer &sb, CArrRef info,
+  static bool TryConstant(StringBuffer &sb, const Array& info,
                           const std::string &subsymbol);
-  static bool TryProperty(StringBuffer &sb, CArrRef info,
+  static bool TryProperty(StringBuffer &sb, const Array& info,
                           const std::string &subsymbol);
   static bool TryMethod(DebuggerClient &client, StringBuffer &sb,
-                        CArrRef info, std::string subsymbol);
+                        const Array& info, std::string subsymbol);
 
-  static void PrintDocComments(StringBuffer &sb, CArrRef info);
-  static void PrintInfo(DebuggerClient &client, StringBuffer &sb, CArrRef info,
+  static void PrintDocComments(StringBuffer &sb, const Array& info);
+  static void PrintInfo(DebuggerClient &client, StringBuffer &sb, const Array& info,
                         const std::string &subsymbol);
   static void PrintHeader(DebuggerClient &client, StringBuffer &sb,
-                          CArrRef info);
+                          const Array& info);
 };
 
 ///////////////////////////////////////////////////////////////////////////////

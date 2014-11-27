@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -29,12 +29,15 @@ namespace HPHP { namespace Stream {
 class Wrapper;
 
 bool registerWrapper(const std::string &scheme, Wrapper *wrapper);
-bool disableWrapper(CStrRef scheme);
-bool restoreWrapper(CStrRef scheme);
-bool registerRequestWrapper(CStrRef scheme, std::unique_ptr<Wrapper> wrapper);
+bool disableWrapper(const String& scheme);
+bool restoreWrapper(const String& scheme);
+bool registerRequestWrapper(const String& scheme, std::unique_ptr<Wrapper> wrapper);
 Array enumWrappers();
-Wrapper* getWrapper(CStrRef scheme);
-Wrapper* getWrapperFromURI(CStrRef uri);
+
+String getWrapperProtocol(const char* url, int* pathIndex = nullptr);
+Wrapper* getWrapper(const String& scheme, bool warn = true);
+Wrapper* getWrapperFromURI(const String& uri,
+                           int* pathIndex = nullptr, bool warn = true);
 
 /* Called during process init to register core wrappers */
 void RegisterCoreWrappers();

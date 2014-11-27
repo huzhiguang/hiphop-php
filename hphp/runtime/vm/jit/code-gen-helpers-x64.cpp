@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,25 +17,27 @@
 #include "hphp/runtime/vm/jit/code-gen-helpers-x64.h"
 
 #include "hphp/util/asm-x64.h"
+#include "hphp/util/ringbuffer.h"
 #include "hphp/util/trace.h"
 
+#include "hphp/runtime/base/arch.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/stats.h"
 #include "hphp/runtime/base/types.h"
+#include "hphp/runtime/vm/jit/back-end.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
-#include "hphp/runtime/vm/jit/translator-x64.h"
-#include "hphp/runtime/vm/jit/translator-x64-internal.h"
+#include "hphp/runtime/vm/jit/mc-generator.h"
+#include "hphp/runtime/vm/jit/mc-generator-internal.h"
 #include "hphp/runtime/vm/jit/translator.h"
-#include "hphp/runtime/vm/jit/x64-util.h"
-#include "hphp/runtime/vm/jit/ir.h"
+#include "hphp/runtime/vm/jit/ir-opcode.h"
+#include "hphp/runtime/vm/jit/code-gen-x64.h"
+#include "hphp/runtime/vm/jit/vasm-x64.h"
 
-namespace HPHP { namespace JIT { namespace X64 {
+namespace HPHP { namespace jit { namespace x64 {
 
 //////////////////////////////////////////////////////////////////////
 
-using namespace Util;
-using namespace Transl;
-using namespace Transl::reg;
+using namespace jit::reg;
 
 TRACE_SET_MOD(hhir);
 
@@ -46,56 +48,38 @@ TRACE_SET_MOD(hhir);
  * codegen, unless you're directly dealing with an instruction that
  * does near-end-of-tracelet glue.  (Or also we sometimes use them
  * just for some static_assertions relating to calls to helpers from
- * tx64 that hardcode these registers.)
+ * mcg that hardcode these registers.)
  */
-using Transl::rVmFp;
-using Transl::rVmSp;
 
 /*
- * Satisfy an alignment constraint. If we're in a reachable section
- * of code, bridge the gap with nops. Otherwise, int3's.
+ * Satisfy an alignment constraint. Bridge the gap with int3's.
  */
-void moveToAlign(Asm& aa,
-                 const size_t align /* =kJmpTargetAlign */,
-                 const bool unreachable /* =true */) {
-  using namespace HPHP::Util;
-  assert(isPowerOfTwo(align));
-  size_t leftInBlock = align - ((align - 1) & uintptr_t(aa.frontier()));
+void moveToAlign(CodeBlock& cb,
+                 const size_t align /* =kJmpTargetAlign */) {
+  X64Assembler a { cb };
+  assert(folly::isPowTwo(align));
+  size_t leftInBlock = align - ((align - 1) & uintptr_t(cb.frontier()));
   if (leftInBlock == align) return;
-  if (unreachable) {
-    if (leftInBlock > 2) {
-      aa.ud2();
-      leftInBlock -= 2;
-    }
-    if (leftInBlock > 0) {
-      aa.emitInt3s(leftInBlock);
-    }
-    return;
+  if (leftInBlock > 2) {
+    a.ud2();
+    leftInBlock -= 2;
   }
-  aa.emitNop(leftInBlock);
+  if (leftInBlock > 0) {
+    a.emitInt3s(leftInBlock);
+  }
 }
 
-void emitEagerSyncPoint(Asm& as, const HPHP::Opcode* pc, const Offset spDiff) {
-  static COff spOff = offsetof(VMExecutionContext, m_stack) +
-    Stack::topOfStackOffset();
-  static COff fpOff = offsetof(VMExecutionContext, m_fp);
-  static COff pcOff = offsetof(VMExecutionContext, m_pc);
+void emitEagerSyncPoint(Vout& v, const Op* pc, Vreg vmfp, Vreg vmsp) {
+  v << store{vmfp, rVmTl[RDS::kVmfpOff]};
+  v << store{vmsp, rVmTl[RDS::kVmspOff]};
+  emitImmStoreq(v, intptr_t(pc), rVmTl[RDS::kVmpcOff]);
+}
 
-  /* we can't use rAsm because the pc store uses it as a
-     temporary */
-  Reg64 rEC = reg::rdi;
-
-  as.  push(rEC);
-  emitGetGContext(as, rEC);
-  as.  storeq(rVmFp, rEC[fpOff]);
-  if (spDiff) {
-    as.  lea(rVmSp[spDiff], rAsm);
-    as.  storeq(rAsm, rEC[spOff]);
-  } else {
-    as.  storeq(rVmSp, rEC[spOff]);
-  }
-  as.  storeq(pc, rEC[pcOff]);
-  as.  pop(rEC);
+void emitEagerSyncPoint(Asm& as, const Op* pc, PhysReg vmfp, PhysReg vmsp) {
+  // keep this in sync with vasm code above.
+  as.  storeq(vmfp, rVmTl[RDS::kVmfpOff]);
+  as.  storeq(vmsp, rVmTl[RDS::kVmspOff]);
+  emitImmStoreq(as, intptr_t(pc), rVmTl[RDS::kVmpcOff]);
 }
 
 // emitEagerVMRegSave --
@@ -109,19 +93,9 @@ void emitEagerVMRegSave(Asm& as, RegSaveFlags flags) {
          RegSaveFlags::None);
 
   Reg64 pcReg = rdi;
-  PhysReg rEC = rAsm;
-  assert(!kSpecialCrossTraceRegs.contains(rdi));
+  assert(!kCrossCallRegs.contains(rdi));
 
-  emitGetGContext(as, rEC);
-
-  static COff spOff = offsetof(VMExecutionContext, m_stack) +
-    Stack::topOfStackOffset();
-  static COff fpOff = offsetof(VMExecutionContext, m_fp) - spOff;
-  static COff pcOff = offsetof(VMExecutionContext, m_pc) - spOff;
-
-  assert(spOff != 0);
-  as.   addq   (spOff, r64(rEC));
-  as.   storeq (rVmSp, *rEC);
+  as.   storeq (rVmSp, rVmTl[RDS::kVmspOff]);
   if (savePC) {
     // We're going to temporarily abuse rVmSp to hold the current unit.
     Reg64 rBC = rVmSp;
@@ -131,31 +105,66 @@ void emitEagerVMRegSave(Asm& as, RegSaveFlags flags) {
     as. loadq  (rBC[Func::unitOff()], rBC);
     as. loadq  (rBC[Unit::bcOff()], rBC);
     as. addq   (rBC, pcReg);
-    as. storeq (pcReg, rEC[pcOff]);
+    as. storeq (pcReg, rVmTl[RDS::kVmpcOff]);
     as. pop    (rBC);
   }
   if (saveFP) {
-    as. storeq (rVmFp, rEC[fpOff]);
+    as. storeq (rVmFp, rVmTl[RDS::kVmfpOff]);
   }
 }
 
+// Save vmsp, and optionally vmfp and vmpc. If saving vmpc,
+// the bytecode offset is expected to be in rdi and is clobbered
+void emitEagerVMRegSave(Vout& v, RegSaveFlags flags) {
+  bool saveFP = bool(flags & RegSaveFlags::SaveFP);
+  bool savePC = bool(flags & RegSaveFlags::SavePC);
+  assert((flags & ~(RegSaveFlags::SavePC | RegSaveFlags::SaveFP)) ==
+         RegSaveFlags::None);
+
+  assert(!kCrossCallRegs.contains(rdi));
+
+  v << store{rVmSp, rVmTl[RDS::kVmspOff]};
+  if (savePC) {
+    PhysReg pc{rdi};
+    auto func = v.makeReg();
+    auto unit = v.makeReg();
+    auto bc = v.makeReg();
+    // m_fp -> m_func -> m_unit -> m_bc + pcReg
+    v << load{rVmFp[AROFF(m_func)], func};
+    v << load{func[Func::unitOff()], unit};
+    v << load{unit[Unit::bcOff()], bc};
+    v << addq{bc, pc, pc, v.makeReg()};
+    v << store{pc, rVmTl[RDS::kVmpcOff]};
+  }
+  if (saveFP) {
+    v << store{rVmFp, rVmTl[RDS::kVmfpOff]};
+  }
+}
+
+void emitGetGContext(Vout& v, Vreg dest) {
+  emitTLSLoad<ExecutionContext>(v, g_context, dest);
+}
+
 void emitGetGContext(Asm& as, PhysReg dest) {
-  emitTLSLoad<ExecutionContext>(as, g_context, dest);
+  emitGetGContext(Vauto(as.code()).main(), dest);
 }
 
 // IfCountNotStatic --
-//   Emits if (%reg->_count != RefCountStaticValue) { ... }.
+//   Emits if (%reg->_count < 0) { ... }.
+//   This depends on UncountedValue and StaticValue
+//   being the only valid negative refCounts and both indicating no
+//   ref count is needed.
 //   May short-circuit this check if the type is known to be
 //   static already.
 struct IfCountNotStatic {
   typedef CondBlock<FAST_REFCOUNT_OFFSET,
-                    RefCountStaticValue,
-                    CC_Z,
-                    hphp_field_type(RefData, m_count)> NonStaticCondBlock;
+                    0,
+                    CC_S,
+                    int32_t> NonStaticCondBlock;
+  static_assert(UncountedValue < 0 && StaticValue < 0, "");
   NonStaticCondBlock *m_cb; // might be null
-  IfCountNotStatic(Asm& as,
-                   PhysReg reg,
-                   DataType t = KindOfInvalid) {
+  IfCountNotStatic(Asm& as, PhysReg reg,
+                   MaybeDataType t = folly::none) {
 
     // Objects and variants cannot be static
     if (t != KindOfObject && t != KindOfResource && t != KindOfRef) {
@@ -170,16 +179,31 @@ struct IfCountNotStatic {
   }
 };
 
-void emitIncRef(Asm& as, PhysReg base) {
+void emitTransCounterInc(Vout& v) {
+  if (!mcg->tx().isTransDBEnabled()) return;
+  auto t = v.cns(mcg->tx().getTransCounterAddr());
+  v << incqmlock{*t, v.makeReg()};
+}
+
+void emitTransCounterInc(Asm& a) {
+  emitTransCounterInc(Vauto(a.code()).main());
+}
+
+void emitIncRef(Vout& v, Vreg base) {
   if (RuntimeOption::EvalHHIRGenerateAsserts) {
-    emitAssertRefCount(as, base);
+    emitAssertRefCount(v, base);
   }
   // emit incref
-  as.incl(base[FAST_REFCOUNT_OFFSET]);
+  auto const sf = v.makeReg();
+  v << inclm{base[FAST_REFCOUNT_OFFSET], sf};
   if (RuntimeOption::EvalHHIRGenerateAsserts) {
     // Assert that the ref count is greater than zero
-    emitAssertFlagsNonNegative(as);
+    emitAssertFlagsNonNegative(v, sf);
   }
+}
+
+void emitIncRef(Asm& as, PhysReg base) {
+  emitIncRef(Vauto(as.code()).main(), base);
 }
 
 void emitIncRefCheckNonStatic(Asm& as, PhysReg base, DataType dtype) {
@@ -192,8 +216,7 @@ void emitIncRefCheckNonStatic(Asm& as, PhysReg base, DataType dtype) {
 void emitIncRefGenericRegSafe(Asm& as, PhysReg base, int disp, PhysReg tmpReg) {
   { // if RC
     IfRefCounted irc(as, base, disp);
-    as.   load_reg64_disp_reg64(base, disp + TVOFF(m_data),
-                                tmpReg);
+    as.   loadq  (base[disp + TVOFF(m_data)], tmpReg);
     { // if !static
       IfCountNotStatic ins(as, tmpReg);
       as. incl(tmpReg[FAST_REFCOUNT_OFFSET]);
@@ -201,13 +224,18 @@ void emitIncRefGenericRegSafe(Asm& as, PhysReg base, int disp, PhysReg tmpReg) {
   } // endif
 }
 
-void emitAssertFlagsNonNegative(Asm& as) {
-  ifThen(as, CC_NGE, [&] { as.ud2(); });
+void emitAssertFlagsNonNegative(Vout& v, Vreg sf) {
+  ifThen(v, CC_NGE, sf, [&](Vout& v) { v << ud2{}; });
 }
 
-void emitAssertRefCount(Asm& as, PhysReg base) {
-  as.cmpl(HPHP::RefCountStaticValue, base[FAST_REFCOUNT_OFFSET]);
-  ifThen(as, CC_NBE, [&] { as.ud2(); });
+void emitAssertRefCount(Vout& v, Vreg base) {
+  auto const sf = v.makeReg();
+  v << cmplim{HPHP::StaticValue, base[FAST_REFCOUNT_OFFSET], sf};
+  ifThen(v, CC_NLE, sf, [&](Vout& v) {
+    auto const sf = v.makeReg();
+    v << cmplim{HPHP::RefCountMaxRealistic, base[FAST_REFCOUNT_OFFSET], sf};
+    ifThen(v, CC_NBE, sf, [&](Vout& v) { v << ud2{}; });
+  });
 }
 
 // Logical register move: ensures the value in src will be in dest
@@ -225,24 +253,16 @@ void emitMovRegReg(Asm& as, PhysReg srcReg, PhysReg dstReg) {
     } else {                             // GP => XMM
       // This generates a movq x86 instruction, which zero extends
       // the 64-bit value in srcReg into a 128-bit XMM register
-      as. mov_reg64_xmm(srcReg, dstReg);
+      as. movq_rx(srcReg, dstReg);
     }
   } else {
     if (dstReg.isGP()) {                 // XMM => GP
-      as. mov_xmm_reg64(srcReg, dstReg);
+      as. movq_xr(srcReg, dstReg);
     } else {                             // XMM => XMM
       // This copies all 128 bits in XMM,
       // thus avoiding partial register stalls
       as. movdqa(srcReg, dstReg);
     }
-  }
-}
-
-void emitLea(Asm& as, PhysReg base, int disp, PhysReg dest) {
-  if (disp == 0) {
-    emitMovRegReg(as, base, dest);
-  } else {
-    as. lea(base[disp], dest);
   }
 }
 
@@ -255,106 +275,233 @@ void emitLea(Asm& as, MemoryRef mr, PhysReg dst) {
   }
 }
 
-void emitLdObjClass(Asm& as, PhysReg objReg, PhysReg dstReg) {
-  as.   loadq (objReg[ObjectData::getVMClassOffset()], dstReg);
+Vreg emitLdObjClass(Vout& v, Vreg objReg, Vreg dstReg) {
+  emitLdLowPtr(v, objReg[ObjectData::getVMClassOffset()],
+               dstReg, sizeof(LowClassPtr));
+  return dstReg;
 }
 
-void emitLdClsCctx(Asm& as, PhysReg srcReg, PhysReg dstReg) {
-  emitMovRegReg(as, srcReg, dstReg);
-  as.   decq(dstReg);
+Vreg emitLdClsCctx(Vout& v, Vreg srcReg, Vreg dstReg) {
+  auto t = v.makeReg();
+  v << copy{srcReg, t};
+  v << decq{t, dstReg, v.makeReg()};
+  return dstReg;
 }
 
-void emitExitSlowStats(Asm& as, const Func* func, SrcKey dest) {
-  if (RuntimeOption::EnableInstructionCounts ||
-      HPHP::Trace::moduleEnabled(HPHP::Trace::stats, 3)) {
-    Stats::emitInc(as,
-                   Stats::opcodeToIRPreStatCounter(
-                     Op(*func->unit()->at(dest.offset()))),
-                   -1,
-                   Transl::CC_None,
-                   true);
-  }
-}
-
-void emitCall(Asm& a, TCA dest) {
-  if (a.jmpDeltaFits(dest) && !Stats::enabled()) {
-    a.    call(dest);
+void emitCall(Asm& a, TCA dest, RegSet args) {
+  // warning: keep this in sync with vasm-x64 call{}
+  if (a.jmpDeltaFits(dest)) {
+    a.call(dest);
   } else {
-    a.    call(TranslatorX64::Get()->getNativeTrampoline(dest));
+    // can't do a near call; store address in data section.
+    // call by loading the address using rip-relative addressing.  This
+    // assumes the data section is near the current code section.  Since
+    // this sequence is directly in-line, rip-relative like this is
+    // more compact than loading a 64-bit immediate.
+    auto addr = mcg->allocLiteral((uint64_t)dest);
+    a.call(rip[(intptr_t)addr]);
   }
 }
 
-void emitCall(Asm& a, CppCall call) {
-  if (call.isDirect()) {
-    return emitCall(a, (TCA)call.getAddress());
+void emitCall(Asm& a, CppCall call, RegSet args) {
+  emitCall(Vauto(a.code()).main(), call, args);
+}
+
+void emitCall(Vout& v, CppCall target, RegSet args) {
+  switch (target.kind()) {
+  case CppCall::Kind::Direct:
+    v << call{static_cast<TCA>(target.address()), args};
+    return;
+  case CppCall::Kind::Virtual:
+    // Virtual call.
+    // Load method's address from proper offset off of object in rdi,
+    // using rax as scratch.
+    v << load{*rdi, rax};
+    v << callm{rax[target.vtableOffset()], args};
+    return;
+  case CppCall::Kind::ArrayVirt: {
+    auto const addr = reinterpret_cast<intptr_t>(target.arrayTable());
+    always_assert_flog(
+      deltaFits(addr, sz::dword),
+      "deltaFits on ArrayData vtable calls needs to be checked before "
+      "emitting them"
+    );
+    v << loadzbl{rdi[ArrayData::offsetofKind()], eax};
+    v << callm{baseless(rax*8 + addr), args};
+    return;
   }
-  // Virtual call.
-  // Load method's address from proper offset off of object in rdi,
-  // using rax as scratch.
-  a.  loadq  (*rdi, rax);
-  a.  call   (rax[call.getOffset()]);
+  case CppCall::Kind::Destructor:
+    // this movzbl is only needed because callers aren't
+    // required to zero-extend the type.
+    v << movzbl{target.reg(), target.reg()};
+    auto dtor_ptr = lookupDestructor(v, target.reg());
+    v << callm{dtor_ptr, args};
+    return;
+  }
+  not_reached();
+}
+
+void emitImmStoreq(Vout& v, Immed64 imm, Vptr ref) {
+  if (imm.fits(sz::dword)) {
+    v << storeqi{imm.l(), ref};
+  } else {
+    v << storeli{int32_t(imm.q()), ref};
+    v << storeli{int32_t(imm.q() >> 32), ref + 4};
+  }
+}
+
+void emitImmStoreq(Asm& a, Immed64 imm, MemoryRef ref) {
+  if (imm.fits(sz::dword)) {
+    a.storeq(imm.l(), ref);
+  } else {
+    a.storel(int32_t(imm.q()), ref);
+    a.storel(int32_t(imm.q() >> 32), MemoryRef(ref.r + 4));
+  }
+}
+
+void emitRB(Vout& v, Trace::RingBufferType t, const char* msg) {
+  if (!Trace::moduleEnabledRelease(Trace::ringbuffer, 1)) {
+    return;
+  }
+  v << vcall{CppCall::direct(Trace::ringbufferMsg),
+             v.makeVcallArgs({{v.cns(msg), v.cns(strlen(msg)), v.cns(t)}}),
+             v.makeTuple({})};
+}
+
+void emitTraceCall(CodeBlock& cb, Offset pcOff) {
+  Asm a { cb };
+  // call to a trace function
+  a.    lea    (rip[(int64_t)a.frontier()], rcx);
+  a.    movq   (rVmFp, rdi);
+  a.    movq   (rVmSp, rsi);
+  a.    movq   (pcOff, rdx);
+  // do the call; may use a trampoline
+  emitCall(a, reinterpret_cast<TCA>(traceCallback),
+           RegSet().add(rcx).add(rdi).add(rsi).add(rdx));
 }
 
 void emitTestSurpriseFlags(Asm& a) {
-  static_assert(RequestInjectionData::LastFlag < (1 << 8),
-                "Translator assumes RequestInjectionFlags fit in one byte");
-  a.    testb((int8_t)0xff, rVmTl[TargetCache::kConditionFlagsOff]);
+  static_assert(RequestInjectionData::LastFlag < (1LL << 32),
+                "Translator assumes RequestInjectionFlags fit in 32-bit int");
+  a.testl(-1, rVmTl[RDS::kConditionFlagsOff]);
 }
 
-void emitCheckSurpriseFlagsEnter(CodeBlock& mainCode, CodeBlock& stubsCode,
-                                 bool inTracelet, FixupMap& fixupMap,
+Vreg emitTestSurpriseFlags(Vout& v) {
+  static_assert(RequestInjectionData::LastFlag < (1LL << 32),
+                "Translator assumes RequestInjectionFlags fit in 32-bit int");
+  auto const sf = v.makeReg();
+  v << testlim{-1, rVmTl[RDS::kConditionFlagsOff], sf};
+  return sf;
+}
+
+void emitCheckSurpriseFlagsEnter(CodeBlock& mainCode, CodeBlock& coldCode,
                                  Fixup fixup) {
-  Asm a { mainCode };
-  Asm astubs { stubsCode };
+  // warning: keep this in sync with the vasm version below.
+  Asm a{mainCode}, acold{coldCode};
 
   emitTestSurpriseFlags(a);
-  a.  jnz  (stubsCode.frontier());
+  a.  jnz(coldCode.frontier());
 
-  astubs.  movq  (rVmFp, argNumToRegName[0]);
-  if (false) { // typecheck
-    const ActRec* ar = nullptr;
-    functionEnterHelper(ar);
-  }
-  emitCall(astubs, (TCA)&functionEnterHelper);
-  if (inTracelet) {
-    fixupMap.recordSyncPoint(stubsCode.frontier(),
-                             fixup.m_pcOffset, fixup.m_spOffset);
-  } else {
-    // If we're being called while generating a func prologue, we
-    // have to record the fixup directly in the fixup map instead of
-    // going through the pending fixup path like normal.
-    fixupMap.recordFixup(stubsCode.frontier(), fixup);
-  }
-  astubs.  jmp   (mainCode.frontier());
+  acold.  movq  (rVmFp, argNumToRegName[0]);
+  emitCall(acold, mcg->tx().uniqueStubs.functionEnterHelper, argSet(1));
+  mcg->recordSyncPoint(acold.frontier(), fixup.pcOffset, fixup.spOffset);
+  acold.  jmp   (a.frontier());
 }
 
-void shuffle2(Asm& as, PhysReg s0, PhysReg s1, PhysReg d0, PhysReg d1) {
-  assert(s0 != s1);
-  if (d0 == s1 && d1 != InvalidReg) {
-    assert(d0 != d1);
-    if (d1 == s0) {
-      as.   xchgq (s1, s0);
-    } else {
-      as.   movq (s1, d1); // save s1 first; d1 != s0
-      as.   movq (s0, d0);
-    }
+void emitCheckSurpriseFlagsEnter(Vout& v, Vout& vcold, Fixup fixup) {
+  // warning: keep this in sync with the x64 version above.
+  auto cold = vcold.makeBlock();
+  auto done = v.makeBlock();
+  auto const sf = emitTestSurpriseFlags(v);
+  v << jcc{CC_NZ, sf, {done, cold}};
+
+  vcold = cold;
+  vcold << copy{rVmFp, argNumToRegName[0]};
+  vcold << call{mcg->tx().uniqueStubs.functionEnterHelper, argSet(1)};
+  vcold << syncpoint{Fixup{fixup.pcOffset, fixup.spOffset}};
+  vcold << jmp{done};
+  v = done;
+}
+
+void emitLdLowPtr(Vout& v, Vptr mem, Vreg reg, size_t size) {
+  if (size == 8) {
+    v << load{mem, reg};
+  } else if (size == 4) {
+    v << loadl{mem, reg};
   } else {
-    if (d0 != InvalidReg) emitMovRegReg(as, s0, d0); // d0 != s1
-    if (d1 != InvalidReg) emitMovRegReg(as, s1, d1);
+    not_implemented();
   }
 }
 
-void zeroExtendIfBool(CodeGenerator::Asm& as, const SSATmp* src, PhysReg reg) {
-  if (src->isA(Type::Bool) && reg != InvalidReg) {
-    // zero-extend the bool from a byte to a quad
-    // note: movzbl actually extends the value to 64 bits.
-    as.movzbl(rbyte(reg), r32(reg));
+void emitCmpClass(Vout& v, Vreg sf, const Class* c, Vptr mem) {
+  auto size = sizeof(LowClassPtr);
+  if (size == 8) {
+    v << cmpqm{v.cns(c), mem, sf};
+  } else if (size == 4) {
+    v << cmplm{v.cns(c), mem, sf};
+  } else {
+    not_implemented();
   }
+}
+
+void emitCmpClass(Vout& v, Vreg sf, Vreg reg, Vptr mem) {
+  auto size = sizeof(LowClassPtr);
+  if (size == 8) {
+    v << cmpqm{reg, mem, sf};
+  } else if (size == 4) {
+    v << cmplm{reg, mem, sf};
+  } else {
+    not_implemented();
+  }
+}
+
+void emitCmpClass(Vout& v, Vreg sf, Vreg reg1, Vreg reg2) {
+  auto size = sizeof(LowClassPtr);
+  if (size == 8) {
+    v << cmpq{reg1, reg2, sf};
+  } else if (size == 4) {
+    v << cmpl{reg1, reg2, sf};
+  } else {
+    not_implemented();
+  }
+}
+
+void copyTV(Vout& v, Vloc src, Vloc dst) {
+  auto src_arity = src.numAllocated();
+  auto dst_arity = dst.numAllocated();
+  if (dst_arity == 2) {
+    assert(src_arity == 2);
+    v << copy2{src.reg(0), src.reg(1), dst.reg(0), dst.reg(1)};
+    return;
+  }
+  assert(dst_arity == 1);
+  if (src_arity == 2 && dst.isFullSIMD()) {
+    pack2(v, src.reg(0), src.reg(1), dst.reg(0));
+    return;
+  }
+  assert(src_arity >= 1);
+  v << copy{src.reg(0), dst.reg(0)};
+}
+
+// move 2 gpr to 1 xmm
+void pack2(Vout& v, Vreg s0, Vreg s1, Vreg d0) {
+  auto t0 = v.makeReg();
+  auto t1 = v.makeReg();
+  v << copy{s0, t0};
+  v << copy{s1, t1};
+  v << unpcklpd{t1, t0, d0}; // s0,s1 -> d0[0],d0[1]
+}
+
+Vreg zeroExtendIfBool(Vout& v, const SSATmp* src, Vreg reg) {
+  if (!src->isA(Type::Bool)) return reg;
+  // zero-extend the bool from a byte to a quad
+  // note: movzbl actually extends the value to 64 bits.
+  auto extended = v.makeReg();
+  v << movzbl{reg, extended};
+  return extended;
 }
 
 ConditionCode opToConditionCode(Opcode opc) {
-  using namespace HPHP::Transl;
-
   switch (opc) {
   case JmpGt:                 return CC_G;
   case JmpGte:                return CC_GE;
@@ -362,12 +509,16 @@ ConditionCode opToConditionCode(Opcode opc) {
   case JmpLte:                return CC_LE;
   case JmpEq:                 return CC_E;
   case JmpNeq:                return CC_NE;
+  case JmpGtInt:              return CC_G;
+  case JmpGteInt:             return CC_GE;
+  case JmpLtInt:              return CC_L;
+  case JmpLteInt:             return CC_LE;
+  case JmpEqInt:              return CC_E;
+  case JmpNeqInt:             return CC_NE;
   case JmpSame:               return CC_E;
   case JmpNSame:              return CC_NE;
   case JmpInstanceOfBitmask:  return CC_NZ;
   case JmpNInstanceOfBitmask: return CC_Z;
-  case JmpIsType:             return CC_NZ;
-  case JmpIsNType:            return CC_Z;
   case JmpZero:               return CC_Z;
   case JmpNZero:              return CC_NZ;
   case ReqBindJmpGt:                 return CC_G;
@@ -376,118 +527,39 @@ ConditionCode opToConditionCode(Opcode opc) {
   case ReqBindJmpLte:                return CC_LE;
   case ReqBindJmpEq:                 return CC_E;
   case ReqBindJmpNeq:                return CC_NE;
+  case ReqBindJmpGtInt:              return CC_G;
+  case ReqBindJmpGteInt:             return CC_GE;
+  case ReqBindJmpLtInt:              return CC_L;
+  case ReqBindJmpLteInt:             return CC_LE;
+  case ReqBindJmpEqInt:              return CC_E;
+  case ReqBindJmpNeqInt:             return CC_NE;
   case ReqBindJmpSame:               return CC_E;
   case ReqBindJmpNSame:              return CC_NE;
   case ReqBindJmpInstanceOfBitmask:  return CC_NZ;
   case ReqBindJmpNInstanceOfBitmask: return CC_Z;
   case ReqBindJmpZero:               return CC_Z;
   case ReqBindJmpNZero:              return CC_NZ;
+  case SideExitJmpGt:                 return CC_G;
+  case SideExitJmpGte:                return CC_GE;
+  case SideExitJmpLt:                 return CC_L;
+  case SideExitJmpLte:                return CC_LE;
+  case SideExitJmpEq:                 return CC_E;
+  case SideExitJmpNeq:                return CC_NE;
+  case SideExitJmpGtInt:              return CC_G;
+  case SideExitJmpGteInt:             return CC_GE;
+  case SideExitJmpLtInt:              return CC_L;
+  case SideExitJmpLteInt:             return CC_LE;
+  case SideExitJmpEqInt:              return CC_E;
+  case SideExitJmpNeqInt:             return CC_NE;
+  case SideExitJmpSame:               return CC_E;
+  case SideExitJmpNSame:              return CC_NE;
+  case SideExitJmpInstanceOfBitmask:  return CC_NZ;
+  case SideExitJmpNInstanceOfBitmask: return CC_Z;
+  case SideExitJmpZero:               return CC_Z;
+  case SideExitJmpNZero:              return CC_NZ;
   default:
     always_assert(0);
   }
-}
-
-/*
- * emitServiceReqWork --
- *
- *   Call a translator service co-routine. The code emitted here
- *   reenters the enterTC loop, invoking the requested service. Control
- *   will be returned non-locally to the next logical instruction in
- *   the TC.
- *
- *   Return value is a destination; we emit the bulky service
- *   request code into astubs.
- *
- *   Returns a continuation that will run after the arguments have been
- *   emitted. This is gross, but is a partial workaround for the inability
- *   to capture argument packs in the version of gcc we're using.
- */
-TCA
-emitServiceReqWork(Asm& as, TCA start, bool persist, SRFlags flags,
-                   ServiceRequest req, const ServiceReqArgVec& argv) {
-  assert(start);
-  const bool align = flags & SRFlags::Align;
-
-  /*
-   * Remember previous state of the code cache.
-   */
-  boost::optional<CodeCursor> maybeCc = boost::none;
-  if (start != as.frontier()) {
-    maybeCc = boost::in_place<CodeCursor>(boost::ref(as), start);
-  }
-
-  /* max space for moving to align, saving VM regs plus emitting args */
-  static const int
-    kVMRegSpace = 0x14,
-    kMovSize = 0xa,
-    kNumServiceRegs = sizeof(serviceReqArgRegs) / sizeof(PhysReg),
-    kMaxStubSpace = kJmpTargetAlign - 1 + kVMRegSpace +
-      kNumServiceRegs * kMovSize;
-  if (align) {
-    moveToAlign(as);
-  }
-  TCA retval = as.frontier();
-  TRACE(3, "Emit Service Req @%p %s(", start, serviceReqName(req));
-  /*
-   * Move args into appropriate regs. Eager VMReg save may bash flags,
-   * so set the CondCode arguments first.
-   */
-  for (int i = 0; i < argv.size(); ++i) {
-    assert(i < kNumServiceReqArgRegs);
-    auto reg = serviceReqArgRegs[i];
-    const auto& argInfo = argv[i];
-    switch(argv[i].m_kind) {
-      case ServiceReqArgInfo::Immediate: {
-        TRACE(3, "%" PRIx64 ", ", argInfo.m_imm);
-        as.    emitImmReg(argInfo.m_imm, reg);
-      } break;
-      case ServiceReqArgInfo::CondCode: {
-        // Already set before VM reg save.
-        DEBUG_ONLY TCA start = as.frontier();
-        as.    setcc(argInfo.m_cc, rbyte(reg));
-        assert(start - as.frontier() <= kMovSize);
-        TRACE(3, "cc(%x), ", argInfo.m_cc);
-      } break;
-      default: not_reached();
-    }
-  }
-  emitEagerVMRegSave(as, JIT::RegSaveFlags::SaveFP);
-  if (persist) {
-    as.  emitImmReg(0, rAsm);
-  } else {
-    as.  emitImmReg((uint64_t)start, rAsm);
-  }
-  TRACE(3, ")\n");
-  as.    emitImmReg(req, rdi);
-
-  /*
-   * Weird hand-shaking with enterTC: reverse-call a service routine.
-   *
-   * In the case of some special stubs (m_callToExit, m_retHelper), we
-   * have already unbalanced the return stack by doing a ret to
-   * something other than enterTCHelper.  In that case
-   * SRJmpInsteadOfRet indicates to fake the return.
-   */
-  if (flags & SRFlags::JmpInsteadOfRet) {
-    as.  pop(rax);
-    as.  jmp(rax);
-  } else {
-    as.  ret();
-  }
-
-  // TODO(2796856): we should record an OpServiceRequest pseudo-bytecode here.
-
-  translator_not_reached(as);
-  if (!persist) {
-    /*
-     * Recycled stubs need to be uniformly sized. Make space for the
-     * maximal possible service requests.
-     */
-    assert(as.frontier() - start <= kMaxStubSpace);
-    as.emitNop(start + kMaxStubSpace - as.frontier());
-    assert(as.frontier() - start == kMaxStubSpace);
-  }
-  return retval;
 }
 
 }}}

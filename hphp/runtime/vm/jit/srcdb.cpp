@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,14 +19,69 @@
 #include <stdarg.h>
 #include <string>
 
-#include "hphp/util/base.h"
 #include "hphp/util/trace.h"
-#include "hphp/runtime/vm/jit/translator-x64.h"
+#include "hphp/runtime/vm/jit/back-end-x64.h"
+#include "hphp/runtime/vm/jit/service-requests-x64.h"
+#include "hphp/runtime/vm/jit/mc-generator.h"
+#include "hphp/runtime/vm/jit/service-requests-inline.h"
 
-namespace HPHP {
-namespace Transl {
+namespace HPHP { namespace jit {
 
 TRACE_SET_MOD(trans)
+
+void IncomingBranch::relocate(RelocationInfo& rel) {
+  // compute adjustedTarget before altering the smash address,
+  // because it might be a 5-byte nop
+  TCA adjustedTarget = rel.adjustedAddressAfter(target());
+
+  if (TCA adjusted = rel.adjustedAddressAfter(toSmash())) {
+    m_ptr.set(m_ptr.tag(), adjusted);
+  }
+
+  if (adjustedTarget) {
+    FTRACE_MOD(Trace::mcg, 1, "Patching: 0x{:08x} from 0x{:08x} to 0x{:08x}\n",
+               (uintptr_t)toSmash(), (uintptr_t)target(),
+               (uintptr_t)adjustedTarget);
+
+    patch(adjustedTarget);
+  }
+}
+
+void IncomingBranch::patch(TCA dest) {
+  switch (type()) {
+    case Tag::JMP: {
+      mcg->backEnd().smashJmp(toSmash(), dest);
+      break;
+    }
+
+    case Tag::JCC: {
+      mcg->backEnd().smashJcc(toSmash(), dest);
+      break;
+    }
+
+    case Tag::ADDR: {
+      // Note that this effectively ignores a
+      TCA* addr = reinterpret_cast<TCA*>(toSmash());
+      assert_address_is_atomically_accessible(addr);
+      *addr = dest;
+      break;
+    }
+  }
+}
+
+TCA IncomingBranch::target() const {
+  switch (type()) {
+    case Tag::JMP:
+      return mcg->backEnd().jmpTarget(toSmash());
+
+    case Tag::JCC:
+      return mcg->backEnd().jccTarget(toSmash());
+
+    case Tag::ADDR:
+      return *reinterpret_cast<TCA*>(toSmash());
+  }
+  always_assert(false);
+}
 
 void SrcRec::setFuncInfo(const Func* f) {
   m_unitMd5 = f->unit()->md5();
@@ -48,42 +103,49 @@ TCA SrcRec::getFallbackTranslation() const {
 }
 
 void SrcRec::chainFrom(IncomingBranch br) {
-  assert(br.type() == IncomingBranch::Tag::ADDR    ||
-         tx64->mainCode.       contains(br.toSmash()) ||
-         tx64->hotCode.        contains(br.toSmash()) ||
-         tx64->profCode.       contains(br.toSmash()) ||
-         tx64->stubsCode.      contains(br.toSmash()) ||
-         tx64->trampolinesCode.contains(br.toSmash()));
+  assert(br.type() == IncomingBranch::Tag::ADDR ||
+         mcg->code.isValidCodeAddress(br.toSmash()));
   TCA destAddr = getTopTranslation();
   m_incomingBranches.push_back(br);
   TRACE(1, "SrcRec(%p)::chainFrom %p -> %p (type %d); %zd incoming branches\n",
         this,
         br.toSmash(), destAddr, br.type(), m_incomingBranches.size());
-  patch(br, destAddr);
+  br.patch(destAddr);
 }
 
-void SrcRec::emitFallbackJump(TCA from, int cc /* = -1 */) {
+void SrcRec::emitFallbackJump(CodeBlock& cb, ConditionCode cc /* = -1 */) {
+  // This is a spurious platform dependency. TODO(2990497)
+  mcg->backEnd().prepareForSmash(
+    cb,
+    cc == CC_None ? x64::kJmpLen : x64::kJmpccLen
+  );
+  auto from = cb.frontier();
+
   TCA destAddr = getFallbackTranslation();
   auto incoming = cc < 0 ? IncomingBranch::jmpFrom(from)
                          : IncomingBranch::jccFrom(from);
-  Asm a { tx64->codeBlockFor(from) };
 
-  // emit dummy jump to be smashed via patch()
-  if (cc < 0) {
-    a.jmp(a.frontier());
-  } else {
-    assert(incoming.type() == IncomingBranch::Tag::JCC);
-    a.jcc((ConditionCode)cc, a.frontier());
-  }
-
-  patch(incoming, destAddr);
+  mcg->backEnd().emitSmashableJump(cb, destAddr, cc);
 
   // We'll need to know the location of this jump later so we can
   // patch it to new translations added to the chain.
-  m_inProgressTailJumps.push_back(incoming);
+  mcg->cgFixups().m_inProgressTailJumps.push_back(incoming);
 }
 
-void SrcRec::newTranslation(TCA newStart) {
+void SrcRec::emitFallbackJumpCustom(CodeBlock& cb, CodeBlock& frozen,
+                                    SrcKey sk, TransFlags trflags,
+                                    ConditionCode cc) {
+  // Another platform dependency (the same one as above). TODO(2990497)
+  auto toSmash = x64::emitRetranslate(cb, frozen, cc, sk, trflags);
+
+  auto incoming = cc < 0 ? IncomingBranch::jmpFrom(toSmash)
+                         : IncomingBranch::jccFrom(toSmash);
+
+  mcg->cgFixups().m_inProgressTailJumps.push_back(incoming);
+}
+
+void SrcRec::newTranslation(TCA newStart,
+                            GrowableVector<IncomingBranch>& tailBranches) {
   // When translation punts due to hitting limit, will generate one
   // more translation that will call the interpreter.
   assert(m_translations.size() <= RuntimeOption::EvalJitMaxTranslations);
@@ -91,8 +153,8 @@ void SrcRec::newTranslation(TCA newStart) {
   TRACE(1, "SrcRec(%p)::newTranslation @%p, ", this, newStart);
 
   m_translations.push_back(newStart);
-  if (!m_topTranslation) {
-    atomic_release_store(&m_topTranslation, newStart);
+  if (!m_topTranslation.load(std::memory_order_acquire)) {
+    m_topTranslation.store(newStart, std::memory_order_release);
     patchIncomingBranches(newStart);
   }
 
@@ -110,14 +172,37 @@ void SrcRec::newTranslation(TCA newStart) {
    * get into REQ_RETRANSLATE, they'll acquire it and generate a
    * translation possibly for this same situation.)
    */
-  for (size_t i = 0; i < m_tailFallbackJumps.size(); ++i) {
-    patch(m_tailFallbackJumps[i], newStart);
+  for (auto& br : m_tailFallbackJumps) {
+    br.patch(newStart);
   }
 
   // This is the new tail translation, so store the fallback jump list
   // in case we translate this again.
-  m_tailFallbackJumps.swap(m_inProgressTailJumps);
-  m_inProgressTailJumps.clear();
+  m_tailFallbackJumps.swap(tailBranches);
+}
+
+void SrcRec::relocate(RelocationInfo& rel) {
+  if (auto adjusted = rel.adjustedAddressAfter(m_anchorTranslation)) {
+    m_anchorTranslation = adjusted;
+  }
+
+  if (auto adjusted = rel.adjustedAddressAfter(m_topTranslation.load())) {
+    m_topTranslation.store(adjusted);
+  }
+
+  for (auto &t : m_translations) {
+    if (TCA adjusted = rel.adjustedAddressAfter(t)) {
+      t = adjusted;
+    }
+  }
+
+  for (auto &ib : m_tailFallbackJumps) {
+    ib.relocate(rel);
+  }
+
+  for (auto &ib : m_incomingBranches) {
+    ib.relocate(rel);
+  }
 }
 
 void SrcRec::addDebuggerGuard(TCA dbgGuard, TCA dbgBranchGuardSrc) {
@@ -132,7 +217,7 @@ void SrcRec::addDebuggerGuard(TCA dbgGuard, TCA dbgBranchGuardSrc) {
   // Set m_dbgBranchGuardSrc after patching, so we don't try to patch
   // the debug guard.
   m_dbgBranchGuardSrc = dbgBranchGuardSrc;
-  atomic_release_store(&m_topTranslation, dbgGuard);
+  m_topTranslation.store(dbgGuard, std::memory_order_release);
 }
 
 void SrcRec::patchIncomingBranches(TCA newStart) {
@@ -140,19 +225,16 @@ void SrcRec::patchIncomingBranches(TCA newStart) {
     // We have a debugger guard, so all jumps to us funnel through
     // this.  Just smash m_dbgBranchGuardSrc.
     TRACE(1, "smashing m_dbgBranchGuardSrc @%p\n", m_dbgBranchGuardSrc);
-    TranslatorX64::smashJmp(tx64->codeBlockFor(m_dbgBranchGuardSrc),
-                            m_dbgBranchGuardSrc,
-                            newStart);
+    mcg->backEnd().smashJmp(m_dbgBranchGuardSrc, newStart);
     return;
   }
 
   TRACE(1, "%zd incoming branches to rechain\n", m_incomingBranches.size());
 
-  vector<IncomingBranch>& change = m_incomingBranches;
-  for (unsigned i = 0; i < change.size(); ++i) {
+  for (auto &br : m_incomingBranches) {
     TRACE(1, "SrcRec(%p)::newTranslation rechaining @%p -> %p\n",
-          this, change[i].toSmash(), newStart);
-    patch(change[i], newStart);
+          this, br.toSmash(), newStart);
+    br.patch(newStart);
   }
 }
 
@@ -161,7 +243,7 @@ void SrcRec::replaceOldTranslations() {
   // which is a REQ_RETRANSLATE.
   m_translations.clear();
   m_tailFallbackJumps.clear();
-  atomic_release_store(&m_topTranslation, static_cast<TCA>(0));
+  m_topTranslation.store(nullptr, std::memory_order_release);
 
   /*
    * It may seem a little weird that we're about to point every
@@ -185,58 +267,4 @@ void SrcRec::replaceOldTranslations() {
   patchIncomingBranches(m_anchorTranslation);
 }
 
-void SrcRec::patch(IncomingBranch branch, TCA dest) {
-  switch (branch.type()) {
-  case IncomingBranch::Tag::JMP: {
-    auto toSmash = branch.toSmash();
-    auto& cb = tx64->codeBlockFor(toSmash);
-    CodeCursor cg(cb, branch.toSmash());
-    TranslatorX64::smashJmp(cb, branch.toSmash(), dest);
-    break;
-  }
-
-  case IncomingBranch::Tag::JCC: {
-    // patch destination, but preserve the condition code
-    int32_t delta = safe_cast<int32_t>((dest - branch.toSmash()) - kJmpccLen);
-    int32_t* addr = (int32_t*)(branch.toSmash() + kJmpccLen - 4);
-    atomic_release_store(addr, delta);
-    break;
-  }
-
-  case IncomingBranch::Tag::ADDR:
-    // Note that this effectively ignores a
-    atomic_release_store(reinterpret_cast<TCA*>(branch.toSmash()), dest);
-  }
-}
-
-/*
- * Returns number of destroyed references to file.
- */
-size_t SrcDB::invalidateCode(const Eval::PhpFile* file) {
-  assert(currentRank() == RankBase);
-  /*
-   * Hold the write lease; otherwise some other thread may have started
-   * translating this very file.
-   */
-  BlockingLeaseHolder writer(Translator::WriteLease());
-
-  assert(!RuntimeOption::RepoAuthoritative);
-  unsigned i = 0;
-  {
-    TRACE(1, "SrcDB::invalidateCode: file %p\n", file);
-    FileDepMap::iterator entry = m_deps.find(file);
-    if (entry != m_deps.end()) {
-      GrowableVector<SrcKey>* deferredSrcKeys = entry->second;
-      for (/* already inited*/; i < deferredSrcKeys->size(); i++) {
-        tx64->invalidateSrcKey((*deferredSrcKeys)[i]);
-      }
-      TRACE(1, "SrcDB::invalidateCode: file %p has %zd srcKeys\n", file,
-            entry->second->size());
-      m_deps.erase(entry);
-      free(deferredSrcKeys);
-    }
-  }
-  return i;
-}
-
-} } // HPHP::Transl
+} } // HPHP::jit

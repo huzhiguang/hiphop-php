@@ -6,6 +6,13 @@ This documentation describes what's available for both of them.
 
 When in doubt, look for how these options are parsed in compiler/options.cpp.
 
+= UseHHBBC
+
+Default is true. Determines whether whole-program optimizations should
+performed on the bytecode using hhbbc as part of the hphp run. When
+false, you can still separately run hhbbc on the repo that hphp
+produces (useful for development on hhbbc itself).
+
 = AllDynamic
 
 Default is false. When turned on, all functions and methods can be invoked
@@ -187,18 +194,6 @@ How many threads to use when parsing PHP files. By default, it's 2x CPU count.
 
 Facebook specific. Ignore.
 
-= GenerateCppLibCode
-
-Default is false. When turned on, it will generate better C++ code to be used
-as C++ libraries, including better class methods and doc comments.
-
-= GenerateSourceInfo
-
-Default is false. Source info is a map from locations in C++ files to those in
-PHP files. It can be used to translate C++ stacktrace to more readable PHP
-stacktrace. When FrameInjection enabled, there is no need to do stacktrace
-translation any more, so this option is by default set to false to save space.
-
 = GenerateDocComments
 
 Default is true. Whether to store doc comments in class map, so they can be
@@ -248,9 +243,13 @@ AllDynamics.
 
 = DynamicInvokeFunctions
 
-Deprecating. These are options for specifying which functions may be called
-dynamically. This turned out to be hard to configure, and it's replaced by
-AllDynamics.
+This is a list of functions which we should assume can be used with
+fb_rename_function or fb_intercept in RepoAuthoritative mode.  (Note
+that they can be used with fb_rename_function even if
+EvalJitEnableRenameFunction is false at runtime.)
+
+We should probably rename this option to something like
+InterceptableFunctions, but we haven't yet.
 
 = CodeGeneration
 
@@ -258,48 +257,5 @@ Under "CodeGeneration", one can specify alternative name prefixes that are
 used in different places of code generation.
 
 - IdPrefix
-- LabelEscape
 - LambdaPrefix
-- FunctionPrefix
-- BuiltinFunctionPrefix
-- InvokePrefix
-- CreateObjectPrefix
-- PseudoMainPrefix
-- VariablePrefix
-- GlobalVariablePrefix
-- StaticVariablePrefix
-- ScalarArrayName
-- SystemScalarArrayName
-- ClassPrefix
-- ClassStaticsPrefix
-- ClassStaticsObjectPrefix
-- ClassStaticsCallbackPrefix
-- ClassStaticsIdGetterPrefix
-- ClassStaticInitializerPrefix
-- ClassStaticInitializerFlagPrefix
-- ClassWrapperFunctionPrefix
-- ObjectPrefix
-- ObjectStaticPrefix
-- SmartPtrPrefix
-- MethodPrefix
-- MethodWrapperPrefix
-- MethodImplPrefix
-- PropertyPrefix
-- StaticPropertyPrefix
-- ConstantPrefix
-- ClassConstantPrefix
-- ExceptionPrefix
-- TempVariablePrefix
-- EvalOrderTempPrefix
-- SilencerPrefix
-- EvalInvokePrefix
-- TempPrefix
-- MapPrefix
-- IterPrefix
-- InitPrefix
-- FFIFnPrefix
-- SystemFilePrefix
 - UserFilePrefix
-- ClassHeaderPrefix
-- ClusterPrefix
-- FFIFilePrefix

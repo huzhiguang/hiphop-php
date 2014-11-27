@@ -1,2 +1,0 @@
-<?php
-const C = array();

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,10 +24,10 @@
 #include <dwarf.h>
 #include <vector>
 
-using namespace HPHP::Transl;
-
 namespace HPHP {
 namespace Debug {
+
+using jit::TCA;
 
 typedef enum {
   RAX,
@@ -52,25 +52,32 @@ typedef enum {
 const int DWARF_CODE_ALIGN = 1;
 const int DWARF_DATA_ALIGN = 8;
 
-extern int g_dwarfCallback(char *name, int size, Dwarf_Unsigned type,
+#ifdef LIBDWARF_CONST_NAME
+#define LIBDWARF_CALLBACK_NAME_TYPE const char*
+#else
+#define LIBDWARF_CALLBACK_NAME_TYPE char*
+#endif
+
+extern int g_dwarfCallback(
+  LIBDWARF_CALLBACK_NAME_TYPE name, int size, Dwarf_Unsigned type,
   Dwarf_Unsigned flags, Dwarf_Unsigned link, Dwarf_Unsigned info,
   Dwarf_Unsigned *sect_name_index, Dwarf_Ptr handle, int *error);
 
 class TCRange {
   TCA m_start, m_end;
-  bool m_isAstubs;
+  bool m_isAcold;
   void V() const { assert(isValid()); }
  public:
-  TCRange() : m_start(nullptr), m_end(nullptr), m_isAstubs(false) {
+  TCRange() : m_start(nullptr), m_end(nullptr), m_isAcold(false) {
     assert(!isValid());
   }
-  TCRange(const TCA start, const TCA end, bool isAstubs) :
-    m_start(start), m_end(end), m_isAstubs(isAstubs) { V(); }
+  TCRange(const TCA start, const TCA end, bool isAcold) :
+    m_start(start), m_end(end), m_isAcold(isAcold) { V(); }
 
   TCRange& operator=(const TCRange& r) {
     m_start = r.m_start;
     m_end = r.m_end;
-    m_isAstubs = r.m_isAstubs;
+    m_isAcold = r.m_isAcold;
     V();
     return *this;
   }
@@ -81,7 +88,7 @@ class TCRange {
     assert(!m_start || (m_end - m_start) < (1ll << 32));
     return bool(m_start);
   }
-  bool isAstubs() const { return m_isAstubs; }
+  bool isAcold() const { return m_isAcold; }
   TCA begin() const { V(); return m_start; }
   TCA end() const   { V(); return m_end; };
   uint32_t size() const   { V(); return m_end - m_start; }
@@ -94,7 +101,7 @@ class TCRange {
 };
 
 struct DwarfBuf {
-  vector<uint8_t> m_buf;
+  std::vector<uint8_t> m_buf;
 
   void byte(uint8_t c);
   void byte(int off, uint8_t c);
@@ -147,7 +154,7 @@ struct FunctionInfo {
 
 struct DwarfChunk {
   DwarfBuf m_buf;
-  vector<FunctionInfo *> m_functions;
+  std::vector<FunctionInfo *> m_functions;
   char *m_symfile;
   bool m_synced;
   DwarfChunk() : m_symfile(nullptr), m_synced(false) {}
@@ -157,12 +164,12 @@ struct DwarfChunk {
 };
 
 typedef std::map<TCA, FunctionInfo* > FuncDB;
-typedef vector<FunctionInfo* > FuncPtrDB;
+typedef std::vector<FunctionInfo* > FuncPtrDB;
 
 struct DwarfInfo {
-  typedef std::map<TCA, TransRec> TransDB;
+  typedef std::map<TCA, jit::TransRec> TransDB;
 
-  vector<DwarfChunk*> m_dwarfChunks;
+  std::vector<DwarfChunk*> m_dwarfChunks;
   /* Array of chunks indexed by lg(#functions in chunk) + 1.
    * i.e. m_dwarfChunk[i] = pointer to chunk with
    * 2^(i-1) * RuntimeOption::EvalGdbSyncChunks functions, or NULL if
@@ -173,12 +180,12 @@ struct DwarfInfo {
 
   const char *lookupFile(const Unit *unit);
   void addLineEntries(TCRange range, const Unit *unit,
-		      const Opcode *instr, FunctionInfo* f);
+                      const Op* instr, FunctionInfo* f);
   void transferFuncs(DwarfChunk* from, DwarfChunk* to);
   void compactChunks();
   DwarfChunk* addTracelet(TCRange range, const char* name,
-			  const Func* func, const Opcode *instr,
-			  bool exit, bool inPrologue);
+                          const Func* func, const Op* instr,
+                          bool exit, bool inPrologue);
   void syncChunks();
 };
 

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -53,9 +53,6 @@
  *
  * Caveats:
  *
- *   - There's currently no support for inserting the Units this
- *     module makes into the Repo.
- *
  *   - It might be nice if you could refer to iterators by name
  *     instead of by index.
  *
@@ -65,14 +62,12 @@
  *     structures.  (It might make sense to do this via something like
  *     a .line directive at some point.)
  *
- *   - SetOpOp and IncDecOp op names are not implemented.
- *
  *   - You can't currently create non-top functions or non-hoistable
  *     classes.
  *
  *   - Missing support for static variables in a function/method.
  *
- * @author Jorden DeLong <delong.j@fb.com>
+ * @author Jordan DeLong <delong.j@fb.com>
  */
 
 #include "hphp/runtime/vm/as.h"
@@ -84,17 +79,25 @@
 #include <vector>
 #include <boost/algorithm/string.hpp>
 #include <boost/format.hpp>
-#include <boost/lexical_cast.hpp>
 #include <boost/scoped_ptr.hpp>
 #include <boost/noncopyable.hpp>
 #include <boost/bind.hpp>
 
-#include "folly/String.h"
+#include <folly/Conv.h>
+#include <folly/Range.h>
+#include <folly/String.h>
 
-#include "hphp/runtime/vm/unit.h"
-#include "hphp/runtime/vm/hhbc.h"
-#include "hphp/runtime/vm/preclass-emit.h"
+#include "hphp/util/md5.h"
+
 #include "hphp/runtime/base/builtin-functions.h"
+#include "hphp/runtime/base/repo-auth-type-codec.h"
+#include "hphp/runtime/base/repo-auth-type.h"
+#include "hphp/runtime/vm/as-shared.h"
+#include "hphp/runtime/vm/func-emitter.h"
+#include "hphp/runtime/vm/hhbc.h"
+#include "hphp/runtime/vm/preclass-emitter.h"
+#include "hphp/runtime/vm/unit.h"
+#include "hphp/runtime/vm/unit-emitter.h"
 #include "hphp/system/systemlib.h"
 
 TRACE_SET_MOD(hhas);
@@ -186,21 +189,68 @@ struct Input {
     return true;
   }
 
-  // Mostly C-style character escapes, but not quite everything is
-  // implemented.
+  // C-style character escapes, no support for unicode escapes or
+  // whatnot.
   template<class OutCont>
-  void escapeChar(int src, OutCont& out) {
+  void escapeChar(OutCont& out) {
+    auto is_oct = [&] (int i) { return i >= '0' && i <= '7'; };
+    auto is_hex = [&] (int i) {
+      return (i >= '0' && i <= '9') ||
+             (i >= 'a' && i <= 'f') ||
+             (i >= 'A' && i <= 'F');
+    };
+    auto hex_val = [&] (int i) -> uint32_t {
+      assert(is_hex(i));
+      return i >= '0' && i <= '9' ? i - '0' :
+             i >= 'a' && i <= 'f' ? i - 'a' + 10 : i - 'A' + 10;
+    };
+
+    auto src = getc();
     switch (src) {
     case EOF:  error("EOF in string literal");
-    case 't':  out.push_back('\t'); break;
+    case 'a':  out.push_back('\a'); break;
+    case 'b':  out.push_back('\b'); break;
+    case 'f':  out.push_back('\f'); break;
     case 'n':  out.push_back('\n'); break;
+    case 'r':  out.push_back('\r'); break;
+    case 't':  out.push_back('\t'); break;
     case 'v':  out.push_back('\v'); break;
-    case '\\': out.push_back('\\'); break;
+    case '\'': out.push_back('\''); break;
     case '\"': out.push_back('\"'); break;
+    case '\?': out.push_back('\?'); break;
+    case '\\': out.push_back('\\'); break;
     case '\n': /* ignore */         break;
     default:
-      // If you hit this and want octal or hex escapes or something,
-      // please implement.
+      if (is_oct(src)) {
+        auto val = int64_t{src} - '0';
+        for (auto i = int{0}; i < 3; ++i) {
+          src = getc();
+          if (!is_oct(src)) { ungetc(src); break; }
+          val *= 8;
+          val += src - '0';
+        }
+        if (val > std::numeric_limits<uint8_t>::max()) {
+          error("octal escape sequence overflowed");
+        }
+        out.push_back(static_cast<uint8_t>(val));
+        return;
+      }
+
+      if (src == 'x' || src == 'X') {
+        auto val = uint64_t{0};
+        if (!is_hex(peek())) error("\\x used without no following hex digits");
+        do {
+          src = getc();
+          val *= 0x10;
+          val += hex_val(src);
+        } while (is_hex(peek()));
+        if (val > std::numeric_limits<uint8_t>::max()) {
+          error("hex escape sequence overflowed");
+        }
+        out.push_back(static_cast<uint8_t>(val));
+        return;
+      }
+
       error("unrecognized character escape");
     }
   }
@@ -219,12 +269,12 @@ struct Input {
     while ((c = getc()) != EOF) {
       switch (c) {
       case '\"': return true;
-      case '\\': escapeChar(getc(), str); break;
-      default:   str.push_back(c);        break;
+      case '\\': escapeChar(str);  break;
+      default:   str.push_back(c); break;
       }
     }
     error("EOF in string literal");
-    NOT_REACHED();
+    not_reached();
     return false;
   }
 
@@ -249,7 +299,7 @@ struct Input {
     int c;
     while ((c = getc()) != EOF) {
       if (c == '\\') {
-        escapeChar(getc(), buffer);
+        escapeChar(buffer);
         continue;
       }
       if (c == '"') {
@@ -272,7 +322,7 @@ struct Input {
       buffer.push_back(c);
     }
     error("EOF in \"\"\"-string literal");
-    NOT_REACHED();
+    not_reached();
     return false;
   }
 
@@ -310,7 +360,7 @@ struct Input {
 private:
   struct is_bareword {
     bool operator()(int i) const {
-      return isalnum(i) || i == '_' || i == '.';
+      return isalnum(i) || i == '_' || i == '.' || i == '$' || i == '\\';
     }
   };
 
@@ -354,7 +404,7 @@ struct StackDepth {
   int maxOffset;
   int minOffset;
   int minOffsetLine;
-  boost::optional<int> baseValue;
+  folly::Optional<int> baseValue;
 
   /*
    * During the parsing process, when a Jmp instruction is encountered, the
@@ -461,8 +511,8 @@ struct AsmState : private boost::noncopyable {
 
     if (currentStackDepth == nullptr) {
       stack << "/";
-    } else if(currentStackDepth->baseValue) {
-      stack << currentStackDepth->baseValue.get() +
+    } else if (currentStackDepth->baseValue) {
+      stack << *currentStackDepth->baseValue +
                currentStackDepth->currentOffset;
     } else {
       stack << "?" << currentStackDepth->currentOffset;
@@ -553,7 +603,7 @@ struct AsmState : private boost::noncopyable {
     FPIReg& fpi = fpiRegs.back();
     fpi.fpushOff = fpushOff;
     fpi.stackDepth = currentStackDepth;
-    fpi.fpOff = currentStackDepth->currentOffset + fdescDepth;
+    fpi.fpOff = currentStackDepth->currentOffset;
     fdescDepth += kNumActRecCells;
     fdescHighWater = std::max(fdescDepth, fdescHighWater);
   }
@@ -567,7 +617,7 @@ struct AsmState : private boost::noncopyable {
     ent.m_fcallOff = ue->bcPos();
     ent.m_fpOff = reg.fpOff;
     if (reg.stackDepth->baseValue) {
-      ent.m_fpOff += reg.stackDepth->baseValue.get();
+      ent.m_fpOff += *reg.stackDepth->baseValue;
     } else {
       // base value still unknown, this will need to be updated later
       fpiToUpdate.push_back(std::make_pair(&ent, reg.stackDepth));
@@ -592,23 +642,23 @@ struct AsmState : private boost::noncopyable {
     for (std::vector<Id>::const_iterator it = label.dvInits.begin();
         it != label.dvInits.end();
         ++it) {
-      fe->setParamFuncletOff(*it, label.target);
+      fe->params[*it].funcletOff = label.target;
     }
 
     for (std::vector<size_t>::const_iterator it = label.ehFaults.begin();
         it != label.ehFaults.end();
         ++it) {
-      fe->ehtab()[*it].m_fault = label.target;
+      fe->ehtab[*it].m_fault = label.target;
     }
 
     for (Label::CatchesMap::const_iterator it = label.ehCatches.begin();
         it != label.ehCatches.end();
         ++it) {
-      Id exId = ue->mergeLitstr(StringData::GetStaticString(it->first));
+      Id exId = ue->mergeLitstr(makeStaticString(it->first));
       for (std::vector<size_t>::const_iterator idx_it = it->second.begin();
           idx_it != it->second.end();
           ++idx_it) {
-        fe->ehtab()[*idx_it].m_catches.push_back(
+        fe->ehtab[*idx_it].m_catches.push_back(
           std::make_pair(exId, label.target));
       }
     }
@@ -634,13 +684,16 @@ struct AsmState : private boost::noncopyable {
         error("created a FPI from an unreachable instruction");
       }
 
-      kv.first->m_fpOff += kv.second->baseValue.get();
+      kv.first->m_fpOff += *kv.second->baseValue;
     }
 
     // Stack depth should be 0 at the end of a function body
     enforceStackDepth(0);
 
-    fe->setMaxStackCells(stackHighWater + kNumActRecCells + fdescHighWater);
+    fe->maxStackCells = fe->numLocals() +
+                        fe->numIterators() * kNumIterCells +
+                        stackHighWater +
+                        fdescHighWater; // in units of cells already
     fe->finish(ue->bcPos(), false);
     ue->recordFunction(fe);
 
@@ -662,7 +715,7 @@ struct AsmState : private boost::noncopyable {
       error("local variables must be prefixed with $");
     }
 
-    const StringData* sd = StringData::GetStaticString(name.c_str() + 1);
+    const StringData* sd = makeStaticString(name.c_str() + 1);
     fe->allocVarId(sd);
     return fe->lookupVarId(sd);
   }
@@ -774,12 +827,22 @@ template<class Target> Target read_opcode_arg(AsmState& as) {
     as.error("expected opcode or directive argument");
   }
   try {
-    return boost::lexical_cast<Target>(strVal);
-  } catch (boost::bad_lexical_cast&) {
+    return folly::to<Target>(strVal);
+  } catch (std::range_error&) {
     as.error("couldn't convert input argument (" + strVal + ") to "
              "proper type");
-    NOT_REACHED();
+    not_reached();
   }
+}
+
+template<class SubOpType>
+uint8_t read_subop(AsmState& as) {
+  auto const str = read_opcode_arg<std::string>(as);
+  if (auto const ty = nameToSubop<SubOpType>(str.c_str())) {
+    return static_cast<uint8_t>(*ty);
+  }
+  as.error("unknown subop name");
+  not_reached();
 }
 
 const StringData* read_litstr(AsmState& as) {
@@ -788,7 +851,20 @@ const StringData* read_litstr(AsmState& as) {
   if (!as.in.readQuotedStr(strVal)) {
     as.error("expected quoted string literal");
   }
-  return StringData::GetStaticString(strVal);
+  return makeStaticString(strVal);
+}
+
+std::vector<std::string> read_strvector(AsmState& as) {
+  std::vector<std::string> ret;
+  as.in.skipSpaceTab();
+  as.in.expect('<');
+  std::string name;
+  while (as.in.skipSpaceTab(), as.in.readQuotedStr(name)) {
+    ret.push_back(name);
+  }
+  as.in.skipSpaceTab();
+  as.in.expectWs('>');
+  return ret;
 }
 
 ArrayData* read_litarray(AsmState& as) {
@@ -808,7 +884,7 @@ ArrayData* read_litarray(AsmState& as) {
   return it->second;
 }
 
-void read_immvector_immediate(AsmState& as, std::vector<uchar>& ret,
+void read_immvector_immediate(AsmState& as, std::vector<unsigned char>& ret,
                               MemberCode mcode = InvalidMemberCode) {
   if (memberCodeImmIsLoc(mcode) || mcode == InvalidMemberCode) {
     if (as.in.getc() != '$') {
@@ -830,8 +906,8 @@ void read_immvector_immediate(AsmState& as, std::vector<uchar>& ret,
   }
 }
 
-std::vector<uchar> read_immvector(AsmState& as, int& stackCount) {
-  std::vector<uchar> ret;
+std::vector<unsigned char> read_immvector(AsmState& as, int& stackCount) {
+  std::vector<unsigned char> ret;
 
   as.in.skipSpaceTab();
   as.in.expect('<');
@@ -880,6 +956,108 @@ std::vector<uchar> read_immvector(AsmState& as, int& stackCount) {
   }
 
   return ret;
+}
+
+RepoAuthType read_repo_auth_type(AsmState& as) {
+  auto const str = read_opcode_arg<std::string>(as);
+  folly::StringPiece parse(str);
+
+  /*
+   * Note: no support for reading array types.  (The assembler only
+   * emits a single unit, so it can't really be involved in creating a
+   * ArrayTypeTable.)
+   */
+
+  using T = RepoAuthType::Tag;
+
+#define X(what, tag) \
+  if (parse.startsWith(what)) return RepoAuthType{tag}
+
+#define Y(what, tag)                                  \
+  if (parse.startsWith(what)) {                       \
+    parse.removePrefix(what);                         \
+    auto const cls = makeStaticString(parse.data());  \
+    as.ue->mergeLitstr(cls);                          \
+    return RepoAuthType{tag, cls};                    \
+  }
+
+  Y("Obj=",     T::ExactObj);
+  Y("?Obj=",    T::OptExactObj);
+  Y("?Obj<=",   T::OptSubObj);
+  Y("Obj<=",    T::SubObj);
+
+  X("Arr",      T::Arr);
+  X("?Arr",     T::OptArr);
+  X("Bool",     T::Bool);
+  X("?Bool",    T::OptBool);
+  X("Cell",     T::Cell);
+  X("Dbl",      T::Dbl);
+  X("?Dbl",     T::OptDbl);
+  X("Gen",      T::Gen);
+  X("InitCell", T::InitCell);
+  X("InitGen",  T::InitGen);
+  X("InitNull", T::InitNull);
+  X("InitUnc",  T::InitUnc);
+  X("Int",      T::Int);
+  X("?Int",     T::OptInt);
+  X("Null",     T::Null);
+  X("Obj",      T::Obj);
+  X("?Obj",     T::OptObj);
+  X("Ref",      T::Ref);
+  X("?Res",     T::OptRes);
+  X("Res",      T::Res);
+  X("?SArr",    T::OptSArr);
+  X("SArr",     T::SArr);
+  X("?SStr",    T::OptSStr);
+  X("SStr",     T::SStr);
+  X("?Str",     T::OptStr);
+  X("Str",      T::Str);
+  X("Unc",      T::Unc);
+  X("Uninit",   T::Uninit);
+
+#undef X
+#undef Y
+
+  // Make sure the above parsing code is revisited when new tags are
+  // added (we'll get a warning for a missing case label):
+  if (debug) switch (RepoAuthType{}.tag()) {
+  case T::Uninit:
+  case T::InitNull:
+  case T::Null:
+  case T::Int:
+  case T::OptInt:
+  case T::Dbl:
+  case T::OptDbl:
+  case T::Res:
+  case T::OptRes:
+  case T::Bool:
+  case T::OptBool:
+  case T::SStr:
+  case T::OptSStr:
+  case T::Str:
+  case T::OptStr:
+  case T::SArr:
+  case T::OptSArr:
+  case T::Arr:
+  case T::OptArr:
+  case T::Obj:
+  case T::OptObj:
+  case T::InitUnc:
+  case T::Unc:
+  case T::InitCell:
+  case T::Cell:
+  case T::Ref:
+  case T::InitGen:
+  case T::Gen:
+  case T::ExactObj:
+  case T::SubObj:
+  case T::OptExactObj:
+  case T::OptSubObj:
+    break;
+  }
+
+  as.error("unrecognized RepoAuthType format");
+  not_reached();
 }
 
 // Read in a vector of iterators the format for this vector is:
@@ -958,7 +1136,7 @@ SSwitchJmpVector read_sswitch_jmpvector(AsmState& as) {
     as.in.readword(defLabel);
 
     ret.push_back(std::make_pair(
-      as.ue->mergeLitstr(StringData::GetStaticString(caseStr)),
+      as.ue->mergeLitstr(makeStaticString(caseStr)),
       defLabel
     ));
 
@@ -988,23 +1166,31 @@ OpcodeParserMap opcode_parsers;
 #define IMM_THREE(t1, t2, t3) IMM_##t1; IMM_##t2; IMM_##t3
 #define IMM_FOUR(t1, t2, t3, t4) IMM_##t1; IMM_##t2; IMM_##t3; IMM_##t4
 
-// FCall and NewTuple need to know the the first imm do POP_*MANY.
+// FCall and NewPackedArray need to know the the first imm do POP_*MANY.
 #define IMM_IVA do {                            \
     int imm = read_opcode_arg<int64_t>(as);     \
     as.ue->emitIVA(imm);                        \
     if (immIVA < 0) immIVA = imm;               \
   } while (0)
 
-#define IMM_SA   as.ue->emitInt32(as.ue->mergeLitstr(read_litstr(as)))
-#define IMM_I64A as.ue->emitInt64(read_opcode_arg<int64_t>(as))
-#define IMM_DA   as.ue->emitDouble(read_opcode_arg<double>(as))
-#define IMM_LA   as.ue->emitIVA(as.getLocalId(  \
-                   read_opcode_arg<std::string>(as)))
-#define IMM_IA   as.ue->emitIVA(as.getIterId( \
-                   read_opcode_arg<int32_t>(as)))
-#define IMM_OA   as.ue->emitByte(               \
-                   uint8_t(read_opcode_arg<int32_t>(as))) // TODO op names
-#define IMM_AA   as.ue->emitInt32(as.ue->mergeArray(read_litarray(as)))
+#define IMM_VSA \
+  std::vector<std::string> vecImm = read_strvector(as);                 \
+  auto const vecImmStackValues = vecImm.size();                         \
+  as.ue->emitInt32(vecImmStackValues);                                  \
+  for (size_t i = 0; i < vecImmStackValues; ++i) {                      \
+    as.ue->emitInt32(as.ue->mergeLitstr(String(vecImm[i]).get()));      \
+  }
+
+#define IMM_SA     as.ue->emitInt32(as.ue->mergeLitstr(read_litstr(as)))
+#define IMM_RATA   encodeRAT(*as.ue, read_repo_auth_type(as))
+#define IMM_I64A   as.ue->emitInt64(read_opcode_arg<int64_t>(as))
+#define IMM_DA     as.ue->emitDouble(read_opcode_arg<double>(as))
+#define IMM_LA     as.ue->emitIVA(as.getLocalId(  \
+                     read_opcode_arg<std::string>(as)))
+#define IMM_IA     as.ue->emitIVA(as.getIterId( \
+                     read_opcode_arg<int32_t>(as)))
+#define IMM_OA(ty) as.ue->emitByte(read_subop<ty>(as));
+#define IMM_AA     as.ue->emitInt32(as.ue->mergeArray(read_litarray(as)))
 
 /*
  * There can currently be no more than one immvector per instruction,
@@ -1014,7 +1200,7 @@ OpcodeParserMap opcode_parsers;
  */
 #define IMM_MA                                                        \
   int vecImmStackValues = 0;                                          \
-  std::vector<uchar> vecImm = read_immvector(as, vecImmStackValues);  \
+  auto vecImm = read_immvector(as, vecImmStackValues);                \
   as.ue->emitInt32(vecImm.size());                                    \
   as.ue->emitInt32(vecImmStackValues);                                \
   for (size_t i = 0; i < vecImm.size(); ++i) {                        \
@@ -1068,56 +1254,64 @@ OpcodeParserMap opcode_parsers;
 #define NUM_POP_ONE(a) 1
 #define NUM_POP_TWO(a,b) 2
 #define NUM_POP_THREE(a,b,c) 3
-#define NUM_POP_LMANY() vecImmStackValues
-#define NUM_POP_V_LMANY() (1 + vecImmStackValues)
-#define NUM_POP_R_LMANY() (1 + vecImmStackValues)
-#define NUM_POP_C_LMANY() (1 + vecImmStackValues)
+#define NUM_POP_MMANY vecImmStackValues
+#define NUM_POP_V_MMANY (1 + vecImmStackValues)
+#define NUM_POP_R_MMANY (1 + vecImmStackValues)
+#define NUM_POP_C_MMANY (1 + vecImmStackValues)
 #define NUM_POP_FMANY immIVA /* number of arguments */
 #define NUM_POP_CVMANY immIVA /* number of arguments */
+#define NUM_POP_CVUMANY immIVA /* number of arguments */
 #define NUM_POP_CMANY immIVA /* number of arguments */
+#define NUM_POP_SMANY vecImmStackValues
 
-#define O(name, imm, pop, push, flags)                            \
-  void parse_opcode_##name(AsmState& as) {                        \
-    UNUSED int64_t immIVA = -1;                                   \
-    UNUSED auto const thisOpcode = Op::name;                      \
-    UNUSED const Offset curOpcodeOff = as.ue->bcPos();            \
-    std::vector<std::pair<std::string, Offset> > labelJumps;      \
-                                                                  \
-    TRACE(                                                        \
-      4,                                                          \
-      "%d\t[%s] %s\n",                                            \
-      as.in.getLineNumber(),                                      \
-      as.displayStackDepth().c_str(),                             \
-      #name                                                       \
-    );                                                            \
-                                                                  \
-    if (isFCallStar(Op##name)) {                                  \
-      as.endFpi();                                                \
-    }                                                             \
-                                                                  \
-    as.ue->emitOp(Op##name);                                      \
-                                                                  \
-    IMM_##imm;                                                    \
-                                                                  \
-    int stackDelta = NUM_PUSH_##push - NUM_POP_##pop;             \
-    as.adjustStack(stackDelta);                                   \
-                                                                  \
-    if (isFPush(Op##name)) {                                      \
-      as.beginFpi(curOpcodeOff);                                  \
-    }                                                             \
-                                                                  \
-    for (auto& kv : labelJumps) {                                 \
-      as.addLabelJump(kv.first, kv.second, curOpcodeOff);         \
-    }                                                             \
-                                                                  \
-    /* Stack depth should be 0 after RetC or RetV. */             \
-    if (thisOpcode == OpRetC || thisOpcode == OpRetV) {           \
-      as.enforceStackDepth(0);                                    \
-    }                                                             \
-                                                                  \
-    if (instrFlags(thisOpcode) & InstrFlags::TF) {                \
-      as.enterUnreachableRegion();                                \
-    }                                                             \
+#define O(name, imm, pop, push, flags)                                 \
+  void parse_opcode_##name(AsmState& as) {                             \
+    UNUSED int64_t immIVA = -1;                                        \
+    UNUSED auto const thisOpcode = Op::name;                           \
+    UNUSED const Offset curOpcodeOff = as.ue->bcPos();                 \
+    std::vector<std::pair<std::string, Offset> > labelJumps;           \
+                                                                       \
+    TRACE(                                                             \
+      4,                                                               \
+      "%d\t[%s] %s\n",                                                 \
+      as.in.getLineNumber(),                                           \
+      as.displayStackDepth().c_str(),                                  \
+      #name                                                            \
+    );                                                                 \
+                                                                       \
+    if (isFCallStar(Op##name)) {                                       \
+      as.endFpi();                                                     \
+    }                                                                  \
+                                                                       \
+    as.ue->emitOp(Op##name);                                           \
+                                                                       \
+    IMM_##imm;                                                         \
+                                                                       \
+    int stackDelta = NUM_PUSH_##push - NUM_POP_##pop;                  \
+    as.adjustStack(stackDelta);                                        \
+                                                                       \
+    if (isFPush(Op##name)) {                                           \
+      as.beginFpi(curOpcodeOff);                                       \
+    }                                                                  \
+                                                                       \
+    for (auto& kv : labelJumps) {                                      \
+      as.addLabelJump(kv.first, kv.second, curOpcodeOff);              \
+    }                                                                  \
+                                                                       \
+    /* Stack depth should be 0 after RetC or RetV. */                  \
+    if (thisOpcode == OpRetC || thisOpcode == OpRetV) {                \
+      as.enforceStackDepth(0);                                         \
+    }                                                                  \
+                                                                       \
+    /* Stack depth should be 1 after resume from suspend. */           \
+    if (thisOpcode == OpCreateCont || thisOpcode == OpAwait ||         \
+        thisOpcode == OpYield || thisOpcode == OpYieldK) {             \
+      as.enforceStackDepth(1);                                         \
+    }                                                                  \
+                                                                       \
+    if (instrFlags(thisOpcode) & InstrFlags::TF) {                     \
+      as.enterUnreachableRegion();                                     \
+    }                                                                  \
   }
 
 OPCODES
@@ -1126,6 +1320,7 @@ OPCODES
 
 #undef IMM_I64A
 #undef IMM_SA
+#undef IMM_RATA
 #undef IMM_DA
 #undef IMM_IVA
 #undef IMM_LA
@@ -1135,6 +1330,7 @@ OPCODES
 #undef IMM_OA
 #undef IMM_MA
 #undef IMM_AA
+#undef IMM_VSA
 
 #undef NUM_PUSH_NOV
 #undef NUM_PUSH_ONE
@@ -1147,13 +1343,15 @@ OPCODES
 #undef NUM_POP_TWO
 #undef NUM_POP_THREE
 #undef NUM_POP_POS_N
-#undef NUM_POP_LMANY
-#undef NUM_POP_V_LMANY
-#undef NUM_POP_R_LMANY
-#undef NUM_POP_C_LMANY
+#undef NUM_POP_MMANY
+#undef NUM_POP_V_MMANY
+#undef NUM_POP_R_MMANY
+#undef NUM_POP_C_MMANY
 #undef NUM_POP_FMANY
 #undef NUM_POP_CVMANY
+#undef NUM_POP_CVUMANY
 #undef NUM_POP_CMANY
+#undef NUM_POP_SMANY
 
 void initialize_opcode_map() {
 #define O(name, imm, pop, push, flags) \
@@ -1240,13 +1438,13 @@ void parse_fault(AsmState& as, int nestLevel) {
   as.in.expectWs('{');
   parse_function_body(as, nestLevel + 1);
 
-  EHEnt& eh = as.fe->addEHEnt();
+  auto& eh = as.fe->addEHEnt();
   eh.m_type = EHEnt::Type::Fault;
   eh.m_base = start;
   eh.m_past = as.ue->bcPos();
   eh.m_iterId = iterId;
 
-  as.addLabelEHFault(label, as.fe->ehtab().size() - 1);
+  as.addLabelEHFault(label, as.fe->ehtab.size() - 1);
 }
 
 /*
@@ -1283,7 +1481,7 @@ void parse_catch(AsmState& as, int nestLevel) {
   as.in.expect('{');
   parse_function_body(as, nestLevel + 1);
 
-  EHEnt& eh = as.fe->addEHEnt();
+  auto& eh = as.fe->addEHEnt();
   eh.m_type = EHEnt::Type::Catch;
   eh.m_base = start;
   eh.m_past = as.ue->bcPos();
@@ -1292,7 +1490,7 @@ void parse_catch(AsmState& as, int nestLevel) {
   for (size_t i = 0; i < catches.size(); ++i) {
     as.addLabelEHCatch(catches[i].first,
                        catches[i].second,
-                       as.fe->ehtab().size() - 1);
+                       as.fe->ehtab.size() - 1);
   }
 }
 
@@ -1359,21 +1557,14 @@ void parse_function_body(AsmState& as, int nestLevel /* = 0 */) {
  *                | '[' attribute-name* ']'
  *                ;
  *
- * The `attribute-name' rule is context-sensitive; just look at the
- * code below.
+ * The `attribute-name' rule is context-sensitive; see as-shared.cpp.
  */
-enum class AttrContext {
-  Class,
-  Func,
-  Prop,
-  TraitImport
-};
 Attr parse_attribute_list(AsmState& as, AttrContext ctx) {
   as.in.skipWhitespace();
   int ret = AttrNone;
   if (ctx == AttrContext::Class || ctx == AttrContext::Func) {
     if (!SystemLib::s_inited) {
-      ret |= AttrUnique | AttrPersistent;
+      ret |= AttrUnique | AttrPersistent | AttrBuiltin;
     }
   }
   if (as.in.peek() != '[') return Attr(ret);
@@ -1385,29 +1576,10 @@ Attr parse_attribute_list(AsmState& as, AttrContext ctx) {
     if (as.in.peek() == ']') break;
     if (!as.in.readword(word)) break;
 
-    if (ctx == AttrContext::Func || ctx == AttrContext::Prop ||
-        ctx == AttrContext::TraitImport) {
-      if (word == "public")    { ret |= AttrPublic;    continue; }
-      if (word == "protected") { ret |= AttrProtected; continue; }
-      if (word == "private")   { ret |= AttrPrivate;   continue; }
-    }
-    if (ctx == AttrContext::Func || ctx == AttrContext::Prop) {
-      if (word == "static")    { ret |= AttrStatic;    continue; }
-    }
-    if (ctx == AttrContext::Class) {
-      if (word == "interface") { ret |= AttrInterface; continue; }
-      if (word == "no_expand_trait")
-                               { ret |= AttrNoExpandTrait; continue; }
-    }
-    if (ctx == AttrContext::Class || ctx == AttrContext::Func ||
-        ctx == AttrContext::TraitImport) {
-      if (word == "abstract")  { ret |= AttrAbstract;  continue; }
-      if (word == "final")     { ret |= AttrFinal;     continue; }
-      if (word == "no_override") { ret |= AttrNoOverride; continue; }
-    }
-    if (ctx == AttrContext::Class || ctx == AttrContext::Func) {
-      if (word == "trait")     { ret |= AttrTrait;     continue; }
-      if (word == "unique")    { ret |= AttrUnique;    continue; }
+    auto const abit = string_to_attr(ctx, word);
+    if (abit) {
+      ret |= *abit;
+      continue;
     }
 
     as.error("unrecognized attribute `" + word + "' in this context");
@@ -1457,10 +1629,13 @@ void parse_parameter_list(AsmState& as) {
         as.error("expecting '...'");
       }
       as.in.expectWs(')');
-      as.fe->setAttrs(as.fe->attrs() | AttrMayUseVV);
+      as.fe->attrs |= AttrMayUseVV;
       break;
     }
-    if (ch == '&') { param.setRef(true); ch = as.in.getc(); }
+    if (ch == '&') {
+      param.byRef = true;
+      ch = as.in.getc();
+    }
     if (ch != '$') {
       as.error("function parameters must have a $ prefix");
     }
@@ -1478,12 +1653,13 @@ void parse_parameter_list(AsmState& as) {
       if (!as.in.readword(label)) {
         as.error("expected label name for dv-initializer");
       }
-      as.addLabelDVInit(label, as.fe->numParams());
+      as.addLabelDVInit(label, as.fe->params.size());
 
+      as.in.skipWhitespace();
       ch = as.in.getc();
       if (ch == '(') {
         String str = parse_long_string(as);
-        param.setPhpCode(StringData::GetStaticString(str));
+        param.phpCode = makeStaticString(str);
         TypedValue tv;
         tvWriteUninit(&tv);
         if (str.size() == 4) {
@@ -1496,9 +1672,10 @@ void parse_parameter_list(AsmState& as) {
           tv = make_tv<KindOfBoolean>(false);
         }
         if (tv.m_type != KindOfUninit) {
-          param.setDefaultValue(tv);
+          param.defaultValue = tv;
         }
         as.in.expectWs(')');
+        as.in.skipWhitespace();
         ch = as.in.getc();
       }
     } else {
@@ -1508,15 +1685,36 @@ void parse_parameter_list(AsmState& as) {
       }
     }
 
-    as.fe->appendParam(StringData::GetStaticString(name), param);
+    as.fe->appendParam(makeStaticString(name), param);
 
     if (ch == ')') break;
     if (ch != ',') as.error("expected , between parameter names");
   }
 }
 
+void parse_function_flags(AsmState& as) {
+  as.in.skipWhitespace();
+  std::string flag;
+  for (;;) {
+    if (as.in.peek() == '{') break;
+    if (!as.in.readword(flag)) break;
+
+    if (flag == "isGenerator") {
+      as.fe->isGenerator = true;
+    } else if (flag == "isAsync") {
+      as.fe->isAsync = true;
+    } else if (flag == "isClosureBody") {
+      as.fe->isClosureBody = true;
+    } else if (flag == "isPairGenerator") {
+      as.fe->isPairGenerator = true;
+    } else {
+      as.error("Unexpected function flag \"" + flag + "\"");
+    }
+  }
+}
+
 /*
- * directive-function : attribute-list identifier parameter-list
+ * directive-function : attribute-list identifier parameter-list function-flags
  *                        '{' function-body
  *                    ;
  */
@@ -1531,11 +1729,13 @@ void parse_function(AsmState& as) {
     as.error(".function must have a name");
   }
 
-  as.fe = as.ue->newFuncEmitter(StringData::GetStaticString(name));
+  as.fe = as.ue->newFuncEmitter(makeStaticString(name));
   as.fe->init(as.in.getLineNumber(), as.in.getLineNumber() + 1 /* XXX */,
               as.ue->bcPos(), attrs, true, 0);
 
   parse_parameter_list(as);
+  parse_function_flags(as);
+
   as.in.expectWs('{');
 
   parse_function_body(as);
@@ -1555,7 +1755,7 @@ void parse_method(AsmState& as) {
     as.error(".method requires a method name");
   }
 
-  as.fe = as.ue->newMethodEmitter(StringData::GetStaticString(name), as.pce);
+  as.fe = as.ue->newMethodEmitter(makeStaticString(name), as.pce);
   as.pce->addMethod(as.fe);
   as.fe->init(as.in.getLineNumber(), as.in.getLineNumber() + 1 /* XXX */,
               as.ue->bcPos(), attrs, true, 0);
@@ -1595,7 +1795,7 @@ TypedValue parse_member_tv_initializer(AsmState& as) {
 
     tvAsVariant(&tvInit) = parse_php_serialized(as);
     if (IS_STRING_TYPE(tvInit.m_type)) {
-      tvInit.m_data.pstr = StringData::GetStaticString(tvInit.m_data.pstr);
+      tvInit.m_data.pstr = makeStaticString(tvInit.m_data.pstr);
       as.ue->mergeLitstr(tvInit.m_data.pstr);
     } else if (IS_ARRAY_TYPE(tvInit.m_type)) {
       tvInit.m_data.parr = ArrayData::GetScalarArray(tvInit.m_data.parr);
@@ -1630,11 +1830,11 @@ void parse_property(AsmState& as) {
   }
 
   TypedValue tvInit = parse_member_tv_initializer(as);
-  as.pce->addProperty(StringData::GetStaticString(name),
-                      attrs, empty_string.get(),
-                      empty_string.get(),
+  as.pce->addProperty(makeStaticString(name),
+                      attrs, staticEmptyString(),
+                      staticEmptyString(),
                       &tvInit,
-                      KindOfInvalid);
+                      RepoAuthType{});
 }
 
 /*
@@ -1650,9 +1850,9 @@ void parse_constant(AsmState& as) {
   }
 
   TypedValue tvInit = parse_member_tv_initializer(as);
-  as.pce->addConstant(StringData::GetStaticString(name),
-                      empty_string.get(), &tvInit,
-                      empty_string.get());
+  as.pce->addConstant(makeStaticString(name),
+                      staticEmptyString(), &tvInit,
+                      staticEmptyString());
 }
 
 /*
@@ -1665,7 +1865,7 @@ void parse_default_ctor(AsmState& as) {
   assert(!as.fe && as.pce);
 
   as.fe = as.ue->newMethodEmitter(
-    StringData::GetStaticString("86ctor"), as.pce);
+    makeStaticString("86ctor"), as.pce);
   as.pce->addMethod(as.fe);
   as.fe->init(as.in.getLineNumber(), as.in.getLineNumber(),
               as.ue->bcPos(), AttrPublic, true, 0);
@@ -1699,7 +1899,7 @@ void parse_use(AsmState& as) {
   }
 
   for (size_t i = 0; i < usedTraits.size(); ++i) {
-    as.pce->addUsedTrait(StringData::GetStaticString(usedTraits[i]));
+    as.pce->addUsedTrait(makeStaticString(usedTraits[i]));
   }
   as.in.skipWhitespace();
   if (as.in.peek() != '{') {
@@ -1726,12 +1926,7 @@ void parse_use(AsmState& as) {
       }
     } else {
       identifier = traitName;
-      if (usedTraits.size() != 1) {
-        as.error("you must say which trait contains `" +
-                 identifier + "' since this .use block brings in "
-                 "multiple traits");
-      }
-      traitName = usedTraits.front();
+      traitName.clear();
     }
 
     if (as.in.tryConsume("as")) {
@@ -1747,19 +1942,23 @@ void parse_use(AsmState& as) {
       }
 
       as.pce->addTraitAliasRule(PreClass::TraitAliasRule(
-        StringData::GetStaticString(traitName),
-        StringData::GetStaticString(identifier),
-        StringData::GetStaticString(alias),
+        makeStaticString(traitName),
+        makeStaticString(identifier),
+        makeStaticString(alias),
         attrs));
     } else if (as.in.tryConsume("insteadof")) {
+      if (traitName.empty()) {
+        as.error("Must specify TraitName::name when using a trait insteadof");
+      }
+
       PreClass::TraitPrecRule precRule(
-        StringData::GetStaticString(traitName),
-        StringData::GetStaticString(identifier));
+        makeStaticString(traitName),
+        makeStaticString(identifier));
 
       bool addedOtherTraits = false;
       std::string whom;
       while (as.in.readword(whom)) {
-        precRule.addOtherTraitName(StringData::GetStaticString(whom));
+        precRule.addOtherTraitName(makeStaticString(whom));
         addedOtherTraits = true;
       }
       if (!addedOtherTraits) {
@@ -1795,10 +1994,10 @@ void parse_class_body(AsmState& as) {
 
   std::string directive;
   while (as.in.readword(directive)) {
-    if (directive == ".method")   { parse_method(as);   continue; }
-    if (directive == ".property") { parse_property(as); continue; }
-    if (directive == ".const")    { parse_constant(as); continue; }
-    if (directive == ".use")      { parse_use(as);      continue; }
+    if (directive == ".method")       { parse_method(as);       continue; }
+    if (directive == ".property")     { parse_property(as);     continue; }
+    if (directive == ".const")        { parse_constant(as);     continue; }
+    if (directive == ".use")          { parse_use(as);          continue; }
     if (directive == ".default_ctor") { parse_default_ctor(as); continue; }
 
     as.error("unrecognized directive `" + directive + "' in class");
@@ -1847,20 +2046,30 @@ void parse_class(AsmState& as) {
     as.in.expect(')');
   }
 
-  as.pce = as.ue->newPreClassEmitter(StringData::GetStaticString(name),
+  as.pce = as.ue->newPreClassEmitter(makeStaticString(name),
                                      PreClass::MaybeHoistable);
   as.pce->init(as.in.getLineNumber(),
                as.in.getLineNumber() + 1, // XXX
                as.ue->bcPos(),
                attrs,
-               StringData::GetStaticString(parentName),
-               empty_string.get());
+               makeStaticString(parentName),
+               staticEmptyString());
   for (size_t i = 0; i < ifaces.size(); ++i) {
-    as.pce->addInterface(StringData::GetStaticString(ifaces[i]));
+    as.pce->addInterface(makeStaticString(ifaces[i]));
   }
 
   as.in.expectWs('{');
   parse_class_body(as);
+}
+
+/*
+ * directive-filepath : quoted-string-literal ';'
+ *                    ;
+ */
+void parse_filepath(AsmState& as) {
+  auto const str = read_litstr(as);
+  as.ue->m_filepath = str;
+  as.in.expectWs(';');
 }
 
 /*
@@ -1915,7 +2124,8 @@ void parse_adata(AsmState& as) {
  * asm-file : asm-tld* <EOF>
  *          ;
  *
- * asm-tld :    ".main"        directive-main
+ * asm-tld :    ".filepath"    directive-filepath
+ *         |    ".main"        directive-main
  *         |    ".function"    directive-function
  *         |    ".adata"       directive-adata
  *         |    ".class"       directive-class
@@ -1936,6 +2146,7 @@ void parse(AsmState& as) {
   }
 
   while (as.in.readword(directive)) {
+    if (directive == ".filepath")    { parse_filepath(as); continue; }
     if (directive == ".main")        { parse_main(as);     continue; }
     if (directive == ".function")    { parse_function(as); continue; }
     if (directive == ".adata")       { parse_adata(as);    continue; }
@@ -1953,26 +2164,27 @@ void parse(AsmState& as) {
 
 //////////////////////////////////////////////////////////////////////
 
-UnitEmitter* assemble_string(const char*code, int codeLen,
+UnitEmitter* assemble_string(const char* code, int codeLen,
                              const char* filename, const MD5& md5) {
   std::unique_ptr<UnitEmitter> ue(new UnitEmitter(md5));
-  StringData* sd = StringData::GetStaticString(filename);
-  ue->setFilepath(sd);
+  StringData* sd = makeStaticString(filename);
+  ue->m_filepath = sd;
 
   try {
-    std::istringstream instr(string(code, codeLen));
+    std::istringstream instr(std::string(code, codeLen));
     AsmState as(instr);
     as.ue = ue.get();
     parse(as);
   } catch (const std::exception& e) {
     ue.reset(new UnitEmitter(md5));
-    ue->setFilepath(sd);
+    ue->m_filepath = sd;
     ue->initMain(1, 1);
     ue->emitOp(OpString);
-    ue->emitInt32(ue->mergeLitstr(StringData::GetStaticString(e.what())));
+    ue->emitInt32(ue->mergeLitstr(makeStaticString(e.what())));
     ue->emitOp(OpFatal);
+    ue->emitByte(static_cast<uint8_t>(FatalOp::Runtime));
     FuncEmitter* fe = ue->getMain();
-    fe->setMaxStackCells(kNumActRecCells + 1);
+    fe->maxStackCells = 1;
     // XXX line numbers are bogus
     fe->finish(ue->bcPos(), false);
     ue->recordFunction(fe);

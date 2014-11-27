@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -27,14 +27,18 @@ class Transport;
 
 class SourceRootInfo {
 public:
-  explicit SourceRootInfo(const char *host);
+  explicit SourceRootInfo(Transport* transport);
   SourceRootInfo(const std::string &user, const std::string &sandbox);
   void createFromUserConfig();
   void createFromCommonRoot(const String &sandboxName);
 
   ~SourceRootInfo();
 
-  void setServerVariables(Variant &server) const;
+  // Set SERVER variables in array, and return the modified version.
+  // You'll likely want to ensure the array coming in is a temporary
+  // (so it can be modified in place).
+  Array setServerVariables(Array server) const;
+
   std::string path() const;
 
   bool sandboxOn() const {
@@ -55,11 +59,19 @@ public:
   static const std::string &GetCurrentSourceRoot() {
     return s_path.isNull() ? RuntimeOption::SourceRoot : *s_path;
   }
-  static const std::string &GetCurrentPhpRoot() {
-    return s_phproot.isNull() ? initPhpRoot() : *s_phproot;
+
+  static String RelativeToPhpRoot(const String& path) {
+    String ret = GetCurrentSourceRoot();
+    ret += path;
+    return ret;
   }
 
   Eval::DSandboxInfo getSandboxInfo() const;
+
+private:
+  static const std::string& GetCurrentPhpRoot() {
+    return s_phproot.isNull() ? initPhpRoot() : *s_phproot;
+  }
 
 private:
   String m_user;

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -15,25 +15,30 @@
    +----------------------------------------------------------------------+
 */
 
-#include "hphp/runtime/ext/ext_asio.h"
+#include "hphp/runtime/ext/asio/waitable_wait_handle.h"
+
 #include "hphp/runtime/ext/asio/asio_context.h"
 #include "hphp/runtime/ext/asio/asio_session.h"
+#include "hphp/runtime/ext/asio/async_function_wait_handle.h"
+#include "hphp/runtime/ext/asio/async_generator_wait_handle.h"
+#include "hphp/runtime/ext/asio/await_all_wait_handle.h"
+#include "hphp/runtime/ext/asio/gen_array_wait_handle.h"
+#include "hphp/runtime/ext/asio/gen_map_wait_handle.h"
+#include "hphp/runtime/ext/asio/gen_vector_wait_handle.h"
+#include "hphp/runtime/ext/asio/reschedule_wait_handle.h"
+#include "hphp/runtime/ext/asio/sleep_wait_handle.h"
+#include "hphp/runtime/ext/asio/external_thread_event_wait_handle.h"
+#include "hphp/runtime/ext/asio/blockable_wait_handle.h"
+#include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/system/systemlib.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 c_WaitableWaitHandle::c_WaitableWaitHandle(Class* cb)
-    : c_WaitHandle(cb)
-    , m_creator(AsioSession::Get()->getCurrentWaitHandle())
-    , m_firstParent(nullptr) {
-  setState(STATE_NEW);
+    : c_WaitHandle(cb) {
   setContextIdx(AsioSession::Get()->getCurrentContextIdx());
-
-  // ref creator
-  if (m_creator) {
-    m_creator->incRefCount();
-  }
+  m_parentChain.init();
 }
 
 c_WaitableWaitHandle::~c_WaitableWaitHandle() {
@@ -46,16 +51,6 @@ c_WaitableWaitHandle::~c_WaitableWaitHandle() {
       tvDecRefObj(&m_resultOrException);
       break;
   }
-
-  // unref creator
-  if (m_creator) {
-    decRefObj(m_creator);
-    m_creator = nullptr;
-  }
-}
-
-void c_WaitableWaitHandle::t___construct() {
-  throw NotSupportedException(__func__, "WTF? This is an abstract class");
 }
 
 int c_WaitableWaitHandle::t_getcontextidx() {
@@ -63,86 +58,33 @@ int c_WaitableWaitHandle::t_getcontextidx() {
 }
 
 Object c_WaitableWaitHandle::t_getcreator() {
-  return m_creator;
+  return Object();
 }
 
 Array c_WaitableWaitHandle::t_getparents() {
   // no parent data available if finished
   if (isFinished()) {
-    return Array::Create();
+    return empty_array();
   }
 
-  Array result = Array::Create();
-  c_BlockableWaitHandle* curr = m_firstParent;
-
-  while (curr) {
-    result.append(curr);
-    curr = curr->getNextParent();
-  }
-
-  return result;
-}
-
-c_BlockableWaitHandle* c_WaitableWaitHandle::addParent(c_BlockableWaitHandle* parent) {
-  c_BlockableWaitHandle* prev = m_firstParent;
-  m_firstParent = parent;
-  return prev;
-}
-
-void c_WaitableWaitHandle::setResult(const Cell& result) {
-  assert(cellIsPlausible(result));
-
-  setState(STATE_SUCCEEDED);
-  cellDup(result, m_resultOrException);
-
-  // unref creator
-  if (m_creator) {
-    decRefObj(m_creator);
-    m_creator = nullptr;
-  }
-
-  // unblock parents
-  while (m_firstParent) {
-    m_firstParent = m_firstParent->unblock();
-  }
-}
-
-void c_WaitableWaitHandle::setException(ObjectData* exception) {
-  assert(exception);
-  assert(exception->instanceof(SystemLib::s_ExceptionClass));
-
-  setState(STATE_FAILED);
-  tvWriteObject(exception, &m_resultOrException);
-
-  // unref creator
-  if (m_creator) {
-    decRefObj(m_creator);
-    m_creator = nullptr;
-  }
-
-  // unblock parents
-  while (m_firstParent) {
-    m_firstParent = m_firstParent->unblock();
-  }
+  return getParentChain().toArray();
 }
 
 // throws on context depth level overflows and cross-context cycles
 void c_WaitableWaitHandle::join() {
-  AsioSession* session = AsioSession::Get();
+  EagerVMRegAnchor _;
+  auto const savedFP = vmfp();
 
   assert(!isFinished());
-  assert(!session->isInContext() || session->getCurrentContext()->isRunning());
 
+  AsioSession* session = AsioSession::Get();
   if (UNLIKELY(session->hasOnJoinCallback())) {
     session->onJoin(this);
   }
 
   // enter new asio context and set up guard that will exit once we are done
-  session->enterContext();
+  session->enterContext(savedFP);
   auto exit_guard = folly::makeGuard([&] { session->exitContext(); });
-
-  assert(session->isInContext());
-  assert(!session->getCurrentContext()->isRunning());
 
   // import this wait handle to the newly created context
   // throws if cross-context cycle found
@@ -153,58 +95,106 @@ void c_WaitableWaitHandle::join() {
   assert(isFinished());
 }
 
+String c_WaitableWaitHandle::getName() {
+  switch (getKind()) {
+    case Kind::Static:              not_reached();
+    case Kind::AsyncFunction:       return asAsyncFunction()->getName();
+    case Kind::AsyncGenerator:      return asAsyncGenerator()->getName();
+    case Kind::AwaitAll:            return asAwaitAll()->getName();
+    case Kind::GenArray:            return asGenArray()->getName();
+    case Kind::GenMap:              return asGenMap()->getName();
+    case Kind::GenVector:           return asGenVector()->getName();
+    case Kind::Reschedule:          return asReschedule()->getName();
+    case Kind::Sleep:               return asSleep()->getName();
+    case Kind::ExternalThreadEvent: return asExternalThreadEvent()->getName();
+  }
+  not_reached();
+}
+
 c_WaitableWaitHandle* c_WaitableWaitHandle::getChild() {
   assert(!isFinished());
 
-  // waitable wait handle does not have any child
-  return nullptr;
+  switch (getKind()) {
+    case Kind::Static:              not_reached();
+    case Kind::AsyncFunction:       return asAsyncFunction()->getChild();
+    case Kind::AsyncGenerator:      return asAsyncGenerator()->getChild();
+    case Kind::AwaitAll:            return asAwaitAll()->getChild();
+    case Kind::GenArray:            return asGenArray()->getChild();
+    case Kind::GenMap:              return asGenMap()->getChild();
+    case Kind::GenVector:           return asGenVector()->getChild();
+    case Kind::Reschedule:          return nullptr;
+    case Kind::Sleep:               return nullptr;
+    case Kind::ExternalThreadEvent: return nullptr;
+  }
+  not_reached();
 }
 
-bool c_WaitableWaitHandle::hasCycle(c_WaitableWaitHandle* start) {
-  assert(start);
+void c_WaitableWaitHandle::enterContextImpl(context_idx_t ctx_idx) {
+  switch (getKind()) {
+    case Kind::Static:
+      not_reached();
+    case Kind::AsyncFunction:
+      return asAsyncFunction()->enterContextImpl(ctx_idx);
+    case Kind::AsyncGenerator:
+      return asAsyncGenerator()->enterContextImpl(ctx_idx);
+    case Kind::AwaitAll:
+      return asAwaitAll()->enterContextImpl(ctx_idx);
+    case Kind::GenArray:
+      return asGenArray()->enterContextImpl(ctx_idx);
+    case Kind::GenMap:
+      return asGenMap()->enterContextImpl(ctx_idx);
+    case Kind::GenVector:
+      return asGenVector()->enterContextImpl(ctx_idx);
+    case Kind::Reschedule:
+      return asReschedule()->enterContextImpl(ctx_idx);
+    case Kind::Sleep:
+      return asSleep()->enterContextImpl(ctx_idx);
+    case Kind::ExternalThreadEvent:
+      return asExternalThreadEvent()->enterContextImpl(ctx_idx);
+  }
+  not_reached();
+}
 
-  while (start != this && start && !start->isFinished()) {
-    start = start->getChild();
+bool
+c_WaitableWaitHandle::isDescendantOf(c_WaitableWaitHandle* wait_handle) const {
+  assert(wait_handle);
+
+  while (wait_handle != this && wait_handle && !wait_handle->isFinished()) {
+    wait_handle = wait_handle->getChild();
   }
 
-  return start == this;
+  return wait_handle == this;
 }
 
 Array c_WaitableWaitHandle::t_getdependencystack() {
+  if (isFinished()) return empty_array();
   Array result = Array::Create();
-  if (isFinished()) return result;
   hphp_hash_set<int64_t> visited;
   auto wait_handle = this;
+  auto session = AsioSession::Get();
   while (wait_handle != nullptr) {
     result.append(wait_handle);
     visited.insert(wait_handle->t_getid());
     auto context_idx = wait_handle->getContextIdx();
 
     // 1. find parent in the same context
-    auto p = wait_handle->getFirstParent();
-    while (p) {
-      if ((p->getContextIdx() == context_idx) &&
-          visited.find(p->t_getid()) == visited.end()) {
-        wait_handle = p;
-        break;
-      }
-      p = p->getNextParent();
-    }
-    if (p) continue;
-
-    // 2. follow creator
-    if (m_creator && !m_creator->isFinished() &&
-        (m_creator->getContextIdx() == context_idx) &&
-        visited.find(m_creator->t_getid()) == visited.end()) {
-      wait_handle = m_creator;
+    auto p = wait_handle->getParentChain().firstInContext(context_idx);
+    if (p && visited.find(p->t_getid()) == visited.end()) {
+      wait_handle = p;
       continue;
     }
 
-    // 3. cross the context boundary
-    result.append(null_object);
-    wait_handle = (context_idx > 1)
-      ? AsioSession::Get()->getContext(context_idx - 1)->getCurrent()
-      : nullptr;
+    // 2. cross the context boundary
+    auto context = session->getContext(context_idx);
+    if (!context) {
+      break;
+    }
+    wait_handle = c_ResumableWaitHandle::getRunning(context->getSavedFP());
+    auto target_context_idx = wait_handle ? wait_handle->getContextIdx() : 0;
+    while (context_idx > target_context_idx) {
+      --context_idx;
+      result.append(null_object);
+    }
   }
   return result;
 }

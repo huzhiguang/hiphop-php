@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,13 +16,16 @@
 
 #include "hphp/util/stacktrace-profiler.h"
 #include "hphp/util/stack-trace.h"
+#if (!defined(__CYGWIN__) && !defined(__MINGW__) && !defined(__MSC_VER))
 #include <execinfo.h>
+#endif
 #include <algorithm>
 
 namespace HPHP {
 
-extern const bool enable_stacktrace_profiler =
-  getenv("STACKTRACE_PROFILER") != nullptr;
+std::atomic<bool> enable_stacktrace_profiler {
+  getenv("STACKTRACE_PROFILER") != nullptr
+};
 
 StackTraceProfiler::StackTraceProfiler(std::string name, int skip) :
   m_name(name), finishing(false), m_root(nullptr), m_skip(skip) {

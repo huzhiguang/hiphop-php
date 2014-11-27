@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,8 +24,15 @@
 #include "hphp/runtime/server/access-log.h"
 #include "hphp/runtime/server/source-root-info.h"
 #include "hphp/runtime/server/request-uri.h"
-#include "hphp/runtime/ext/ext_json.h"
+#include "hphp/runtime/ext/json/ext_json.h"
+#include "hphp/runtime/ext/std/ext_std_output.h"
+#include "hphp/runtime/base/php-globals.h"
+#include "hphp/runtime/vm/vm-regs.h"
 #include "hphp/util/process.h"
+#include "hphp/runtime/server/satellite-server.h"
+#include "hphp/system/constants.h"
+
+#include <folly/ScopeGuard.h>
 
 using std::set;
 
@@ -38,7 +45,6 @@ RPCRequestHandler::RPCRequestHandler(int timeout, bool info)
     m_reset(false),
     m_logResets(info),
     m_returnEncodeType(ReturnEncodeType::Json) {
-  initState();
 }
 
 RPCRequestHandler::~RPCRequestHandler() {
@@ -68,12 +74,13 @@ void RPCRequestHandler::initState() {
 }
 
 void RPCRequestHandler::cleanupState() {
-  hphp_context_exit(m_context, false);
+  hphp_context_exit();
   hphp_session_exit();
 }
 
 bool RPCRequestHandler::needReset() const {
   return (m_reset ||
+          !vmStack().isAllocated() ||
           m_serverInfo->alwaysReset() ||
           ((time(0) - m_lastReset) > m_serverInfo->getMaxDuration()) ||
           (m_requestsSinceReset >= m_serverInfo->getMaxRequest()));
@@ -81,7 +88,7 @@ bool RPCRequestHandler::needReset() const {
 
 void RPCRequestHandler::handleRequest(Transport *transport) {
   if (needReset()) {
-    cleanupState();
+    if (vmStack().isAllocated()) cleanupState();
     initState();
   }
   ++m_requestsSinceReset;
@@ -101,10 +108,9 @@ void RPCRequestHandler::handleRequest(Transport *transport) {
   StackTraceNoHeap::AddExtraLogging("RPC-URL", transport->getUrl());
 
   // authentication
-  const set<string> &passwords = m_serverInfo->getPasswords();
+  const std::set<std::string> &passwords = m_serverInfo->getPasswords();
   if (!passwords.empty()) {
-    set<string>::const_iterator iter =
-      passwords.find(transport->getParam("auth"));
+    auto iter = passwords.find(transport->getParam("auth"));
     if (iter == passwords.end()) {
       transport->sendString("Unauthorized", 401);
       transport->onSendEnd();
@@ -117,7 +123,7 @@ void RPCRequestHandler::handleRequest(Transport *transport) {
       return;
     }
   } else {
-    const string &password = m_serverInfo->getPassword();
+    const std::string &password = m_serverInfo->getPassword();
     if (!password.empty() && password != transport->getParam("auth")) {
       transport->sendString("Unauthorized", 401);
       transport->onSendEnd();
@@ -146,12 +152,16 @@ void RPCRequestHandler::handleRequest(Transport *transport) {
     HttpRequestHandler::GetAccessLog().log(transport, vhost);
     return;
   }
-  ThreadInfo::s_threadInfo->m_reqInjectionData.
-    setTimeout(vhost->getRequestTimeoutSeconds(getDefaultTimeout()));
+
+  auto& reqData = ThreadInfo::s_threadInfo->m_reqInjectionData;
+  reqData.setTimeout(vhost->getRequestTimeoutSeconds(getDefaultTimeout()));
+  SCOPE_EXIT {
+    reqData.setTimeout(0);  // can't throw when you pass zero
+    reqData.reset();
+  };
 
   // resolve source root
-  string host = transport->getHeader("Host");
-  SourceRootInfo sourceRootInfo(host.c_str());
+  SourceRootInfo sourceRootInfo(transport);
 
   // set thread type
   switch (m_serverInfo->getType()) {
@@ -177,6 +187,14 @@ void RPCRequestHandler::handleRequest(Transport *transport) {
   HttpProtocol::ClearRecord(ret, tmpfile);
 }
 
+void RPCRequestHandler::abortRequest(Transport *transport) {
+  HttpRequestHandler::GetAccessLog().onNewRequest();
+  const VirtualHost *vhost = HttpProtocol::GetVirtualHost(transport);
+  assert(vhost);
+  transport->sendString("Service Unavailable", 503);
+  HttpRequestHandler::GetAccessLog().log(transport, vhost);
+}
+
 const StaticString
   s_output("output"),
   s_return("return"),
@@ -186,35 +204,35 @@ const StaticString
 bool RPCRequestHandler::executePHPFunction(Transport *transport,
                                            SourceRootInfo &sourceRootInfo,
                                            ReturnEncodeType returnEncodeType) {
-  string rpcFunc = transport->getCommand();
+  std::string rpcFunc = transport->getCommand();
   {
     ServerStatsHelper ssh("input");
     RequestURI reqURI(rpcFunc);
     HttpProtocol::PrepareSystemVariables(transport, reqURI, sourceRootInfo);
-
-    GlobalVariables *g = get_global_variables();
-    g->getRef(s__ENV).set(s_HPHP_RPC, 1);
+    auto env = php_global(s__ENV);
+    env.toArrRef().set(s_HPHP_RPC, 1);
+    php_global_set(s__ENV, std::move(env));
   }
 
-  bool isFile = rpcFunc.rfind('.') != string::npos;
-  string rpcFile;
+  bool isFile = rpcFunc.rfind('.') != std::string::npos;
+  std::string rpcFile;
   bool error = false;
 
   Array params;
-  string sparams = transport->getParam("params");
+  std::string sparams = transport->getParam("params");
   if (!sparams.empty()) {
-    Variant jparams = f_json_decode(String(sparams), true);
+    Variant jparams = HHVM_FN(json_decode)(String(sparams), true);
     if (jparams.isArray()) {
       params = jparams.toArray();
     } else {
       error = true;
     }
   } else {
-    vector<string> sparams;
+    std::vector<std::string> sparams;
     transport->getArrayParam("p", sparams);
     if (!sparams.empty()) {
       for (unsigned int i = 0; i < sparams.size(); i++) {
-        Variant jparams = f_json_decode(String(sparams[i]), true);
+        Variant jparams = HHVM_FN(json_decode)(String(sparams[i]), true);
         if (same(jparams, false)) {
           error = true;
           break;
@@ -239,8 +257,8 @@ bool RPCRequestHandler::executePHPFunction(Transport *transport,
   int code;
   if (!error) {
     Variant funcRet;
-    string errorMsg = "Internal Server Error";
-    string reqInitFunc, reqInitDoc;
+    std::string errorMsg = "Internal Server Error";
+    std::string reqInitFunc, reqInitDoc;
     reqInitDoc = transport->getHeader("ReqInitDoc");
     if (reqInitDoc.empty() && m_serverInfo) {
       reqInitFunc = m_serverInfo->getReqInitFunc();
@@ -280,7 +298,9 @@ bool RPCRequestHandler::executePHPFunction(Transport *transport,
         rpcFile = (std::string) canonicalize_path(rpcFile, "", 0);
         rpcFile = getSourceFilename(rpcFile, sourceRootInfo);
         ret = hphp_invoke(m_context, rpcFile, false, Array(), uninit_null(),
-                          reqInitFunc, reqInitDoc, error, errorMsg, runOnce);
+                          reqInitFunc, reqInitDoc, error, errorMsg, runOnce,
+                          false /* warmupOnly */,
+                          false /* richErrorMessage */);
       }
       // no need to do the initialization for a second time
       reqInitFunc.clear();
@@ -288,7 +308,10 @@ bool RPCRequestHandler::executePHPFunction(Transport *transport,
     }
     if (ret && !rpcFunc.empty()) {
       ret = hphp_invoke(m_context, rpcFunc, true, params, ref(funcRet),
-                        reqInitFunc, reqInitDoc, error, errorMsg);
+                        reqInitFunc, reqInitDoc, error, errorMsg,
+                        true /* once */,
+                        false /* warmupOnly */,
+                        false /* richErrorMessage */);
     }
     if (ret) {
       bool serializeFailed = false;
@@ -299,7 +322,7 @@ bool RPCRequestHandler::executePHPFunction(Transport *transport,
                  returnEncodeType == ReturnEncodeType::Serialize);
           try {
             response = (returnEncodeType == ReturnEncodeType::Json) ?
-                       f_json_encode(funcRet) :
+                       HHVM_FN(json_encode)(funcRet).toString() :
                        f_serialize(funcRet);
           } catch (...) {
             serializeFailed = true;
@@ -309,8 +332,9 @@ bool RPCRequestHandler::executePHPFunction(Transport *transport,
         case 1: response = m_context->obDetachContents(); break;
         case 2:
           response =
-            f_json_encode(CREATE_MAP2(s_output, m_context->obDetachContents(),
-                                      s_return, f_json_encode(funcRet)));
+            HHVM_FN(json_encode)(
+              make_map_array(s_output, m_context->obDetachContents(),
+                             s_return, HHVM_FN(json_encode)(funcRet)));
           break;
         case 3: response = f_serialize(funcRet); break;
       }
@@ -343,17 +367,21 @@ bool RPCRequestHandler::executePHPFunction(Transport *transport,
   ServerStats::LogPage(isFile ? rpcFile : rpcFunc, code);
 
   m_context->onShutdownPostSend();
-  m_context->obClean(); // in case postsend/cleanup output something
+  // in case postsend/cleanup output something
+  // PHP5 always provides _START.
+  m_context->obClean(k_PHP_OUTPUT_HANDLER_START |
+                     k_PHP_OUTPUT_HANDLER_CLEAN |
+                     k_PHP_OUTPUT_HANDLER_END);
   m_context->restoreSession();
   return !error;
 }
 
-string RPCRequestHandler::getSourceFilename(const string &path,
+std::string RPCRequestHandler::getSourceFilename(const std::string &path,
                                             SourceRootInfo &sourceRootInfo) {
   if (path.empty() || path[0] == '/') return path;
   // If it is not a sandbox, sourceRoot will be the same as
   // RuntimeOption::SourceRoot.
-  string sourceRoot = sourceRootInfo.path();
+  std::string sourceRoot = sourceRootInfo.path();
   if (sourceRoot.empty()) {
     return Process::GetCurrentDirectory() + "/" + path;
   }

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,10 +22,11 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <boost/algorithm/string/predicate.hpp>
 
-#include "folly/FBString.h"
-#include "folly/Format.h"
-#include "folly/ScopeGuard.h"
+#include <folly/FBString.h>
+#include <folly/Format.h>
+#include <folly/ScopeGuard.h>
 
 #include "hphp/tools/bootstrap/idl.h"
 
@@ -33,7 +34,7 @@ using folly::fbstring;
 using namespace HPHP::IDL;
 using namespace HPHP;
 
-std::unordered_map<fbstring, const PhpFunc*> g_mangleMap;
+std::vector<const PhpFunc*> g_funcVec;
 std::unordered_map<fbstring, const PhpClass*> g_classMap;
 
 // Functions with return types that don't fit in registers are handled
@@ -49,6 +50,7 @@ constexpr char* g_allIncludes = R"(
 #include "hphp/runtime/ext/ext.h"
 #include "hphp/runtime/vm/class.h"
 #include "hphp/runtime/vm/runtime.h"
+#include "hphp/util/abi-cxx.h"
 #include <exception>
 )";
 
@@ -60,21 +62,44 @@ void emitCtorHelper(const fbstring& className, std::ostream& out) {
     R"(
 ObjectData* new_{0:s}_Instance(HPHP::Class* cls) {{
   size_t nProps = cls->numDeclProperties();
-  size_t builtinPropSize = sizeof(c_{0:s}) - sizeof(ObjectData);
-  size_t size = ObjectData::sizeForNProps(nProps) + builtinPropSize;
-  return new (MM().objMalloc(size)) c_{0:s}(cls);
+  size_t builtinObjSize = sizeof(c_{0:s}) - sizeof(ObjectData);
+  size_t size = ObjectData::sizeForNProps(nProps) + builtinObjSize;
+  return new (MM().objMallocLogged(size)) c_{0:s}(cls);
+}})",
+    className) << "\n\n";
+}
+
+void emitDtorHelper(const fbstring& className, std::ostream& out) {
+  out << folly::format(
+    R"(
+void delete_{0:s}(ObjectData* obj, const Class* cls) {{
+  auto const ptr = static_cast<c_{0:s}*>(obj);
+  ptr->~c_{0:s}();
+
+  auto const nProps = cls->numDeclProperties();
+  auto const propVec = reinterpret_cast<TypedValue*>(ptr + 1);
+  for (auto i = Slot{{0}}; i < nProps; ++i) {{
+    tvRefcountedDecRef(&propVec[i]);
+  }}
+
+  auto const builtinSz = sizeof(c_{0:s}) - sizeof(ObjectData);
+  auto const size = ObjectData::sizeForNProps(nProps) + builtinSz;
+  if (LIKELY(size <= kMaxSmartSize)) {{
+    return MM().smartFreeSizeLogged(ptr, size);
+  }}
+  return MM().smartFreeSizeBigLogged(ptr, size);
 }})",
     className) << "\n\n";
 }
 
 /*
- * Emits a declaration that corresponds to the f_* functions, but with types and
- * signatures adjusted to reflect the underlying C++ ABI.
+ * Emits a function pointer type that corresponds to a given f_* function or
+ * t_* or ti_* method, but with types and signatures adjusted to reflect the
+ * underlying C++ ABI.
  */
-void emitRemappedFuncDecl(const PhpFunc& func,
-                          const fbstring& mangled,
-                          const fbstring& prefix,
-                          std::ostream& out) {
+void emitFuncPtrType(const PhpFunc& func,
+                     const fbstring& name,
+                     std::ostream& out) {
   int returnKindOf = func.returnKindOf();
   bool indirectReturn = func.isIndirectReturn();
   if (indirectReturn) {
@@ -87,38 +112,38 @@ void emitRemappedFuncDecl(const PhpFunc& func,
     out << func.returnCppType() << ' ';
   }
 
-  out << prefix << func.getUniqueName() << '(';
+  out << "(*" << name << ")(";
 
   bool isFirstParam = true;
 
   if (!g_armMode && indirectReturn) {
     if (func.returnKindOf() == KindOfAny) {
-      out << "TypedValue* _rv";
+      out << "TypedValue*";
     } else {
-      out << "Value* _rv";
+      out << "Value*";
     }
     isFirstParam = false;
   }
 
   if (func.usesThis()) {
     if (!isFirstParam) {
-      out << ", ";
+      out << ",";
     }
-    out << "ObjectData* this_";
+    out << "c_" << func.className() << "*";
     isFirstParam = false;
   }
 
   if (func.isVarArgs()) {
     if (!isFirstParam) {
-      out << ", ";
+      out << ",";
     }
-    out << "int64_t _argc";
+    out << "int64_t";
     isFirstParam = false;
   }
 
   for (auto const& param : func.params()) {
     if (!isFirstParam) {
-      out << ", ";
+      out << ",";
     }
     auto kindof = param.kindOf();
     if (param.isIndirectPass()) {
@@ -130,19 +155,46 @@ void emitRemappedFuncDecl(const PhpFunc& func,
     } else {
       out << param.getCppType();
     }
-    out << ' ' << param.name();
     isFirstParam = false;
   }
 
   if (func.isVarArgs()) {
     assert(!isFirstParam);
-    out << ", Value* _argv";
+    out << ",Value*";
   }
 
-  out << ") asm(\""
-      << mangled << "\");\n\n";
+  out << ")";
 }
 
+static void emitFuncPtrDecl(const PhpFunc& func,
+                            const fbstring& ind,
+                            std::ostream& out) {
+  out << ind;
+  fbstring declPrefix = (func.isMethod() ? "th_" : "fh_");
+  emitFuncPtrType(func, declPrefix + func.getUniqueName(), out);
+  out << " =\n";
+  out << ind << "  (";
+  emitFuncPtrType(func, "", out);
+  out << ")" << (func.isMethod() ? "getMethodPtr" : "")
+      << "(&" << func.getPrefixedCppName() << ");\n";
+}
+
+static void emitZendParamPrefix(std::ostream& out,
+                                int32_t index,
+                                const PhpParam& param,
+                                const char* ind) {
+  out << ind << "if (!"
+        << "tvCoerceParamTo" << kindOfString(param.kindOf())
+        << "InPlace(args-" << index << ")) {\n"
+      << ind << "  raise_param_type_warning(__func__, " << index << " + 1, "
+        << "KindOf" << kindOfString(param.kindOf()) << ", "
+        << "(args-" << index << ")->m_type);\n";
+}
+
+static void emitZendParamSuffix(std::ostream& out, const char* ind) {
+  out << ind << "  return;\n"
+      << ind << "}\n";
+}
 
 void emitCast(const PhpParam& param, int32_t index, std::ostream& out,
               const char* ind, bool doCheck) {
@@ -159,16 +211,18 @@ void emitCast(const PhpParam& param, int32_t index, std::ostream& out,
   }
 
 
-  if (param.getParamMode() == ParamMode::Zend) {
-    out << ind << "if (!"
-          << "tvCoerceParamTo" << kindOfString(param.kindOf())
-          << "InPlace(args-" << index << ")) {\n"
-        << ind << "  raise_param_type_warning(__func__, " << index << " + 1, "
-          << "KindOf" << kindOfString(param.kindOf()) << ", "
-          << "(args-" << index << ")->m_type);\n"
-        << ind << "  rv->m_type = KindOfUninit;\n"
-        << ind << "  return;\n"
-        << ind << "}\n";
+  if (param.getParamMode() == ParamMode::ZendNull) {
+    emitZendParamPrefix(out, index, param, ind);
+    out << ind << "  rv->m_type = KindOfUninit;\n";
+    emitZendParamSuffix(out, ind);
+  } else if (param.getParamMode() == ParamMode::ZendFalse) {
+    emitZendParamPrefix(out, index, param, ind);
+    out << ind << "  rv->m_type = KindOfBoolean;\n"
+        << ind << "  rv->m_data.num = 0;\n";
+    emitZendParamSuffix(out, ind);
+  } else if (param.kindOf() == KindOfObject && param.hasDefault()) {
+    out << ind << "tvCastToNullableObject"
+        << "InPlace(args-" << index << ");\n";
   } else if (param.kindOf() != KindOfAny) {
     out << ind << "tvCastTo" << kindOfString(param.kindOf())
         << "InPlace(args-" << index << ");\n";
@@ -223,8 +277,8 @@ void emitBuildExtraArgs(const PhpFunc& func, std::ostream& out,
   out << folly::format(
     R"(
 {0}Array extraArgs;
-{0}{{
-{0}  ArrayInit ai(count-{1});
+{0}if (count > {1}) {{
+{0}  ArrayInit ai((size_t)count-{1}, ArrayInit::Mixed{{}});
 {0}  for (int32_t i = {1}; i < count; ++i) {{
 {0}    TypedValue* extraArg = ar->getExtraArg(i-{1});
 {0}    if (tvIsStronglyBound(extraArg)) {{
@@ -358,22 +412,26 @@ void emitExtCall(const PhpFunc& func, std::ostream& out, const char* ind) {
   } else if (returnKindOf == KindOfString) {
     out << ind << "rv->m_type = KindOfString;\n";
     call_suffix = (fbstring(";\n") + ind +
-                   "if (rv->m_data.num == 0LL) rv->m_type = KindOfNull;\n");
+                   "if (UNLIKELY(rv->m_data.num == 0LL)) "
+                   "rv->m_type = KindOfNull;\n");
   } else if (returnKindOf == KindOfArray) {
     out << ind << "rv->m_type = KindOfArray;\n";
     call_suffix = (fbstring(";\n") + ind +
-                   "if (rv->m_data.num == 0LL) rv->m_type = KindOfNull;\n");
+                   "if (UNLIKELY(rv->m_data.num == 0LL)) "
+                   "rv->m_type = KindOfNull;\n");
   } else if (returnKindOf == KindOfObject) {
     out << ind << "rv->m_type = KindOfObject;\n";
     call_suffix = (fbstring(";\n") + ind +
-                   "if (rv->m_data.num == 0LL) rv->m_type = KindOfNull;\n");
+                   "if (UNLIKELY(rv->m_data.num == 0LL)) "
+                   "rv->m_type = KindOfNull;\n");
   } else if (returnKindOf == KindOfResource) {
     out << ind << "rv->m_type = KindOfResource;\n";
     call_suffix = (fbstring(";\n") + ind +
-                   "if (rv->m_data.num == 0LL) rv->m_type = KindOfNull;\n");
+                   "if (UNLIKELY(rv->m_data.num == 0LL)) "
+                   "rv->m_type = KindOfNull;\n");
   } else {
     call_suffix = (fbstring(";\n") + ind +
-                   "if (rv->m_type == KindOfUninit) "
+                   "if (UNLIKELY(rv->m_type == KindOfUninit)) "
                    "rv->m_type = KindOfNull;\n");
   }
 
@@ -392,15 +450,30 @@ void emitExtCall(const PhpFunc& func, std::ostream& out, const char* ind) {
       if (kindof != KindOfAny ||
           (defVal != "null" && defVal != "null_variant")) {
         out << " = ";
-        std::string nullToType =
-          kindof == KindOfArray ? ".toArray()" :
-          kindof == KindOfString ? ".toString()" :
-          kindof == KindOfResource ? ".toResource()" :
-          kindof == KindOfObject ? ".toObject()" :
-          kindof == KindOfRef ? "" :
-          "icantconvertthisfromnull";
-        if (defVal == "null_variant") defVal += nullToType;
-        out << (defVal == "null" ? "uninit_null()" + nullToType : defVal);
+
+        if (boost::starts_with(defVal, "null")) {
+          switch (kindof) {
+            case KindOfArray:
+              out << "Array()";
+              break;
+            case KindOfString:
+              out << "String()";
+              break;
+            case KindOfResource:
+              out << "Resource()";
+              break;
+            case KindOfObject:
+              out << "Object()";
+              break;
+            case KindOfRef:
+              out << "init_null()";
+              break;
+            default:
+              out << "No valid null object.";
+          }
+        } else {
+          out << defVal;
+        }
       }
       out << ";\n";
     }
@@ -460,7 +533,6 @@ void emitCasts(const PhpFunc& func, std::ostream& out, const char* ind) {
   }
 }
 
-
 /*
  * Emits the fg1_ helper, which assumes that the arg count is acceptable, but at
  * least one typecheck has failed. It will cast arguments to the appropriate
@@ -471,19 +543,21 @@ void emitSlowPathHelper(const PhpFunc& func, const fbstring& prefix,
   out << "void " << prefix << func.getUniqueName()
       << "(TypedValue* rv, ActRec* ar, int32_t count";
   if (func.usesThis()) {
-    out << ", ObjectData* this_";
+    out << ", c_" << func.className() << "* this_";
   }
-  out << ") __attribute__((noinline,cold));\n";
+  out << ") __attribute__((__noinline__,cold));\n";
 
   out << "void " << prefix << func.getUniqueName()
       << "(TypedValue* rv, ActRec* ar, int32_t count";
   if (func.usesThis()) {
-    out << ", ObjectData* this_";
+    out << ", c_" << func.className() << "* this_";
   }
   out << ") {\n";
 
   const char* eightSpaces = "        ";
   const char* ind = eightSpaces + 6;
+
+  emitFuncPtrDecl(func, ind, out);
 
   out << ind << "TypedValue* args UNUSED = ((TypedValue*)ar) - 1;\n";
 
@@ -493,65 +567,57 @@ void emitSlowPathHelper(const PhpFunc& func, const fbstring& prefix,
   out << "}\n\n";
 }
 
+/**
+ * Emits all the methods that are needed for class creation
+ * */
+static void emitClassCtorAndDtor(const PhpClass& klass, std::ostream& out) {
+  if (!(klass.flags() & IsCppAbstract)) {
+    emitCtorHelper(klass.getCppName(), out);
+    if (!(klass.flags() & CppCustomDelete)) {
+      emitDtorHelper(klass.getCppName(), out);
+    }
+  }
+  if (klass.flags() & NoDefaultSweep) {
+    out << "IMPLEMENT_CLASS_NO_SWEEP(" << klass.getCppName() << ");\n";
+  } else {
+    out << "IMPLEMENT_CLASS(" << klass.getCppName() << ");\n";
+  }
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 // Top level
 
 /*
- * Called for each line on stdin. Looks up the symbol's characteristics in the
- * IDL, and emits up to three things:
+ * Looks up a function's characteristics in the IDL, and emits up to three
+ * things:
  *
- * - An fh_* declaration, which is the f_* signature with ABI exposed.
- * - [Maybe] an fg1_* stub which does type casting of arguments, then calls fh_.
- * - An fg_ stub which checks arg counts and types, then calls fh_ or fg1_.
+ * - An fg_ or tg_ stub which checks arg counts and types, then calls
+ *   fg1_/tg1_ or the fh_/th_ alias.
+ * - [Maybe] an fg1_ or tg1_ stub which does type casting of arguments, then
+ *   calls fh_/th_.
+ * - [Maybe] an extern declaration for the f_ function if it's not a method
+ *
+ * Inside the bodies of the fg_/tg_ stub and the fg1_/tg1_ stub, we emit a
+ * fh_ or th_ function pointer alias, which is the f_/t_ signature with ABI
+ * exposed.
  */
-void processSymbol(const fbstring& symbol, std::ostream& header,
-                   std::ostream& cpp) {
-  int status;
-  const char *mangledSymbol = symbol.c_str();
-#ifdef __APPLE__
-  mangledSymbol++;
-#endif
-  auto demangled = abi::__cxa_demangle(mangledSymbol, nullptr, 0, &status);
-  SCOPE_EXIT { free(demangled); };
-
-  if (status != 0) {
-    return;
-  }
-
-  auto idlIt = g_mangleMap.find(demangled);
-  if (idlIt == g_mangleMap.end()) {
-    // A symbol that doesn't correspond to anything in the IDL.
-    return;
-  }
-
-  auto& func = *idlIt->second;
+void processFunc(const PhpFunc& func, std::ostream& header,
+                 std::ostream& cpp) {
   bool isMethod = func.isMethod();
-
   auto classIt = g_classMap.find(func.className());
-  if (func.isCtor() && classIt != g_classMap.end()) {
+  if (classIt != g_classMap.end()) {
     auto& klass = *classIt->second;
-
-    if (!(klass.flags() & IsCppAbstract)) {
-      emitCtorHelper(klass.name(), cpp);
-    }
-    if (klass.flags() & NoDefaultSweep) {
-      cpp << "IMPLEMENT_CLASS_NO_DEFAULT_SWEEP(" << klass.name() << ");\n";
-    } else {
-      cpp << "IMPLEMENT_CLASS(" << klass.name() << ");\n";
-    }
+    emitClassCtorAndDtor(klass, cpp);
+    g_classMap.erase(classIt);
   }
 
-  fbstring declPrefix = (isMethod ? "th_" : "fh_");
   fbstring slowPathPrefix = (isMethod ? "tg1_" : "fg1_");
   fbstring stubPrefix = (isMethod ? "tg_" : "fg_");
 
-  std::ostringstream decl;
-  emitRemappedFuncDecl(func, symbol, declPrefix, decl);
   if (!isMethod) {
-    header << decl.str();
+    cpp << "extern " << func.returnCppType() << " "
+        << func.getCppSig(false) << ";\n\n";
   }
-  cpp << decl.str();
 
   if (func.numTypeChecks() > 0) {
     emitSlowPathHelper(func, slowPathPrefix, cpp);
@@ -563,15 +629,21 @@ void processSymbol(const fbstring& symbol, std::ostream& header,
 
   cpp << "TypedValue* " << stubPrefix << func.getUniqueName()
       << "(ActRec* ar) {\n";
+
+  emitFuncPtrDecl(func, in, cpp);
+
   cpp << in << "TypedValue rvSpace;\n";
   cpp << in << "TypedValue* rv = &rvSpace;\n";
   cpp << in << "int32_t count = ar->numArgs();\n";
   cpp << in << "TypedValue* args UNUSED = ((TypedValue*)ar) - 1;\n";
 
   if (func.usesThis()) {
+    auto cklass = "c_" + func.className();
     cpp << in
-        << "ObjectData* this_ = (ar->hasThis() ? ar->getThis() : nullptr);\n";
-    cpp << in << "if (this_) {\n";
+        << cklass << "* this_ = (ar->hasThis() ? "
+        << "static_cast<" << cklass << "*>(ar->getThis()) : "
+        << " nullptr);\n";
+    cpp << in << "if (LIKELY(this_ != nullptr)) {\n";
     in -= 2;
   }
 
@@ -579,18 +651,18 @@ void processSymbol(const fbstring& symbol, std::ostream& header,
   bool needArgMiscountClause = false;
   if (func.isVarArgs()) {
     if (func.minNumParams() > 0) {
-      cpp << in << "if (count >= " << func.minNumParams() << ") {\n";
+      cpp << in << "if (LIKELY(count >= " << func.minNumParams() << ")) {\n";
       needArgMiscountClause = true;
       in -= 2;
     }
   } else {
     if (func.minNumParams() == func.numParams()) {
-      cpp << in << "if (count == " << func.minNumParams() << ") {\n";
+      cpp << in << "if (LIKELY(count == " << func.minNumParams() << ")) {\n";
     } else if (func.minNumParams() == 0) {
-      cpp << in << "if (count <= " << func.numParams() << ") {\n";
+      cpp << in << "if (LIKELY(count <= " << func.numParams() << ")) {\n";
     } else {
-      cpp << in << "if (count >= " << func.minNumParams()
-          << " && count <= "<< func.numParams() << ") {\n";
+      cpp << in << "if (LIKELY(count >= " << func.minNumParams()
+          << " && count <= "<< func.numParams() << ")) {\n";
     }
     needArgMiscountClause = true;
     in -= 2;
@@ -598,14 +670,19 @@ void processSymbol(const fbstring& symbol, std::ostream& header,
 
   // Count is OK. Check arg types
   if (func.numTypeChecks() > 0) {
-    cpp << in << "if (";
+    cpp << in << "if (LIKELY(";
     emitTypechecks(func, cpp, in);
-    cpp << ") {\n";
+    cpp << ")) {\n";
     in -= 2;
   }
 
   // Call the f_ function via the fh_ alias
   emitExtCall(func, cpp, in);
+  if (needArgMiscountClause && (func.numParams() == 0) && func.usesThis()) {
+    cpp << in << "frame_free_inl(ar, rv);\n";
+    cpp << in << "ar->m_r = *rv;\n";
+    cpp << in << "return &ar->m_r;\n";
+  }
 
   // Deal with type mismatches: punt to fg1_
   if (func.numTypeChecks() > 0) {
@@ -622,20 +699,21 @@ void processSymbol(const fbstring& symbol, std::ostream& header,
   if (needArgMiscountClause) {
     cpp << in + 2 << "} else {\n";
     if (func.isVarArgs()) {
-      cpp << in << "throw_missing_arguments_nr(\"" << func.getPrettyName()
-          << "\", " << func.minNumParams() << ", count, 1);\n";
+      cpp << in << "throw_missing_arguments_nr(\""
+          << escapeCpp(func.getPrettyName())
+          << "\", " << func.minNumParams() << ", count, 1, rv);\n";
     } else {
       if (func.minNumParams() == 0) {
-        cpp << in << "throw_toomany_arguments_nr(\"" << func.getPrettyName()
-            << "\", " << func.numParams() << ", 1);\n";
+        cpp << in << "throw_toomany_arguments_nr(\""
+            << escapeCpp(func.getPrettyName())
+            << "\", " << func.numParams() << ", count, 1, rv);\n";
       } else {
-        cpp << in << "throw_wrong_arguments_nr(\"" << func.getPrettyName()
+        cpp << in << "throw_wrong_arguments_nr(\""
+            << escapeCpp(func.getPrettyName())
             << "\", count, " << func.minNumParams() << ", "
-            << func.numParams() << ", 1);\n";
+            << func.numParams() << ", 1, rv);\n";
       }
     }
-    cpp << in << "rv->m_data.num = 0LL;\n";
-    cpp << in << "rv->m_type = KindOfNull;\n";
     in += 2;
     cpp << in << "}\n";
   }
@@ -643,7 +721,7 @@ void processSymbol(const fbstring& symbol, std::ostream& header,
   if (func.isMethod() && !func.isStatic()) {
     cpp << in + 2 << "} else {\n";
     cpp << in << "throw_instance_method_fatal(\"" << func.className()
-        << "::" << func.name() << "\");\n";
+        << "::" << func.getCppName() << "\");\n";
     in += 2;
     cpp << in << "}\n";
   }
@@ -651,8 +729,8 @@ void processSymbol(const fbstring& symbol, std::ostream& header,
   auto numLocals = func.numParams();
   auto frameFree =
     func.usesThis() ? "frame_free_locals_inl" : "frame_free_locals_no_this_inl";
-  cpp << in << frameFree << "(ar, " << numLocals << ");\n";
-  cpp << in << "memcpy(&ar->m_r, rv, sizeof(TypedValue));\n";
+  cpp << in << frameFree << "(ar, " << numLocals << ", rv);\n";
+  cpp << in << "ar->m_r = *rv;\n";
   cpp << in << "return &ar->m_r;\n";
   cpp << "}\n\n";
 }
@@ -660,15 +738,20 @@ void processSymbol(const fbstring& symbol, std::ostream& header,
 int main(int argc, const char* argv[]) {
   if (argc < 5) {
     std::cout << "Usage: " << argv[0]
-              << " <x64|arm> <output .h> <output .cpp> <*.idl.json>...\n"
-              << "Pipe mangled C++ symbols to stdin.\n";
+              << " <x64|arm> <output .h> <output .cpp> <*.idl.json>...\n";
     return 0;
   }
+
+  fbstring invocation_trace;
+  makeInvocationTrace(invocation_trace, argc, argv);
 
   g_armMode = (strcmp(argv[1], "arm") == 0);
 
   std::ofstream header(argv[2]);
   std::ofstream cpp(argv[3]);
+
+  brandOutputFile(header, "gen-ext-hhvm.cpp", invocation_trace);
+  brandOutputFile(cpp, "gen-ext-hhvm.cpp", invocation_trace);
 
   fbvector<PhpFunc> funcs;
   fbvector<PhpClass> classes;
@@ -683,12 +766,12 @@ int main(int argc, const char* argv[]) {
   }
 
   for (auto const& func : funcs) {
-    g_mangleMap[func.getCppSig()] = &func;
+    g_funcVec.push_back(&func);
   }
   for (auto const& klass : classes) {
-    g_classMap[klass.name()] = &klass;
+    g_classMap[klass.getCppName()] = &klass;
     for (auto const& func : klass.methods()) {
-      g_mangleMap[func.getCppSig()] = &func;
+      g_funcVec.push_back(&func);
     }
   }
 
@@ -696,9 +779,9 @@ int main(int argc, const char* argv[]) {
   cpp << g_allIncludes << "\n";
   cpp << "namespace HPHP {\n\n";
 
-  std::string line;
-  while (std::getline(std::cin, line)) {
-    processSymbol(line, header, cpp);
+  auto idlIt = g_funcVec.begin();
+  for (; idlIt != g_funcVec.end(); ++idlIt) {
+    processFunc(**idlIt, header, cpp);
   }
 
   header << "} // namespace HPHP\n";

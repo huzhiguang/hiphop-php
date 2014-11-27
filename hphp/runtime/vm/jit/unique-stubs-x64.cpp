@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,18 +22,18 @@
 #include "hphp/util/asm-x64.h"
 #include "hphp/util/disasm.h"
 #include "hphp/runtime/vm/jit/types.h"
-#include "hphp/runtime/vm/jit/translator-x64.h"
-#include "hphp/runtime/vm/jit/translator-x64-internal.h"
+#include "hphp/runtime/vm/jit/mc-generator.h"
+#include "hphp/runtime/vm/jit/mc-generator-internal.h"
 #include "hphp/runtime/vm/jit/abi-x64.h"
 #include "hphp/runtime/vm/jit/code-gen-helpers-x64.h"
+#include "hphp/runtime/vm/jit/service-requests-inline.h"
 #include "hphp/runtime/vm/runtime.h"
 
-namespace HPHP { namespace JIT { namespace X64 {
+namespace HPHP { namespace jit { namespace x64 {
 
 //////////////////////////////////////////////////////////////////////
 
-using namespace Transl; // XXX remove
-using namespace Transl::reg;
+using namespace jit::reg;
 using boost::implicit_cast;
 
 TRACE_SET_MOD(ustubs);
@@ -42,257 +42,96 @@ TRACE_SET_MOD(ustubs);
 
 namespace {
 
-// Utility for logging stubs addresses during startup.  It's often
-// useful to know where they were when debugging.
-TCA log(const char* name, TCA start) {
-  auto const inAStubs = start > tx64->stubsCode.base();
-  UNUSED auto const stop = inAStubs ? tx64->stubsCode.frontier()
-                                    : tx64->mainCode.frontier();
-
-  FTRACE(1, "unique stub: {} {} -- {:4} bytes: {}\n",
-         inAStubs ? "astubs @ "
-                  : "  ahot @  ",
-         static_cast<void*>(start),
-         static_cast<size_t>(stop - start),
-         name);
-
-  ONTRACE(2,
-    [&]{
-      Disasm dasm(Disasm::Options().indent(4));
-      std::ostringstream os;
-      dasm.disasm(os, start, stop);
-      FTRACE(2, "{}\n", os.str());
-    }()
-  );
-
-  return start;
-}
-
 TCA emitRetFromInterpretedFrame() {
-  Asm a { tx64->stubsCode };
-  moveToAlign(a);
+  Asm a { mcg->code.cold() };
+  moveToAlign(mcg->code.cold());
   auto const ret = a.frontier();
 
   auto const arBase = static_cast<int32_t>(sizeof(ActRec) - sizeof(Cell));
   a.   lea  (rVmSp[-arBase], serviceReqArgRegs[0]);
   a.   movq (rVmFp, serviceReqArgRegs[1]);
-  emitServiceReq(a, SRFlags::JmpInsteadOfRet, REQ_POST_INTERP_RET);
+  emitServiceReq(mcg->code.cold(), SRFlags::JmpInsteadOfRet,
+                 REQ_POST_INTERP_RET);
   return ret;
 }
 
 TCA emitRetFromInterpretedGeneratorFrame() {
-  Asm a { tx64->stubsCode };
-  moveToAlign(a);
+  Asm a { mcg->code.cold() };
+  moveToAlign(mcg->code.cold());
   auto const ret = a.frontier();
 
-  // We have to get the Continuation object from the current AR's $this, then
+  // We have to get the Generator object from the current AR's $this, then
   // find where its embedded AR is.
   PhysReg rContAR = serviceReqArgRegs[0];
   a.    loadq  (rVmFp[AROFF(m_this)], rContAR);
-  a.    loadq  (rContAR[CONTOFF(m_arPtr)], rContAR);
+  a.    lea  (rContAR[c_Generator::arOff()], rContAR);
   a.    movq   (rVmFp, serviceReqArgRegs[1]);
-  emitServiceReq(a, SRFlags::JmpInsteadOfRet, REQ_POST_INTERP_RET);
+  emitServiceReq(mcg->code.cold(), SRFlags::JmpInsteadOfRet,
+                 REQ_POST_INTERP_RET);
   return ret;
-}
-
-template<int Arity>
-TCA emitNAryStub(Asm& a, CppCall c) {
-  static_assert(Arity < kNumRegisterArgs, "");
-
-  // The callNAryStub has already saved these regs on a.
-  RegSet alreadySaved;
-  for (size_t i = 0; i < Arity; ++i) {
-    alreadySaved |= RegSet(argNumToRegName[i]);
-  }
-
-  /*
-   * We've made a call instruction, and pushed Arity args on the
-   * stack.  So the stack address will be odd coming into the stub if
-   * Arity + 1 (for the call) is odd.  We need to correct for this
-   * when saving other registers below to keep SSE-friendly alignment
-   * of the stack.
-   */
-  const int Parity = (Arity + 1) % 2;
-
-  // These dtor stubs are meant to be called with the call
-  // instruction, unlike most translator code.
-  moveToAlign(a);
-  TCA start = a.frontier();
-  /*
-   * Preserve most caller-saved regs. The calling code has already
-   * preserved regs in `alreadySaved'; we push the rest of the caller
-   * saved regs and rbp.  It should take 9 qwords in total, and the
-   * incoming call instruction made it 10.  This is an even number of
-   * pushes, so we preserve the SSE-friendliness of our execution
-   * environment (without real intervention from PhysRegSaverParity).
-   *
-   * Note that we don't need to clean all registers because the only
-   * reason we could need those locations written back is if stack
-   * unwinding were to happen.  These stubs can re-enter due to user
-   * destructors, but exceptions are not allowed to propagate out of
-   * those, so it's not a problem.
-   */
-  a.    push (rbp); // {
-  a.    movq (rsp, rbp);
-  {
-    RegSet s = kGPCallerSaved - alreadySaved;
-    PhysRegSaverParity rs(Parity, a, s);
-    emitCall(a, c);
-  }
-  a.    pop  (rbp);  // }
-  a.    ret  ();
-  return start;
-}
-
-TCA emitUnaryStub(Asm& a, CppCall c) {
-  return emitNAryStub<1>(a, c);
 }
 
 //////////////////////////////////////////////////////////////////////
 
 void emitCallToExit(UniqueStubs& uniqueStubs) {
-  Asm a { tx64->stubsCode };
+  Asm a { mcg->code.main() };
+
+  // Emit a byte of padding. This is a kind of hacky way to avoid
+  // hitting an assert in recordGdbStub when we call it with stub - 1
+  // as the start address.
+  a.emitNop(1);
   auto const stub = emitServiceReq(
-    a,
+    mcg->code.main(),
     SRFlags::Align | SRFlags::JmpInsteadOfRet,
     REQ_EXIT
   );
 
-  uniqueStubs.callToExit = log("callToExit", stub);
+  // On a backtrace, gdb tries to locate the calling frame at address
+  // returnRIP-1. However, for the first VM frame, there is no code at
+  // returnRIP-1, since the AR was set up manually. For this frame,
+  // record the tracelet address as starting from this callToExit-1,
+  // so gdb does not barf.
+  uniqueStubs.callToExit = uniqueStubs.add("callToExit", stub);
 }
 
 void emitReturnHelpers(UniqueStubs& us) {
-  us.retHelper    = log("retHelper", emitRetFromInterpretedFrame());
-  us.genRetHelper = log("genRetHelper",
-                        emitRetFromInterpretedGeneratorFrame());
-  us.retInlHelper = log("retInlHelper", emitRetFromInterpretedFrame());
+  us.retHelper    = us.add("retHelper", emitRetFromInterpretedFrame());
+  us.genRetHelper = us.add("genRetHelper",
+                           emitRetFromInterpretedGeneratorFrame());
+  us.retInlHelper = us.add("retInlHelper", emitRetFromInterpretedFrame());
 }
 
 void emitResumeHelpers(UniqueStubs& uniqueStubs) {
-  Asm a { tx64->stubsCode };
-  moveToAlign(a);
-
-  auto const fpOff = offsetof(VMExecutionContext, m_fp);
-  auto const spOff = offsetof(VMExecutionContext, m_stack) +
-                       Stack::topOfStackOffset();
+  Asm a { mcg->code.main() };
+  moveToAlign(mcg->code.main());
 
   uniqueStubs.resumeHelperRet = a.frontier();
   a.    pop   (rStashedAR[AROFF(m_savedRip)]);
   uniqueStubs.resumeHelper = a.frontier();
-  emitGetGContext(a, rax);
-  a.   loadq  (rax[fpOff], rVmFp);
-  a.   loadq  (rax[spOff], rVmSp);
-  emitServiceReq(a, REQ_RESUME);
+  a.   loadq  (rVmTl[RDS::kVmfpOff], rVmFp);
+  a.   loadq  (rVmTl[RDS::kVmspOff], rVmSp);
+  emitServiceReq(mcg->code.main(), REQ_RESUME);
 
-  log("resumeHelpers", uniqueStubs.resumeHelper);
-}
-
-void emitDefClsHelper(UniqueStubs& uniqueStubs) {
-  Asm a { tx64->stubsCode };
-  uniqueStubs.defClsHelper = a.frontier();
-
-  void (*helper)(PreClass*) = defClsHelper;
-  PhysReg rEC = argNumToRegName[2];
-  emitGetGContext(a, rEC);
-  a.   storeq (rVmFp, rEC[offsetof(VMExecutionContext, m_fp)]);
-  a.   storeq (argNumToRegName[1],
-                  rEC[offsetof(VMExecutionContext, m_pc)]);
-  a.   storeq (rax, rEC[offsetof(VMExecutionContext, m_stack) +
-                    Stack::topOfStackOffset()]);
-  a.   jmp    (TCA(helper));
-
-  log("defClsHelper", uniqueStubs.defClsHelper);
+  uniqueStubs.add("resumeHelpers", uniqueStubs.resumeHelper);
 }
 
 void emitStackOverflowHelper(UniqueStubs& uniqueStubs) {
-  Asm a { tx64->stubsCode };
+  Asm a { mcg->code.cold() };
 
-  moveToAlign(a);
+  moveToAlign(mcg->code.cold());
   uniqueStubs.stackOverflowHelper = a.frontier();
 
   // We are called from emitStackCheck, with the new stack frame in
   // rStashedAR. Get the caller's PC into rdi and save it off.
   a.    loadq  (rVmFp[AROFF(m_func)], rax);
   a.    loadl  (rStashedAR[AROFF(m_soff)], edi);
-  a.    loadq  (rax[Func::sharedOffset()], rax);
-  a.    loadl  (rax[Func::sharedBaseOffset()], eax);
+  a.    loadq  (rax[Func::sharedOff()], rax);
+  a.    loadl  (rax[Func::sharedBaseOff()], eax);
   a.    addl   (eax, edi);
   emitEagerVMRegSave(a, RegSaveFlags::SaveFP | RegSaveFlags::SavePC);
-  emitServiceReq(a, REQ_STACK_OVERFLOW);
+  emitServiceReq(mcg->code.cold(), REQ_STACK_OVERFLOW);
 
-  log("stackOverflowHelper", uniqueStubs.stackOverflowHelper);
-}
-
-void emitDtorStubs(UniqueStubs& uniqueStubs) {
-  Asm a { tx64->stubsCode };
-
-  auto const strDtor = log("dtorStr", emitUnaryStub(
-    a, CppCall(getMethodPtr(&StringData::release))
-  ));
-  auto const arrDtor = log("dtorArr", emitUnaryStub(
-    a, CppCall(getVTableOffset(&HphpArray::release))
-  ));
-  auto const objDtor = log("dtorObj", emitUnaryStub(
-    a, CppCall(getMethodPtr(&ObjectData::release))
-  ));
-  auto const resDtor = log("dtorRes", emitUnaryStub(
-    a, CppCall(getMethodPtr(&ResourceData::release))
-  ));
-  auto const refDtor = log("dtorRef", emitUnaryStub(
-    a, CppCall(implicit_cast<void*>(getMethodPtr(&RefData::release)))
-  ));
-
-  uniqueStubs.dtorStubs[0] = nullptr;
-  uniqueStubs.dtorStubs[typeToDestrIndex(BitwiseKindOfString)] = strDtor;
-  uniqueStubs.dtorStubs[typeToDestrIndex(KindOfArray)]         = arrDtor;
-  uniqueStubs.dtorStubs[typeToDestrIndex(KindOfObject)]        = objDtor;
-  uniqueStubs.dtorStubs[typeToDestrIndex(KindOfResource)]      = resDtor;
-  uniqueStubs.dtorStubs[typeToDestrIndex(KindOfRef)]           = refDtor;
-}
-
-void emitGenericDecRefHelpers(UniqueStubs& uniqueStubs) {
-  Label release;
-
-  Asm a { tx64->mainCode };
-  moveToAlign(a, kNonFallthroughAlign);
-
-  // dtorGenericStub just takes a pointer to the TypedValue in rdi.
-  uniqueStubs.irPopRHelper = a.frontier();
-  // popR: Move top-of-stack pointer to rdi
-  emitMovRegReg(a, rVmSp, rdi);
-  // fall through
-  uniqueStubs.dtorGenericStub = a.frontier();
-  emitLoadTVType(a, rdi[TVOFF(m_type)], r32(rAsm));
-  a.    loadq  (rdi[TVOFF(m_data)], rdi);
-  // Fall through to the regs stub.
-
-  /*
-   * Custom calling convention: m_type goes in rAsm, m_data in
-   * rdi.  We don't ever store program locations in rAsm, so the
-   * caller didn't need to spill anything.  The assembler sometimes
-   * uses rAsm, but we know the stub won't need to and it makes it
-   * possible to share the code for both decref helpers.
-   */
-  uniqueStubs.dtorGenericStubRegs = a.frontier();
-  a.    cmpl   (RefCountStaticValue, rdi[FAST_REFCOUNT_OFFSET]);
-  jccBlock<CC_Z>(a, [&] {
-    a.  decl   (rdi[FAST_REFCOUNT_OFFSET]);
-    release.jcc8(a, CC_Z);
-  });
-  a.    ret    ();
-
-asm_label(a, release);
-  {
-    PhysRegSaver prs(a, kGPCallerSaved - RegSet(rdi));
-    callDestructor(a, rAsm, rax);
-    tx64->fixupMap().recordIndirectFixup(
-      a.frontier(),
-      prs.rspTotalAdjustmentRegs()
-    );
-  }
-  a.    ret    ();
-
-  log("genericDtors", uniqueStubs.irPopRHelper);
+  uniqueStubs.add("stackOverflowHelper", uniqueStubs.stackOverflowHelper);
 }
 
 void emitFreeLocalsHelpers(UniqueStubs& uniqueStubs) {
@@ -301,32 +140,38 @@ void emitFreeLocalsHelpers(UniqueStubs& uniqueStubs) {
   Label loopHead;
 
   /*
-   * Note: the IR currently requires that we preserve r13/r14 across
-   * calls to these free locals helpers.
+   * Note: the IR currently requires that we preserve r13 across calls to these
+   * free locals helpers.  These helpers assume the stack is balanced (rsp%16
+   * == 0) on entry, unlike normal ABI calls where the stack was balanced
+   * before the call, and now has the return address on the stack (rsp%16 ==
+   * 8).
    */
-  static_assert(rVmSp == rbx, "");
-  auto const rIter     = rbx;
+  auto const rIter     = r14;
   auto const rFinished = r15;
   auto const rType     = esi;
   auto const rData     = rdi;
+  int const tvSize     = sizeof(TypedValue);
 
-  Asm a { tx64->mainCode };
-  moveToAlign(a, kNonFallthroughAlign);
+  auto& cb = mcg->code.hot().available() > 512 ?
+    const_cast<CodeBlock&>(mcg->code.hot()) : mcg->code.main();
+  Asm a { cb };
+  moveToAlign(cb, kNonFallthroughAlign);
+  auto stubBegin = a.frontier();
 
 asm_label(a, release);
   a.    loadq  (rIter[TVOFF(m_data)], rData);
-  a.    cmpl   (RefCountStaticValue, rData[FAST_REFCOUNT_OFFSET]);
-  jccBlock<CC_Z>(a, [&] {
-    a.  decl   (rData[FAST_REFCOUNT_OFFSET]);
+  a.    cmpl   (1, rData[FAST_REFCOUNT_OFFSET]);
+  jccBlock<CC_L>(a, [&] {
     a.  jz8    (doRelease);
+    a.  decl   (rData[FAST_REFCOUNT_OFFSET]);
   });
   a.    ret    ();
 asm_label(a, doRelease);
-  jumpDestructor(a, PhysReg(rType), rax);
+  a.    jmp    (lookupDestructor(a, PhysReg(rType)));
 
-  moveToAlign(a, kJmpTargetAlign);
+  moveToAlign(cb, kJmpTargetAlign);
   uniqueStubs.freeManyLocalsHelper = a.frontier();
-  a.    lea    (rVmFp[-(JIT::kNumFreeLocalsHelpers * sizeof(Cell))],
+  a.    lea    (rVmFp[-(jit::kNumFreeLocalsHelpers * sizeof(Cell))],
                 rFinished);
 
   auto emitDecLocal = [&] {
@@ -336,15 +181,14 @@ asm_label(a, doRelease);
     emitCmpTVType(a, KindOfRefCountThreshold, rType);
     a.  jle8   (skipDecRef);
     a.  call   (release);
-    tx64->fixupMap().recordIndirectFixup(a.frontier(), 0);
+    mcg->fixupMap().recordIndirectFixup(a.frontier(), 0);
   asm_label(a, skipDecRef);
   };
 
-  // Loop for the first few locals, but unroll the final
-  // kNumFreeLocalsHelpers.
+  // Loop for the first few locals, but unroll the final kNumFreeLocalsHelpers.
 asm_label(a, loopHead);
   emitDecLocal();
-  a.    addq   (sizeof(TypedValue), rIter);
+  a.    addq   (tvSize, rIter);
   a.    cmpq   (rIter, rFinished);
   a.    jnz8   (loopHead);
 
@@ -352,20 +196,24 @@ asm_label(a, loopHead);
     uniqueStubs.freeLocalsHelpers[kNumFreeLocalsHelpers - i - 1] = a.frontier();
     emitDecLocal();
     if (i != kNumFreeLocalsHelpers - 1) {
-      a.addq   (sizeof(TypedValue), rIter);
+      a.addq   (tvSize, rIter);
     }
   }
 
-  a.    addq   (AROFF(m_r) + sizeof(TypedValue), rVmSp);
-  a.    ret    (8);
+  a.    ret    ();
 
-  log("freeLocalsHelpers", uniqueStubs.freeManyLocalsHelper);
+  // Keep me small!
+  always_assert(a.frontier() - stubBegin <= 4 * kX64CacheLineSize);
+
+  uniqueStubs.add("freeLocalsHelpers", uniqueStubs.freeManyLocalsHelper);
 }
 
 void emitFuncPrologueRedispatch(UniqueStubs& uniqueStubs) {
-  Asm a { tx64->mainCode };
+  auto& cb = mcg->code.hot().available() > 512 ?
+    const_cast<CodeBlock&>(mcg->code.hot()) : mcg->code.main();
+  Asm a { cb };
 
-  moveToAlign(a);
+  moveToAlign(cb);
   uniqueStubs.funcPrologueRedispatch = a.frontier();
 
   assert(kScratchCrossTraceRegs.contains(rax));
@@ -379,9 +227,11 @@ void emitFuncPrologueRedispatch(UniqueStubs& uniqueStubs) {
   // edx := num passed parameters
   // ecx := num declared parameters
   a.    loadq  (rStashedAR[AROFF(m_func)], rax);
-  a.    loadl  (rStashedAR[AROFF(m_numArgsAndCtorFlag)], edx);
-  a.    andl   (0x7fffffff, edx);
-  a.    loadl  (rax[Func::numParamsOff()], ecx);
+  a.    loadl  (rStashedAR[AROFF(m_numArgsAndFlags)], edx);
+  a.    andl   (0x1fffffff, edx);
+  a.    loadl  (rax[Func::paramCountsOff()], ecx);
+  // see Func::finishedEmittingParams and Func::numParams for rationale
+  a.    shrl   (0x1, ecx);
 
   // If we passed more args than declared, jump to the numParamsCheck.
   a.    cmpl   (edx, ecx);
@@ -405,13 +255,15 @@ asm_label(a, numParamsCheck);
   a.    jmp    (rax);
   a.    ud2    ();
 
-  log("funcPrologueRedispatch", uniqueStubs.funcPrologueRedispatch);
+  uniqueStubs.add("funcPrologueRedispatch", uniqueStubs.funcPrologueRedispatch);
 }
 
 void emitFCallArrayHelper(UniqueStubs& uniqueStubs) {
-  Asm a { tx64->mainCode };
+  auto& cb = mcg->code.hot().available() > 512 ?
+    const_cast<CodeBlock&>(mcg->code.hot()) : mcg->code.main();
+  Asm a { cb };
 
-  moveToAlign(a, kNonFallthroughAlign);
+  moveToAlign(cb, kNonFallthroughAlign);
   uniqueStubs.fcallArrayHelper = a.frontier();
 
   /*
@@ -441,14 +293,9 @@ void emitFCallArrayHelper(UniqueStubs& uniqueStubs) {
   auto const rBC     = r13;
   auto const rEC     = r15;
 
-  auto const spOff = offsetof(VMExecutionContext, m_stack) +
-                       Stack::topOfStackOffset();
-  auto const fpOff = offsetof(VMExecutionContext, m_fp);
-  auto const pcOff = offsetof(VMExecutionContext, m_pc);
-
   emitGetGContext(a, rEC);
-  a.    storeq (rVmFp, rEC[fpOff]);
-  a.    storeq (rVmSp, rEC[spOff]);
+  a.    storeq (rVmFp, rVmTl[RDS::kVmfpOff]);
+  a.    storeq (rVmSp, rVmTl[RDS::kVmspOff]);
 
   // rBC := fp -> m_func -> m_unit -> m_bc
   a.    loadq  (rVmFp[AROFF(m_func)], rBC);
@@ -456,22 +303,22 @@ void emitFCallArrayHelper(UniqueStubs& uniqueStubs) {
   a.    loadq  (rBC[Unit::bcOff()],   rBC);
   // Convert offsets into PC's and sync the PC
   a.    addq   (rBC,    rPCOff);
-  a.    storeq (rPCOff, rEC[pcOff]);
+  a.    storeq (rPCOff, rVmTl[RDS::kVmpcOff]);
   a.    addq   (rBC,    rPCNext);
 
   a.    subq   (8, rsp);  // stack parity
 
   a.    movq   (rEC, argNumToRegName[0]);
   assert(rPCNext == argNumToRegName[1]);
-  a.    call   (TCA(getMethodPtr(&VMExecutionContext::doFCallArrayTC)));
+  a.    call   (TCA(getMethodPtr(&ExecutionContext::doFCallArrayTC)));
 
-  a.    loadq  (rEC[spOff], rVmSp);
+  a.    loadq  (rVmTl[RDS::kVmspOff], rVmSp);
 
-  a.    testq  (rax, rax);
+  a.    testb  (rbyte(rax), rbyte(rax));
   a.    jz8    (noCallee);
 
   a.    addq   (8, rsp);
-  a.    loadq  (rEC[fpOff], rVmFp);
+  a.    loadq  (rVmTl[RDS::kVmfpOff], rVmFp);
   a.    pop    (rVmFp[AROFF(m_savedRip)]);
   a.    loadq  (rVmFp[AROFF(m_func)], rax);
   a.    loadq  (rax[Func::funcBodyOff()], rax);
@@ -482,28 +329,29 @@ asm_label(a, noCallee);
   a.    addq   (8, rsp);
   a.    ret    ();
 
-  log("fcallArrayHelper", uniqueStubs.fcallArrayHelper);
+  uniqueStubs.add("fcallArrayHelper", uniqueStubs.fcallArrayHelper);
 }
 
 //////////////////////////////////////////////////////////////////////
 
 void emitFCallHelperThunk(UniqueStubs& uniqueStubs) {
-  TCA (*helper)(ActRec*) = &fcallHelper;
-  Asm a { tx64->stubsCode };
+  TCA (*helper)(ActRec*, void*) = &fcallHelper;
+  Asm a { mcg->code.main() };
 
-  moveToAlign(a);
+  moveToAlign(mcg->code.main());
   uniqueStubs.fcallHelperThunk = a.frontier();
 
-  Label popAndXchg;
+  Label popAndXchg, skip;
 
   // fcallHelper is used for prologues, and (in the case of
   // closures) for dispatch to the function body. In the first
   // case, there's a call, in the second, there's a jmp.
   // We can differentiate by comparing r15 and rVmFp
   a.    movq   (rStashedAR, argNumToRegName[0]);
+  a.    movq   (rVmSp, argNumToRegName[1]);
   a.    cmpq   (rStashedAR, rVmFp);
   a.    jne8   (popAndXchg);
-  emitCall(a, CppCall(helper));
+  emitCall(a, CppCall::direct(helper), argSet(2));
   a.    jmp    (rax);
   // The ud2 is a hint to the processor that the fall-through path of the
   // indirect jump (which it statically predicts as most likely) is not
@@ -511,7 +359,7 @@ void emitFCallHelperThunk(UniqueStubs& uniqueStubs) {
   a.    ud2    ();
 
   // fcallHelper may call doFCall. doFCall changes the return ip
-  // pointed to by r15 so that it points to TranslatorX64::m_retHelper,
+  // pointed to by r15 so that it points to MCGenerator::m_retHelper,
   // which does a REQ_POST_INTERP_RET service request. So we need to
   // to pop the return address into r15 + m_savedRip before calling
   // fcallHelper, and then push it back from r15 + m_savedRip after
@@ -521,32 +369,101 @@ asm_label(a, popAndXchg);
   // is entered where rbp is *below* the new actrec, and is missing
   // a number of c++ frames. The new actrec is linked onto the c++
   // frames, however, so switch it into rbp in case fcallHelper throws.
+  a.    pop    (rStashedAR[AROFF(m_savedRip)]);
   a.    xchgq  (rStashedAR, rVmFp);
-  a.    pop    (rVmFp[AROFF(m_savedRip)]);
-  emitCall(a, CppCall(helper));
-  a.    push   (rVmFp[AROFF(m_savedRip)]);
+  emitCall(a, CppCall::direct(helper), argSet(2));
+  a.    testq  (rax, rax);
+  a.    js8    (skip);
   a.    xchgq  (rStashedAR, rVmFp);
+  a.    push   (rStashedAR[AROFF(m_savedRip)]);
   a.    jmp    (rax);
   a.    ud2    ();
 
-  log("fcallHelperThunk", uniqueStubs.fcallHelperThunk);
+asm_label(a, skip);
+  a.    neg    (rax);
+  a.    loadq  (rVmTl[RDS::kVmfpOff], rVmFp);
+  a.    loadq  (rVmTl[RDS::kVmspOff], rVmSp);
+  a.    jmp    (rax);
+  a.    ud2    ();
+
+  uniqueStubs.add("fcallHelperThunk", uniqueStubs.fcallHelperThunk);
 }
 
 void emitFuncBodyHelperThunk(UniqueStubs& uniqueStubs) {
-  TCA (*helper)(ActRec*) = &funcBodyHelper;
-  Asm a { tx64->stubsCode };
+  TCA (*helper)(ActRec*,void*) = &funcBodyHelper;
+  Asm a { mcg->code.main() };
 
-  moveToAlign(a);
+  moveToAlign(mcg->code.main());
   uniqueStubs.funcBodyHelperThunk = a.frontier();
 
   // This helper is called via a direct jump from the TC (from
   // fcallArrayHelper). So the stack parity is already correct.
   a.    movq   (rVmFp, argNumToRegName[0]);
-  emitCall(a, CppCall(helper));
+  a.    movq   (rVmSp, argNumToRegName[1]);
+  emitCall(a, CppCall::direct(helper), argSet(2));
   a.    jmp    (rax);
   a.    ud2    ();
 
-  log("funcBodyHelperThunk", uniqueStubs.funcBodyHelperThunk);
+  uniqueStubs.add("funcBodyHelperThunk", uniqueStubs.funcBodyHelperThunk);
+}
+
+void emitFunctionEnterHelper(UniqueStubs& uniqueStubs) {
+  bool (*helper)(const ActRec*, int) = &EventHook::onFunctionCall;
+  Asm a { mcg->code.main() };
+
+  moveToAlign(mcg->code.main());
+  uniqueStubs.functionEnterHelper = a.frontier();
+
+  Label skip;
+
+  PhysReg ar = argNumToRegName[0];
+
+  a.   push    (rVmFp);
+  a.   movq    (rsp, rVmFp);
+  a.   push    (ar[AROFF(m_savedRip)]);
+  a.   push    (ar[AROFF(m_sfp)]);
+  a.   movq    (EventHook::NormalFunc, argNumToRegName[1]);
+  emitCall(a, CppCall::direct(helper), argSet(2));
+  a.   testb   (al, al);
+  a.   je8     (skip);
+  a.   addq    (16, rsp);
+  a.   pop     (rVmFp);
+  a.   ret     ();
+asm_label(a, skip);
+// The event hook has already cleaned up the stack/actrec
+// so that we're ready to continue from the original call
+// site.
+// Just need to grab the fp/rip from the original frame,
+// and sync rVmSp to the execution-context's copy.
+  a.   pop     (rVmFp);
+  a.   pop     (rsi);
+  a.   addq    (16, rsp); // drop our call frame
+  emitGetGContext(a, rax);
+  a.   loadq   (rVmTl[RDS::kVmspOff], rVmSp);
+  a.   jmp     (rsi);
+  a.   ud2     ();
+
+  uniqueStubs.add("functionEnterHelper", uniqueStubs.functionEnterHelper);
+}
+
+void emitBindCallStubs(UniqueStubs& uniqueStubs) {
+  for (int i = 0; i < 2; i++) {
+    auto& cb = mcg->code.cold();
+    if (!i) {
+      uniqueStubs.bindCallStub = cb.frontier();
+    } else {
+      uniqueStubs.immutableBindCallStub = cb.frontier();
+    }
+    Vauto vasm(cb);
+    auto& vf = vasm.main();
+    // Pop the return address into the actrec in rStashedAR.
+    vf << popm{rStashedAR[AROFF(m_savedRip)]};
+    ServiceReqArgVec argv;
+    packServiceReqArgs(argv, (int64_t)i);
+    emitServiceReq(vf, nullptr, jit::REQ_BIND_CALL, argv);
+  }
+  uniqueStubs.add("bindCallStub", uniqueStubs.bindCallStub);
+  uniqueStubs.add("immutableBindCallStub", uniqueStubs.immutableBindCallStub);
 }
 
 }
@@ -560,14 +477,13 @@ UniqueStubs emitUniqueStubs() {
     emitReturnHelpers,
     emitResumeHelpers,
     emitStackOverflowHelper,
-    emitDefClsHelper,
-    emitDtorStubs,
-    emitGenericDecRefHelpers,
     emitFreeLocalsHelpers,
     emitFuncPrologueRedispatch,
     emitFCallArrayHelper,
     emitFCallHelperThunk,
     emitFuncBodyHelperThunk,
+    emitFunctionEnterHelper,
+    emitBindCallStubs,
   };
   for (auto& f : functions) f(us);
   return us;
@@ -576,4 +492,3 @@ UniqueStubs emitUniqueStubs() {
 //////////////////////////////////////////////////////////////////////
 
 }}}
-

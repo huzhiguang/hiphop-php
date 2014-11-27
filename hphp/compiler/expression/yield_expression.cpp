@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -26,7 +26,7 @@ YieldExpression::YieldExpression
 (EXPRESSION_CONSTRUCTOR_PARAMETERS,
  ExpressionPtr keyExp, ExpressionPtr valExp)
   : Expression(EXPRESSION_CONSTRUCTOR_PARAMETER_VALUES(YieldExpression)),
-    m_keyExp(keyExp), m_valExp(valExp), m_label(-1) {
+    m_keyExp(keyExp), m_valExp(valExp) {
 }
 
 ExpressionPtr YieldExpression::clone() {
@@ -34,7 +34,6 @@ ExpressionPtr YieldExpression::clone() {
   Expression::deepCopy(exp);
   exp->m_keyExp = Clone(m_keyExp);
   exp->m_valExp = Clone(m_valExp);
-  exp->m_label = m_label;
   return exp;
 }
 
@@ -50,11 +49,7 @@ void YieldExpression::analyzeProgram(AnalysisResultPtr ar) {
   if (m_keyExp) {
     m_keyExp->analyzeProgram(ar);
   }
-  m_valExp->setChildOfYield();
   m_valExp->analyzeProgram(ar);
-  if (m_label == -1) {
-    setLabel(getFunctionScope()->allocYieldLabel());
-  }
 }
 
 ConstructPtr YieldExpression::getNthKid(int n) const {
@@ -88,15 +83,20 @@ void YieldExpression::setNthKid(int n, ConstructPtr cp) {
   }
 }
 
-TypePtr YieldExpression::inferTypes(AnalysisResultPtr ar, TypePtr type,
-                                    bool coerce) {
-  if (m_keyExp) {
-    m_keyExp->inferAndCheck(ar, Type::Some, false);
-  }
-  m_valExp->inferAndCheck(ar, Type::Some, false);
-  return Type::Variant;
-}
+///////////////////////////////////////////////////////////////////////////////
 
+void YieldExpression::outputCodeModel(CodeGenerator &cg) {
+  cg.printObjectHeader("YieldExpression", m_keyExp != nullptr ? 3 : 2);
+  if (m_keyExp != nullptr) {
+    cg.printPropertyHeader("key");
+    m_keyExp->outputCodeModel(cg);
+  }
+  cg.printPropertyHeader("value");
+  m_valExp->outputCodeModel(cg);
+  cg.printPropertyHeader("sourceLocation");
+  cg.printLocation(this->getLocation());
+  cg.printObjectFooter();
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 // code generation functions

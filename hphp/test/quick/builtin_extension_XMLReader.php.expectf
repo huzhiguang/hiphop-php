@@ -1,11 +1,10 @@
 XMLReader
 object(XMLReader)#1 (0) {
 }
-string(93) "O:26:"__PHP_Unserializable_Class":1:{s:31:"__PHP_Unserializable_Class_Name";s:9:"XMLReader";}"
-object(__PHP_Unserializable_Class)#2 (1) {
-  ["__PHP_Unserializable_Class_Name"]=>
-  string(9) "XMLReader"
-}
+
+Warning: Attempted to serialize unserializable builtin class XMLReader in %s/builtin_extensions.inc on line 8
+string(2) "N;"
+NULL
 array(27) {
   [0]=>
   string(11) "__construct"
@@ -46,33 +45,32 @@ array(27) {
   [18]=>
   string(7) "isValid"
   [19]=>
-  string(6) "expand"
-  [20]=>
   string(5) "__get"
-  [21]=>
+  [20]=>
   string(17) "getParserProperty"
-  [22]=>
+  [21]=>
   string(15) "lookupNamespace"
-  [23]=>
+  [22]=>
   string(9) "setSchema"
-  [24]=>
+  [23]=>
   string(17) "setParserProperty"
-  [25]=>
+  [24]=>
   string(16) "setRelaxNGSchema"
-  [26]=>
+  [25]=>
   string(22) "setRelaxNGSchemaSource"
+  [26]=>
+  string(6) "expand"
 }
 ================
 A_XMLReader
-object(A_XMLReader)#3 (1) {
+object(A_XMLReader)#2 (1) {
   ["___x"]=>
   NULL
 }
-string(96) "O:26:"__PHP_Unserializable_Class":1:{s:31:"__PHP_Unserializable_Class_Name";s:11:"A_XMLReader";}"
-object(__PHP_Unserializable_Class)#4 (1) {
-  ["__PHP_Unserializable_Class_Name"]=>
-  string(11) "A_XMLReader"
-}
+
+Warning: Attempted to serialize unserializable builtin class A_XMLReader in %s/builtin_extensions.inc on line 26
+string(2) "N;"
+NULL
 array(27) {
   [0]=>
   string(11) "__construct"
@@ -113,19 +111,19 @@ array(27) {
   [18]=>
   string(7) "isValid"
   [19]=>
-  string(6) "expand"
-  [20]=>
   string(5) "__get"
-  [21]=>
+  [20]=>
   string(17) "getParserProperty"
-  [22]=>
+  [21]=>
   string(15) "lookupNamespace"
-  [23]=>
+  [22]=>
   string(9) "setSchema"
-  [24]=>
+  [23]=>
   string(17) "setParserProperty"
-  [25]=>
+  [24]=>
   string(16) "setRelaxNGSchema"
-  [26]=>
+  [25]=>
   string(22) "setRelaxNGSchemaSource"
+  [26]=>
+  string(6) "expand"
 }

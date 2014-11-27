@@ -1,6 +1,0 @@
-*** Testing readdir() : error conditions ***
-
--- Testing readdir() function with more than expected no. of arguments --
-HipHop Warning: %s
-NULL
-===DONE===

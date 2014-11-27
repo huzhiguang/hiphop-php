@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,15 +15,15 @@
 */
 
 #include "hphp/runtime/base/pipe.h"
-#include "hphp/runtime/base/complex-types.h"
+
+#include "hphp/runtime/base/type-string.h"
+
 #include "hphp/util/light-process.h"
 
 namespace HPHP {
 
-IMPLEMENT_OBJECT_ALLOCATION(Pipe)
+IMPLEMENT_RESOURCE_ALLOCATION(Pipe)
 ///////////////////////////////////////////////////////////////////////////////
-
-StaticString Pipe::s_class_name("Pipe");
 
 Pipe::Pipe() {
 }
@@ -32,7 +32,7 @@ Pipe::~Pipe() {
   closeImpl();
 }
 
-bool Pipe::open(CStrRef filename, CStrRef mode) {
+bool Pipe::open(const String& filename, const String& mode) {
   assert(m_stream == nullptr);
   assert(m_fd == -1);
 
@@ -46,17 +46,18 @@ bool Pipe::open(CStrRef filename, CStrRef mode) {
 }
 
 bool Pipe::close() {
+  invokeFiltersOnClose();
   return closeImpl();
 }
 
 bool Pipe::closeImpl() {
   bool ret = true;
-  s_file_data->m_pcloseRet = 0;
-  if (!m_closed) {
+  s_pcloseRet = 0;
+  if (valid() && !isClosed()) {
     assert(m_stream);
     int pcloseRet = LightProcess::pclose(m_stream);
     if (WIFEXITED(pcloseRet)) pcloseRet = WEXITSTATUS(pcloseRet);
-    s_file_data->m_pcloseRet = pcloseRet;
+    s_pcloseRet = pcloseRet;
     ret = (pcloseRet == 0);
     m_closed = true;
     m_stream = nullptr;

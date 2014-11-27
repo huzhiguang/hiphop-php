@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,7 +20,7 @@
 #include "hphp/runtime/server/satellite-server.h"
 #include "hphp/runtime/base/libevent-http-client.h"
 #include "hphp/runtime/server/job-queue-vm-stack.h"
-#include "hphp/runtime/ext/ext_json.h"
+#include "hphp/runtime/server/server-task-event.h"
 #include "hphp/util/job-queue.h"
 #include "hphp/util/lock.h"
 #include "hphp/util/logger.h"
@@ -30,123 +30,76 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class XboxTransport : public Transport, public Synchronizable {
-public:
-  explicit XboxTransport(CStrRef message, CStrRef reqInitDoc = "")
-      : m_refCount(0), m_done(false), m_code(0) {
-    Timer::GetMonotonicTime(m_queueTime);
+using std::string;
 
-    m_message.append(message.data(), message.size());
-    m_reqInitDoc.append(reqInitDoc.data(), reqInitDoc.size());
-    disableCompression(); // so we don't have to decompress during sendImpl()
-  }
+XboxTransport::XboxTransport(const String& message, const String& reqInitDoc /* = "" */)
+    : m_refCount(0), m_done(false), m_code(0), m_event(nullptr) {
+  Timer::GetMonotonicTime(m_queueTime);
 
-  timespec getStartTimer() const { return m_queueTime; }
+  m_message.append(message.data(), message.size());
+  m_reqInitDoc.append(reqInitDoc.data(), reqInitDoc.size());
+  disableCompression(); // so we don't have to decompress during sendImpl()
+}
 
-  /**
-   * Implementing Transport...
-   */
-  virtual const char *getUrl() {
-    if (!m_reqInitDoc.empty()) {
-      return "xbox_process_call_message";
-    }
-    return RuntimeOption::XboxProcessMessageFunc.c_str();
+const char *XboxTransport::getUrl() {
+  if (!m_reqInitDoc.empty()) {
+    return "xbox_process_call_message";
   }
-  virtual const char *getRemoteHost() {
-    return "127.0.0.1";
+  return RuntimeOption::XboxProcessMessageFunc.c_str();
+}
+
+std::string XboxTransport::getHeader(const char *name) {
+  if (!strcasecmp(name, "Host")) return m_host;
+  if (!strcasecmp(name, "ReqInitDoc")) return m_reqInitDoc;
+  return "";
+}
+
+void XboxTransport::sendImpl(const void *data, int size, int code,
+                             bool chunked) {
+  m_response.append((const char*)data, size);
+  if (code) {
+    m_code = code;
   }
-  virtual uint16_t getRemotePort() {
-    return 0;
+}
+
+void XboxTransport::onSendEndImpl() {
+  Lock lock(this);
+
+  m_done = true;
+  if (m_event) {
+    m_event->finish();
   }
-  virtual const void *getPostData(int &size) {
-    size = m_message.size();
-    return m_message.data();
-  }
-  virtual Method getMethod() {
-    return Transport::Method::POST;
-  }
-  virtual std::string getHeader(const char *name) {
-    if (!strcasecmp(name, "Host")) return m_host;
-    if (!strcasecmp(name, "ReqInitDoc")) return m_reqInitDoc;
-    return "";
-  }
-  virtual void getHeaders(HeaderMap &headers) {
-    // do nothing
-  }
-  virtual void addHeaderImpl(const char *name, const char *value) {
-    // do nothing
-  }
-  virtual void removeHeaderImpl(const char *name) {
-    // do nothing
-  }
-  virtual void sendImpl(const void *data, int size, int code,
-                        bool chunked) {
-    m_response.append((const char*)data, size);
-    if (code) {
-      m_code = code;
-    }
-  }
-  virtual void onSendEndImpl() {
+  notify();
+}
+
+String XboxTransport::getResults(int &code, int timeout_ms /* = 0 */) {
+  {
     Lock lock(this);
-    m_done = true;
-    notify();
-  }
-
-  // task interface
-  bool isDone() {
-    return m_done;
-  }
-
-  String getResults(int &code, int timeout_ms = 0) {
-    {
-      Lock lock(this);
-      while (!m_done) {
-        if (timeout_ms > 0) {
-          long long seconds = timeout_ms / 1000;
-          long long nanosecs = (timeout_ms - seconds * 1000) * 1000;
-          if (!wait(seconds, nanosecs)) {
-            code = -1;
-            return "";
-          }
-        } else {
-          wait();
+    while (!m_done) {
+      if (timeout_ms > 0) {
+        long long seconds = timeout_ms / 1000;
+        long long nanosecs = (timeout_ms - seconds * 1000) * 1000;
+        if (!wait(seconds, nanosecs)) {
+          code = -1;
+          return empty_string();
         }
+      } else {
+        wait();
       }
     }
-
-    String response(m_response.c_str(), m_response.size(), CopyString);
-    code = m_code;
-    return response;
   }
 
-  // ref counting
-  void incRefCount() {
-    ++m_refCount;
-  }
-  void decRefCount() {
-    assert(m_refCount.load());
-    if (--m_refCount == 0) {
-      delete this;
-    }
-  }
+  String response(m_response.c_str(), m_response.size(), CopyString);
+  code = m_code;
 
-  void setHost(const std::string &host) { m_host = host;}
-private:
-  std::atomic<int> m_refCount;
-
-  string m_message;
-
-  bool m_done;
-  string m_response;
-  int m_code;
-  string m_host;
-  string m_reqInitDoc;
-};
+  return response;
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 
-static IMPLEMENT_THREAD_LOCAL(XboxServerInfoPtr, s_xbox_server_info);
-static IMPLEMENT_THREAD_LOCAL(string, s_xbox_prev_req_init_doc);
+static IMPLEMENT_THREAD_LOCAL(std::shared_ptr<XboxServerInfo>,
+  s_xbox_server_info);
+static IMPLEMENT_THREAD_LOCAL(std::string, s_xbox_prev_req_init_doc);
 
 class XboxRequestHandler: public RPCRequestHandler {
 public:
@@ -162,7 +115,7 @@ static IMPLEMENT_THREAD_LOCAL(XboxRequestHandler, s_xbox_request_handler);
 ///////////////////////////////////////////////////////////////////////////////
 
 struct XboxWorker
-  : JobQueueWorker<XboxTransport*,true,false,JobQueueDropVMStack>
+  : JobQueueWorker<XboxTransport*,Server*,true,false,JobQueueDropVMStack>
 {
   virtual void doJob(XboxTransport *job) {
     try {
@@ -172,7 +125,7 @@ struct XboxWorker
       *s_xbox_prev_req_init_doc = reqInitDoc;
 
       job->onRequestStart(job->getStartTimer());
-      createRequestHandler()->handleRequest(job);
+      createRequestHandler()->run(job);
       destroyRequestHandler();
       job->decRefCount();
     } catch (...) {
@@ -182,7 +135,7 @@ struct XboxWorker
 private:
   RequestHandler *createRequestHandler() {
     if (!*s_xbox_server_info) {
-      *s_xbox_server_info = XboxServerInfoPtr(new XboxServerInfo());
+      *s_xbox_server_info = std::make_shared<XboxServerInfo>();
     }
     if (RuntimeOption::XboxServerLogInfo) XboxRequestHandler::Info = true;
     s_xbox_request_handler->setServerInfo(*s_xbox_server_info);
@@ -206,7 +159,7 @@ private:
 
 ///////////////////////////////////////////////////////////////////////////////
 
-static JobQueueDispatcher<XboxTransport*, XboxWorker> *s_dispatcher;
+static JobQueueDispatcher<XboxWorker> *s_dispatcher;
 static Mutex s_dispatchMutex;
 
 void XboxServer::Restart() {
@@ -215,7 +168,7 @@ void XboxServer::Restart() {
   if (RuntimeOption::XboxServerThreadCount > 0) {
     {
       Lock l(s_dispatchMutex);
-      s_dispatcher = new JobQueueDispatcher<XboxTransport*, XboxWorker>
+      s_dispatcher = new JobQueueDispatcher<XboxWorker>
         (RuntimeOption::XboxServerThreadCount,
          RuntimeOption::ServerThreadRoundRobin,
          RuntimeOption::ServerThreadDropCacheTimeoutSeconds,
@@ -248,12 +201,14 @@ const StaticString
   s_localhost("localhost"),
   s_127_0_0_1("127.0.0.1");
 
-static bool isLocalHost(CStrRef host) {
+static bool isLocalHost(const String& host) {
   return host.empty() || host == s_localhost || host == s_127_0_0_1;
 }
 
-bool XboxServer::SendMessage(CStrRef message, Variant &ret, int timeout_ms,
-                             CStrRef host /* = "localhost" */) {
+bool XboxServer::SendMessage(const String& message,
+                             Array& ret,
+                             int timeout_ms,
+                             const String& host /* = "localhost" */) {
   if (isLocalHost(host)) {
     XboxTransport *job;
     {
@@ -300,7 +255,7 @@ bool XboxServer::SendMessage(CStrRef message, Variant &ret, int timeout_ms,
     }
 
     string hostStr(host.data());
-    vector<string> headers;
+    std::vector<std::string> headers;
     LibEventHttpClientPtr http =
       LibEventHttpClient::Get(hostStr, RuntimeOption::XboxServerPort);
     if (http->send(url, headers, timeoutSeconds, false,
@@ -327,8 +282,8 @@ bool XboxServer::SendMessage(CStrRef message, Variant &ret, int timeout_ms,
   return false;
 }
 
-bool XboxServer::PostMessage(CStrRef message,
-                             CStrRef host /* = "localhost" */) {
+bool XboxServer::PostMessage(const String& message,
+                             const String& host /* = "localhost" */) {
   if (isLocalHost(host)) {
     Lock l(s_dispatchMutex);
     if (!s_dispatcher) {
@@ -347,8 +302,8 @@ bool XboxServer::PostMessage(CStrRef message,
     url += host.data();
     url += "/xbox_post_message";
 
-    vector<string> headers;
-    string hostStr(host.data());
+    std::vector<std::string> headers;
+    std::string hostStr(host.data());
     LibEventHttpClientPtr http =
       LibEventHttpClient::Get(hostStr, RuntimeOption::XboxServerPort);
     if (http->send(url, headers, 0, false, message.data(), message.size())) {
@@ -373,7 +328,7 @@ class XboxTask : public SweepableResourceData {
 public:
   DECLARE_RESOURCE_ALLOCATION(XboxTask)
 
-  XboxTask(CStrRef message, CStrRef reqInitDoc = "") {
+  XboxTask(const String& message, const String& reqInitDoc = "") {
     m_job = new XboxTransport(message, reqInitDoc);
     m_job->incRefCount();
   }
@@ -384,20 +339,19 @@ public:
 
   XboxTransport *getJob() { return m_job;}
 
-  static StaticString s_class_name;
+  CLASSNAME_IS("XboxTask");
   // overriding ResourceData
-  virtual CStrRef o_getClassNameHook() const { return s_class_name; }
+  virtual const String& o_getClassNameHook() const { return classnameof(); }
 
 private:
   XboxTransport *m_job;
 };
-IMPLEMENT_OBJECT_ALLOCATION(XboxTask)
-
-StaticString XboxTask::s_class_name("XboxTask");
+IMPLEMENT_RESOURCE_ALLOCATION(XboxTask)
 
 ///////////////////////////////////////////////////////////////////////////////
 
-Resource XboxServer::TaskStart(CStrRef msg, CStrRef reqInitDoc /* = "" */) {
+Resource XboxServer::TaskStart(const String& msg, const String& reqInitDoc /* = "" */,
+    ServerTaskEvent<XboxServer, XboxTransport> *event /* = nullptr */) {
   {
     Lock l(s_dispatchMutex);
     if (s_dispatcher &&
@@ -405,14 +359,21 @@ Resource XboxServer::TaskStart(CStrRef msg, CStrRef reqInitDoc /* = "" */) {
          RuntimeOption::XboxServerThreadCount ||
          s_dispatcher->getQueuedJobs() <
          RuntimeOption::XboxServerMaxQueueLength)) {
-      XboxTask *task = NEWOBJ(XboxTask)(msg, reqInitDoc);
+      XboxTask *task = newres<XboxTask>(msg, reqInitDoc);
       Resource ret(task);
       XboxTransport *job = task->getJob();
       job->incRefCount(); // paired with worker's decRefCount()
+
       Transport *transport = g_context->getTransport();
       if (transport) {
         job->setHost(transport->getHeader("Host"));
       }
+
+      if (event) {
+        job->setAsioEvent(event);
+        event->setJob(job);
+      }
+
       assert(s_dispatcher);
       s_dispatcher->enqueue(job);
 
@@ -430,16 +391,19 @@ Resource XboxServer::TaskStart(CStrRef msg, CStrRef reqInitDoc /* = "" */) {
   return Resource();
 }
 
-bool XboxServer::TaskStatus(CResRef task) {
+bool XboxServer::TaskStatus(const Resource& task) {
   XboxTask *ptask = task.getTyped<XboxTask>();
   return ptask->getJob()->isDone();
 }
 
-int XboxServer::TaskResult(CResRef task, int timeout_ms, Variant &ret) {
+int XboxServer::TaskResult(const Resource& task, int timeout_ms, Variant &ret) {
   XboxTask *ptask = task.getTyped<XboxTask>();
+  return TaskResult(ptask->getJob(), timeout_ms, ret);
+}
 
+int XboxServer::TaskResult(XboxTransport *job, int timeout_ms, Variant &ret) {
   int code = 0;
-  String response = ptask->getJob()->getResults(code, timeout_ms);
+  String response = job->getResults(code, timeout_ms);
   if (code == 200) {
     ret = unserialize_from_string(response);
   } else {
@@ -448,7 +412,7 @@ int XboxServer::TaskResult(CResRef task, int timeout_ms, Variant &ret) {
   return code;
 }
 
-XboxServerInfoPtr XboxServer::GetServerInfo() {
+std::shared_ptr<XboxServerInfo> XboxServer::GetServerInfo() {
   return *s_xbox_server_info;
 }
 

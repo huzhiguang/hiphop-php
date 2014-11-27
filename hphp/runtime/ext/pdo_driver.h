@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -217,8 +217,8 @@ public:
 
   const char *getName() const { return m_name;}
 
-  PDOConnection *createConnection(CStrRef datasource, CStrRef username,
-                                  CStrRef password, CArrRef options);
+  PDOConnection *createConnection(const String& datasource, const String& username,
+                                  const String& password, const Array& options);
 
 private:
   static PDODriverMap s_drivers;
@@ -235,8 +235,11 @@ class PDOStatement;
 typedef SmartResource<PDOStatement> sp_PDOStatement;
 
 /* represents a connection to a database */
-class PDOConnection : public ResourceData {
+class PDOConnection : public SweepableResourceData {
 public:
+  // This is special and doesn't use DECLARE_RESOURCE_ALLOCATION because it has
+  // to live across requests. It is also the weirdest SweepableResourceData
+  // as it can't use any PHP objects and deletes itself during sweep().
   static const char *PersistentKey;
 
   enum SupportedMethod {
@@ -258,11 +261,12 @@ public:
 public:
   PDOConnection();
   virtual ~PDOConnection();
-  virtual bool create(CArrRef options) = 0;
+  virtual bool create(const Array& options) = 0;
+  virtual void sweep();
 
-  static StaticString s_class_name;
+  CLASSNAME_IS("PDOConnection")
   // overriding ResourceData
-  virtual CStrRef o_getClassNameHook() const { return s_class_name; }
+  virtual const String& o_getClassNameHook() const { return classnameof(); }
 
   // alloc/release persistent storage.
   virtual void persistentSave();
@@ -274,13 +278,13 @@ public:
   virtual bool closer();
 
   /* prepare a statement and stash driver specific portion into stmt */
-  virtual bool preparer(CStrRef sql, sp_PDOStatement *stmt, CVarRef options);
+  virtual bool preparer(const String& sql, sp_PDOStatement *stmt, const Variant& options);
 
   /* execute a statement (that does not return a result set) */
-  virtual int64_t doer(CStrRef sql);
+  virtual int64_t doer(const String& sql);
 
   /* quote a string */
-  virtual bool quoter(CStrRef input, String &quoted, PDOParamType paramtype);
+  virtual bool quoter(const String& input, String &quoted, PDOParamType paramtype);
 
   /* transaction related */
   virtual bool begin();
@@ -288,7 +292,7 @@ public:
   virtual bool rollback();
 
   /* setting of attributes */
-  virtual bool setAttribute(int64_t attr, CVarRef value);
+  virtual bool setAttribute(int64_t attr, const Variant& value);
 
   /* return last insert id.  NULL indicates error condition, otherwise,
      the return value MUST be an emalloc'd NULL terminated string. */
@@ -390,12 +394,13 @@ typedef SmartResource<PDOConnection> sp_PDOConnection;
 /* describes a column */
 class PDOColumn : public ResourceData {
 public:
+  DECLARE_RESOURCE_ALLOCATION_NO_SWEEP(PDOColumn);
   PDOColumn();
   ~PDOColumn();
 
-  static StaticString s_class_name;
+  CLASSNAME_IS("PDOColumn")
   // overriding ResourceData
-  virtual CStrRef o_getClassNameHook() const { return s_class_name; }
+  virtual const String& o_getClassNameHook() const { return classnameof(); }
 
 public:
   String name;
@@ -407,14 +412,15 @@ public:
 ///////////////////////////////////////////////////////////////////////////////
 
 /* describes a bound parameter */
-class PDOBoundParam : public ResourceData {
+class PDOBoundParam : public SweepableResourceData {
 public:
+  DECLARE_RESOURCE_ALLOCATION(PDOBoundParam);
   PDOBoundParam();
   ~PDOBoundParam();
 
-  static StaticString s_class_name;
+  CLASSNAME_IS("PDOBoundParam")
   // overriding ResourceData
-  virtual CStrRef o_getClassNameHook() const { return s_class_name; }
+  virtual const String& o_getClassNameHook() const { return classnameof(); }
 
 public:
   int64_t paramno;           /* if -1, then it has a name, and we don't
@@ -440,8 +446,9 @@ class c_pdo;
 typedef SmartObject<c_pdo> sp_pdo;
 
 /* represents a prepared statement */
-class PDOStatement : public ResourceData {
+class PDOStatement : public SweepableResourceData {
 public:
+  DECLARE_RESOURCE_ALLOCATION(PDOStatement);
   enum SupportedMethod {
     MethodExecuter,
     MethodFetcher,
@@ -459,9 +466,9 @@ public:
   PDOStatement();
   virtual ~PDOStatement();
 
-  static StaticString s_class_name;
+  CLASSNAME_IS("PDOStatement")
   // overriding ResourceData
-  virtual CStrRef o_getClassNameHook() const { return s_class_name; }
+  virtual const String& o_getClassNameHook() const { return classnameof(); }
 
   virtual bool support(SupportedMethod method);
 
@@ -488,7 +495,7 @@ public:
   virtual bool paramHook(PDOBoundParam *param, PDOParamEvent event_type);
 
   /* setting of attributes */
-  virtual bool setAttribute(int64_t attr, CVarRef value);
+  virtual bool setAttribute(int64_t attr, const Variant& value);
 
   /* fetching of attributes: -1: error, 0: unsupported attribute */
   virtual int getAttribute(int64_t attr, Variant &value);
@@ -604,10 +611,10 @@ public:
   const char *named_rewrite_template;
 };
 
-int pdo_parse_params(PDOStatement *stmt, CStrRef in, String &out);
+int pdo_parse_params(PDOStatement *stmt, const String& in, String &out);
 void pdo_raise_impl_error(sp_PDOConnection dbh, sp_PDOStatement stmt,
                           const char *sqlstate, const char *supp);
-void throw_pdo_exception(CVarRef code, CVarRef info,
+void throw_pdo_exception(const Variant& code, const Variant& info,
                          const char *fmt, ...) ATTRIBUTE_PRINTF(3,4);
 
 ///////////////////////////////////////////////////////////////////////////////

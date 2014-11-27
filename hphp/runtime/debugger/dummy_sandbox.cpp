@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,11 +19,15 @@
 #include <boost/noncopyable.hpp>
 
 #include "hphp/runtime/debugger/debugger.h"
+#include "hphp/runtime/debugger/debugger_hook_handler.h"
 #include "hphp/runtime/debugger/cmd/cmd_signal.h"
 #include "hphp/runtime/base/program-functions.h"
+#include "hphp/runtime/base/thread-info.h"
 #include "hphp/runtime/server/source-root-info.h"
 #include "hphp/runtime/base/externals.h"
 #include "hphp/runtime/base/hphp-system.h"
+#include "hphp/runtime/base/php-globals.h"
+
 #include "hphp/util/logger.h"
 #include "hphp/util/process.h"
 
@@ -58,13 +62,12 @@ struct CLISession : private boost::noncopyable {
   CLISession() {
     TRACE(2, "CLISession::CLISession\n");
     char *argv[] = {"", nullptr};
-    execute_command_line_begin(1, argv, 0);
+    execute_command_line_begin(1, argv, 0, {});
   }
   ~CLISession() {
     TRACE(2, "CLISession::~CLISession\n");
     Debugger::UnregisterSandbox(g_context->getSandboxId());
-    ThreadInfo::s_threadInfo.getNoCheck()->
-      m_reqInjectionData.setDebugger(false);
+    DebugHookHandler::detach();
     execute_command_line_end(0, false, nullptr);
   }
 };
@@ -81,9 +84,8 @@ void DummySandbox::run() {
       CLISession hphpSession;
 
       DSandboxInfo sandbox = m_proxy->getSandbox();
-      string msg;
+      std::string msg;
       if (sandbox.valid()) {
-        GlobalVariables *g = get_global_variables();
         SourceRootInfo sri(sandbox.m_user, sandbox.m_name);
         if (sandbox.m_path.empty()) {
           sandbox.m_path = sri.path();
@@ -92,7 +94,11 @@ void DummySandbox::run() {
           msg = "Invalid sandbox was specified. "
             "PHP files may not be loaded properly.\n";
         } else {
-          sri.setServerVariables(g->getRef(s__SERVER));
+          auto server = php_global_exchange(s__SERVER, init_null());
+          forceToArray(server);
+          Array arr = server.toArrRef();
+          server.unset();
+          php_global_set(s__SERVER, sri.setServerVariables(std::move(arr)));
         }
         Debugger::RegisterSandbox(sandbox);
         g_context->setSandboxId(sandbox.id());
@@ -103,7 +109,7 @@ void DummySandbox::run() {
           getcwd(cwd, sizeof(cwd));
           Logger::Info("Start loading startup doc '%s', pwd = '%s'",
                        doc.c_str(), cwd);
-          bool error; string errorMsg;
+          bool error; std::string errorMsg;
           bool ret = hphp_invoke(g_context.getNoCheck(), doc, false, null_array,
                                  uninit_null(), "", "", error, errorMsg, true,
                                  false, true);
@@ -119,7 +125,7 @@ void DummySandbox::run() {
         g_context->setSandboxId(m_proxy->getDummyInfo().id());
       }
 
-      ti->m_reqInjectionData.setDebugger(true);
+      DebugHookHandler::attach<DebuggerHookHandler>(ti);
       {
         DebuggerDummyEnv dde;
         // This is really the entire point of having the dummy sandbox. This
@@ -158,7 +164,7 @@ void DummySandbox::notifySignal(int signum) {
 
 std::string DummySandbox::getStartupDoc(const DSandboxInfo &sandbox) {
   TRACE(2, "DummySandbox::getStartupDoc\n");
-  string path;
+  std::string path;
   if (!m_startupFile.empty()) {
     // if relative path, prepend directory
     if (m_startupFile[0] != '/' && m_startupFile[0] != '~') {
@@ -174,9 +180,9 @@ std::string DummySandbox::getStartupDoc(const DSandboxInfo &sandbox) {
 
     // resolving home directory
     if (path[0] == '~') {
-      string user, home;
+      std::string user, home;
       size_t pos = path.find('/');
-      if (pos == string::npos) pos = path.size();
+      if (pos == std::string::npos) pos = path.size();
       if (pos > 1) {
         user = path.substr(1, pos - 1);
       }

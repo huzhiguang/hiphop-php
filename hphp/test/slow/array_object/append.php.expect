@@ -1,4 +1,4 @@
-object(ArrayObject)#1 (3) {
+object(ArrayObject)#1 (1) {
   ["storage":"ArrayObject":private]=>
   array(5) {
     [0]=>
@@ -17,8 +17,22 @@ object(ArrayObject)#1 (3) {
       string(3) "six"
     }
   }
-  ["flags":"ArrayObject":private]=>
-  int(0)
-  ["iteratorClass":"ArrayObject":private]=>
-  string(13) "ArrayIterator"
+}
+object(ExtendedArrayObject)#2 (1) {
+  ["storage":"ArrayObject":private]=>
+  array(2) {
+    [0]=>
+    string(1) "y"
+    ["q1"]=>
+    string(1) "x"
+  }
+}
+object(ExtendedArrayObject)#3 (1) {
+  ["storage":"ArrayObject":private]=>
+  array(2) {
+    ["q2"]=>
+    string(1) "y"
+    ["q1"]=>
+    string(1) "z"
+  }
 }

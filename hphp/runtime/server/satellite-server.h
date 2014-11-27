@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,14 +18,15 @@
 #define incl_HPHP_SATELLITE_SERVER_H_
 
 #include "hphp/util/hdf.h"
+#include "hphp/runtime/base/ini-setting.h"
 
 #include <chrono>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-DECLARE_BOOST_TYPES(SatelliteServerInfo);
-DECLARE_BOOST_TYPES(SatelliteServer);
+struct SatelliteServerInfo;
+
 class SatelliteServer {
 public:
   enum class Type {
@@ -41,7 +42,8 @@ public:
   const std::string &getName() const { return m_name;}
 
 public:
-  static SatelliteServerPtr Create(SatelliteServerInfoPtr info);
+  static std::unique_ptr<SatelliteServer>
+    Create(std::shared_ptr<SatelliteServerInfo> info);
 
   virtual ~SatelliteServer() {}
 
@@ -72,7 +74,7 @@ public:
   static bool checkMainURL(const std::string& path);
 
 public:
-  explicit SatelliteServerInfo(Hdf hdf);
+  explicit SatelliteServerInfo(const IniSetting::Map& ini, Hdf hdf);
 
   const std::string &getName() const { return m_name;}
   SatelliteServer::Type getType() const { return m_type;}
@@ -97,17 +99,17 @@ public:
 protected:
   std::string m_name;
   SatelliteServer::Type m_type;
-  int m_port;
-  int m_threadCount;
-  int m_maxRequest;
-  int m_maxDuration;
+  int m_port = 0;
+  int m_threadCount = 5;
+  int m_maxRequest = 500;
+  int m_maxDuration = 120;
   std::chrono::seconds m_timeoutSeconds;
   std::set<std::string> m_urls; // url regex patterns
   std::string m_reqInitFunc;
   std::string m_reqInitDoc;
   std::string m_password;
   std::set<std::string> m_passwords;
-  bool m_alwaysReset;
+  bool m_alwaysReset = false;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

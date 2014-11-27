@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,6 +21,7 @@
 #include "hphp/parser/hphp.tab.hpp"
 #include "hphp/compiler/expression/scalar_expression.h"
 #include "hphp/compiler/expression/constant_expression.h"
+#include "hphp/compiler/code_model_enums.h"
 #include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/base/type-conversions.h"
 #include "hphp/runtime/base/builtin-functions.h"
@@ -32,6 +33,7 @@
 #include "hphp/compiler/expression/simple_variable.h"
 #include "hphp/compiler/statement/loop_statement.h"
 #include "hphp/runtime/base/tv-arith.h"
+#include "hphp/runtime/vm/runtime.h"
 
 using namespace HPHP;
 
@@ -48,6 +50,7 @@ BinaryOpExpression::BinaryOpExpression
   case T_MINUS_EQUAL:
   case T_MUL_EQUAL:
   case T_DIV_EQUAL:
+  case T_POW_EQUAL:
   case T_CONCAT_EQUAL:
   case T_MOD_EQUAL:
   case T_AND_EQUAL:
@@ -65,17 +68,22 @@ BinaryOpExpression::BinaryOpExpression
     break;
   case T_COLLECTION: {
     std::string s = m_exp1->getLiteralString();
-    int cType = 0;
+    Collection::Type cType = Collection::InvalidType;
     if (strcasecmp(s.c_str(), "vector") == 0) {
       cType = Collection::VectorType;
-    } else if (strcasecmp(s.c_str(), "map") == 0) {
+    } else if (strcasecmp(s.c_str(), "map") == 0 ||
+               strcasecmp(s.c_str(), "stablemmap") == 0) {
       cType = Collection::MapType;
-    } else if (strcasecmp(s.c_str(), "stablemap") == 0) {
-      cType = Collection::StableMapType;
     } else if (strcasecmp(s.c_str(), "set") == 0) {
       cType = Collection::SetType;
     } else if (strcasecmp(s.c_str(), "pair") == 0) {
       cType = Collection::PairType;
+    } else if (strcasecmp(s.c_str(), "immvector") == 0) {
+      cType = Collection::ImmVectorType;
+    } else if (strcasecmp(s.c_str(), "immmap") == 0) {
+      cType = Collection::ImmMapType;
+    } else if (strcasecmp(s.c_str(), "immset") == 0) {
+      cType = Collection::ImmSetType;
     }
     ExpressionListPtr el = static_pointer_cast<ExpressionList>(m_exp2);
     el->setCollectionType(cType);
@@ -389,16 +397,6 @@ void BinaryOpExpression::optimizeTypes(AnalysisResultConstPtr ar) {
   }
 }
 
-ExpressionPtr BinaryOpExpression::postOptimize(AnalysisResultConstPtr ar) {
-  optimizeTypes(ar);
-  ExpressionPtr optExp = simplifyArithmetic(ar);
-  if (!optExp) {
-    if (isShortCircuitOperator()) optExp = simplifyLogical(ar);
-  }
-  if (optExp) optExp = replaceValue(optExp);
-  return optExp;
-}
-
 static ExpressionPtr makeIsNull(AnalysisResultConstPtr ar,
                                 LocationPtr loc, ExpressionPtr exp,
                                 bool invert) {
@@ -476,6 +474,9 @@ ExpressionPtr BinaryOpExpression::foldConst(AnalysisResultConstPtr ar) {
               ExpressionPtr aExp = m_exp1;
               ExpressionPtr bExp = binOpExp->m_exp1;
               ExpressionPtr cExp = binOpExp->m_exp2;
+              if (aExp->isArray() || bExp->isArray() || cExp->isArray()) {
+                break;
+              }
               m_exp1 = binOpExp = Clone(binOpExp);
               m_exp2 = cExp;
               binOpExp->m_exp1 = aExp;
@@ -522,6 +523,10 @@ ExpressionPtr BinaryOpExpression::foldConst(AnalysisResultConstPtr ar) {
         }
       }
       Variant result;
+      auto add = RuntimeOption::IntsOverflowToInts ? cellAdd : cellAddO;
+      auto sub = RuntimeOption::IntsOverflowToInts ? cellSub : cellSubO;
+      auto mul = RuntimeOption::IntsOverflowToInts ? cellMul : cellMulO;
+
       switch (m_op) {
         case T_LOGICAL_XOR:
           result = static_cast<bool>(v1.toBoolean() ^ v2.toBoolean());
@@ -536,6 +541,9 @@ ExpressionPtr BinaryOpExpression::foldConst(AnalysisResultConstPtr ar) {
           *result.asCell() = cellBitXor(*v1.asCell(), *v2.asCell());
           break;
         case '.':
+          if (v1.isArray() || v2.isArray()) {
+            return ExpressionPtr();
+          }
           result = concat(v1.toString(), v2.toString());
           break;
         case T_IS_IDENTICAL:
@@ -563,13 +571,13 @@ ExpressionPtr BinaryOpExpression::foldConst(AnalysisResultConstPtr ar) {
           result = cellGreaterOrEqual(*v1.asCell(), *v2.asCell());
           break;
         case '+':
-          *result.asCell() = cellAdd(*v1.asCell(), *v2.asCell());
+          *result.asCell() = add(*v1.asCell(), *v2.asCell());
           break;
         case '-':
-          *result.asCell() = cellSub(*v1.asCell(), *v2.asCell());
+          *result.asCell() = sub(*v1.asCell(), *v2.asCell());
           break;
         case '*':
-          *result.asCell() = cellMul(*v1.asCell(), *v2.asCell());
+          *result.asCell() = mul(*v1.asCell(), *v2.asCell());
           break;
         case '/':
           if ((v2.isIntVal() && v2.toInt64() == 0) || v2.toDouble() == 0.0) {
@@ -712,203 +720,78 @@ BinaryOpExpression::foldRightAssoc(AnalysisResultConstPtr ar) {
   return ExpressionPtr();
 }
 
-TypePtr BinaryOpExpression::inferTypes(AnalysisResultPtr ar, TypePtr type,
-                                       bool coerce) {
-  TypePtr et1;          // expected m_exp1's type
-  bool coerce1 = false; // whether m_exp1 needs to coerce to et1
-  TypePtr et2;          // expected m_exp2's type
-  bool coerce2 = false; // whether m_exp2 needs to coerce to et2
-  TypePtr rt;           // return type
+///////////////////////////////////////////////////////////////////////////////
 
-  switch (m_op) {
-  case '+':
-  case T_PLUS_EQUAL:
-    if (coerce && Type::SameType(type, Type::Array)) {
-      et1 = et2 = Type::Array;
-      coerce1 = coerce2 = true;
-      rt = Type::Array;
-    } else {
-      et1 = Type::PlusOperand;
-      et2 = Type::PlusOperand;
-      rt  = Type::PlusOperand;
-    }
-    break;
-  case '-':
-  case '*':
-  case T_MINUS_EQUAL:
-  case T_MUL_EQUAL:
-  case '/':
-  case T_DIV_EQUAL:
-    et1 = Type::Numeric;
-    et2 = Type::Numeric;
-    rt  = Type::Numeric;
-    break;
-  case '.':
-    et1 = et2 = rt = Type::String;
-    break;
-  case T_CONCAT_EQUAL:
-    et1 = et2 = Type::String;
-    rt = Type::Variant;
-    break;
-  case '%':
-    et1 = et2 = Type::Int64;
-    rt  = Type::Numeric;
-    break;
-  case T_MOD_EQUAL:
-    et1 = Type::Numeric;
-    et2 = Type::Int64;
-    rt  = Type::Numeric;
-    break;
-  case '|':
-  case '&':
-  case '^':
-  case T_AND_EQUAL:
-  case T_OR_EQUAL:
-  case T_XOR_EQUAL:
-    et1 = Type::Primitive;
-    et2 = Type::Primitive;
-    rt  = Type::Primitive;
-    break;
-  case T_SL:
-  case T_SR:
-  case T_SL_EQUAL:
-  case T_SR_EQUAL:
-    et1 = et2 = rt = Type::Int64;
-    break;
-  case T_BOOLEAN_OR:
-  case T_BOOLEAN_AND:
-  case T_LOGICAL_OR:
-  case T_LOGICAL_AND:
-  case T_LOGICAL_XOR:
-    et1 = et2 = rt = Type::Boolean;
-    break;
-  case '<':
-  case T_IS_SMALLER_OR_EQUAL:
-  case '>':
-  case T_IS_GREATER_OR_EQUAL:
-  case T_IS_IDENTICAL:
-  case T_IS_NOT_IDENTICAL:
-  case T_IS_EQUAL:
-  case T_IS_NOT_EQUAL:
-    et1 = Type::Some;
-    et2 = Type::Some;
-    rt = Type::Boolean;
-    break;
-  case T_INSTANCEOF:
-    et1 = Type::Any;
-    et2 = Type::String;
-    rt = Type::Boolean;
-    break;
-  case T_COLLECTION:
-    et1 = Type::Any;
-    et2 = Type::Any;
-    rt = Type::Object;
-    break;
-  default:
-    assert(false);
+void BinaryOpExpression::outputCodeModel(CodeGenerator &cg) {
+  if (m_op == T_COLLECTION) {
+    cg.printObjectHeader("CollectionInitializerExpression", 3);
+    cg.printPropertyHeader("class");
+    cg.printTypeExpression(m_exp1);
+    cg.printPropertyHeader("arguments");
+    cg.printExpressionVector(static_pointer_cast<ExpressionList>(m_exp2));
+    cg.printPropertyHeader("sourceLocation");
+    cg.printLocation(this->getLocation());
+    cg.printObjectFooter();
+    return;
   }
 
-  switch (m_op) {
-  case T_PLUS_EQUAL:
-    {
-      TypePtr rhs = m_exp2->inferAndCheck(ar, et2, coerce2);
-      TypePtr lhs = m_exp1->inferAndCheck(ar, Type::Any, true);
-      if (lhs) {
-        if (lhs->mustBe(Type::KindOfArray)) {
-          TypePtr a2(m_exp2->getActualType());
-          if (a2 && a2->is(Type::KindOfArray)) {
-            m_exp2->setExpectedType(a2);
-          }
-          rt = Type::Array;
-          break;
-        }
-        if (lhs->mustBe(Type::KindOfNumeric)) {
-          if (!rhs->mustBe(lhs->getKindOf())) {
-            rhs = Type::combinedArithmeticType(lhs, rhs);
-            if (!rhs) rhs = Type::Numeric;
-            m_exp1->inferAndCheck(ar, rhs, true);
-          }
-          TypePtr a1(m_exp1->getCPPType());
-          TypePtr a2(m_exp2->getActualType());
-          if (a1 && a1->mustBe(Type::KindOfNumeric) &&
-              a2 && a2->mustBe(Type::KindOfNumeric)) {
-            // both LHS and RHS are numeric.
-            // Set the expected type of RHS to be
-            // the stronger type
-            TypePtr t = a1->getKindOf() > a2->getKindOf() ? a1 : a2;
-            m_exp2->setExpectedType(t);
-          }
-          rt = Type::Numeric;
-          break;
-        }
-      }
-      m_exp1->inferAndCheck(ar, rhs, true);
-    }
-    break;
-  case T_MINUS_EQUAL:
-  case T_MUL_EQUAL:
-  case T_DIV_EQUAL:
-  case T_MOD_EQUAL:
-  case T_AND_EQUAL:
-  case T_OR_EQUAL:
-  case T_XOR_EQUAL:
-  case T_SL_EQUAL:
-  case T_SR_EQUAL:
-    {
-      TypePtr ret = m_exp2->inferAndCheck(ar, et2, coerce2);
-      m_exp1->inferAndCheck(ar, ret, true);
-    }
-    break;
-  case T_CONCAT_EQUAL:
-    {
-      TypePtr ret = m_exp2->inferAndCheck(ar, et2, coerce2);
-      m_exp1->inferAndCheck(ar, Type::String, true);
-      TypePtr act1 = m_exp1->getActualType();
-      if (act1 && act1->is(Type::KindOfString)) rt = Type::String;
-    }
-    break;
-  case '+':
-  case '-':
-  case '*':
-    {
-      m_exp1->inferAndCheck(ar, et1, coerce1);
-      m_exp2->inferAndCheck(ar, et2, coerce2);
-      TypePtr act1 = m_exp1->getActualType();
-      TypePtr act2 = m_exp2->getActualType();
+  cg.printObjectHeader("BinaryOpExpression", 4);
+  cg.printPropertyHeader("expression1");
+  m_exp1->outputCodeModel(cg);
+  cg.printPropertyHeader("expression2");
+  if (m_op == T_INSTANCEOF) {
+    cg.printTypeExpression(m_exp2);
+  } else {
+    m_exp2->outputCodeModel(cg);
+  }
+  cg.printPropertyHeader("operation");
 
-      TypePtr combined = Type::combinedArithmeticType(act1, act2);
-      if (combined && combined->isSubsetOf(rt)) {
-        if (act1) m_exp1->setExpectedType(act1);
-        if (act2) m_exp2->setExpectedType(act2);
-        rt = combined;
-      } else if (m_op == '+') {
-        bool a1 = act1 && act1->is(Type::KindOfArray);
-        bool a2 = act2 && act2->is(Type::KindOfArray);
-        if (a1 || a2) {
-          m_implementedType.reset();
-          if (!a1) {
-            m_implementedType = Type::Variant;
-          } else if (!a2) {
-            m_exp1->setExpectedType(Type::Array);
-            // in this case, the implemented type will
-            // actually be Type::Array (since Array::operator+
-            // returns an Array)
-          } else {
-            m_exp1->setExpectedType(Type::Array);
-            m_exp2->setExpectedType(Type::Array);
-          }
-          rt = Type::Array;
-        }
-      }
-    }
-    break;
-  default:
-    m_exp1->inferAndCheck(ar, et1, coerce1);
-    m_exp2->inferAndCheck(ar, et2, coerce2);
-    break;
+  int op = 0;
+  switch (m_op) {
+    case T_PLUS_EQUAL: op = PHP_PLUS_ASSIGN; break;
+    case T_MINUS_EQUAL: op = PHP_MINUS_ASSIGN; break;
+    case T_MUL_EQUAL: op = PHP_MULTIPLY_ASSIGN; break;
+    case T_DIV_EQUAL: op = PHP_DIVIDE_ASSIGN; break;
+    case T_CONCAT_EQUAL: op = PHP_CONCAT_ASSIGN; break;
+    case T_MOD_EQUAL:  op = PHP_MODULUS_ASSIGN;  break;
+    case T_AND_EQUAL: op = PHP_AND_ASSIGN; break;
+    case T_OR_EQUAL: op = PHP_OR_ASSIGN;  break;
+    case T_XOR_EQUAL: op = PHP_XOR_ASSIGN; break;
+    case T_SL_EQUAL: op = PHP_SHIFT_LEFT_ASSIGN; break;
+    case T_SR_EQUAL: op = PHP_SHIFT_RIGHT_ASSIGN; break;
+    case T_BOOLEAN_OR: op = PHP_BOOLEAN_OR;  break;
+    case T_BOOLEAN_AND: op = PHP_BOOLEAN_AND; break;
+    case T_LOGICAL_OR: op = PHP_LOGICAL_OR; break;
+    case T_LOGICAL_AND: op = PHP_LOGICAL_AND;  break;
+    case T_LOGICAL_XOR: op = PHP_LOGICAL_XOR; break;
+    case '|': op = PHP_OR; break;
+    case '&': op = PHP_AND;  break;
+    case '^': op = PHP_XOR; break;
+    case '.': op = PHP_CONCAT; break;
+    case '+': op = PHP_PLUS; break;
+    case '-': op = PHP_MINUS; break;
+    case '*': op = PHP_MULTIPLY; break;
+    case '/': op = PHP_DIVIDE; break;
+    case '%': op = PHP_MODULUS; break;
+    case T_SL: op = PHP_SHIFT_LEFT; break;
+    case T_SR: op = PHP_SHIFT_RIGHT; break;
+    case T_IS_IDENTICAL: op = PHP_IS_IDENTICAL; break;
+    case T_IS_NOT_IDENTICAL: op = PHP_IS_NOT_IDENTICAL; break;
+    case T_IS_EQUAL: op = PHP_IS_EQUAL; break;
+    case T_IS_NOT_EQUAL: op = PHP_IS_NOT_EQUAL; break;
+    case '<': op = PHP_IS_SMALLER; break;
+    case T_IS_SMALLER_OR_EQUAL: op = PHP_IS_SMALLER_OR_EQUAL; break;
+    case '>': op = PHP_IS_GREATER; break;
+    case T_IS_GREATER_OR_EQUAL: op = PHP_IS_GREATER_OR_EQUAL;  break;
+    case T_INSTANCEOF: op = PHP_INSTANCEOF;  break;
+    default:
+      assert(false);
   }
 
-  return rt;
+  cg.printValue(op);
+  cg.printPropertyHeader("sourceLocation");
+  cg.printLocation(this->getLocation());
+  cg.printObjectFooter();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -991,4 +874,3 @@ bool BinaryOpExpression::isOpEqual() {
   }
   return false;
 }
-

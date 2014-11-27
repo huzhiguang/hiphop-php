@@ -9,23 +9,26 @@ node's purpose. Listed values are defaults, unless examples.
   Log {
     Level = None (default) | Error | Warning | Info | Verbose
     NoSilencer = false
-    AlwaysLogUnhandledExceptions = true
+    AlwaysLogUnhandledExceptions = false
     RuntimeErrorReportingLevel = 8191
+    ForceErrorReportingLevel = 0
     Header = false
     HeaderMangle = 0
-    InjectedStackTrace = true
     NativeStackTrace = true
     MaxMessagesPerRequest = -1
 
-- Level, NoSilencer, AlwaysLogUnhandledExceptions, RuntimeErrorReportingLevel
+- Level, NoSilencer, AlwaysLogUnhandledExceptions, RuntimeErrorReportingLevel,
+  ForceErrorReportingLevel
 
 These settings control different logging levels. NoSilencer means even when
 silencer operator @ is used, still output errors. Unhandled exceptions are
 PHP fatal errors, and AlwaysLogUnhandledExceptions will make sure they get
 logged even if a user's error handler is installed for them. We also provided
-RuntimeErrorReportingLevel for compatibility with PHP.
+RuntimeErrorReportingLevel for compatibility with PHP. ForceErrorReportingLevel
+is a bitmask that will be ORed with RuntimeErrorReportingLevel to determine the
+actual error reporting level.
 
-- Header, InjectedStackTrace, NativeStackTrace
+- Header, NativeStackTrace
 
 These settings control log line formats. Header includes timestamp, process id,
 thread id, request id (counted from 1 since server starts), message id
@@ -37,8 +40,6 @@ and printed on every line of logging right after header. These stacktraces can
 be translated into human readable frames by running "-m translate" with the
 compiled program. (2) PHP stacktrace from code injection. Generated C++ code
 injects stacktrace preparation code into every frame of functions and methods.
-InjectedStackTrace can turn on this PHP stacktrace, which sometimes is cleaner
-than the C++ stacktrace, which can be turned on and off by NativeStackTrace.
 
 - HeaderMangle
 
@@ -81,14 +82,13 @@ flood error logs.
 = Error Handling
 
   ErrorHandling {
-    CallUserHandlerOnFatals = true
+    # Bitmask of error constants to upgrade to E_USER_ERROR. Only E_WARNING,
+    # E_USER_WARNING, E_NOTICE, and E_USER_NOTICE are supported.
+    UpgradeLevel = 0 (default)
+    CallUserHandlerOnFatals = false
     MaxLoopCount = 0
     NoInfiniteRecursionDetection = false
-    ThrowBadTypeExceptions = false
-    ThrowTooManyArguments = false
     WarnTooManyArguments = false
-    ThrowMissingArguments = false
-    ThrowInvalidArguments = false
     EnableHipHopErrors = true
     NoticeFrequency = 1    # 1 out of these many notices to log
     WarningFrequency = 1   # 1 out of these many warnings to log
@@ -99,12 +99,12 @@ flood error logs.
 = Resource Limits
 
   ResourceLimit {
-    CoreFileSize = 0          # in bytes
+    CoreFileSize = 0           # in bytes
     MaxSocket = 0
-    SocketDefaultTimeout = 5  # in seconds
+    SocketDefaultTimeout = 60  # in seconds
     MaxRSS = 0
-    MaxRSSPollingCycle = 0    # in seconds, how often to check max memory
-    DropCacheCycle = 0        # in seconds, how often to drop disk cache
+    MaxRSSPollingCycle = 0     # in seconds, how often to check max memory
+    DropCacheCycle = 0         # in seconds, how often to drop disk cache
     MaxSQLRowCount = 0
     SerializationSizeLimit = 0
     StringOffsetLimit = 10 * 1024 * 1024
@@ -128,6 +128,7 @@ flood error logs.
     Host = www.default_domain.com
     IP = 0.0.0.0
     Port = 80
+    Type = libevent | fastcgi
     ThreadCount = 50
     ThreadRoundRobin = false   # last thread serves next
     ThreadDropCacheTimeoutSeconds = 0
@@ -150,10 +151,6 @@ flood error logs.
     # maximum memory size for image processing
     ImageMemoryMaxBytes = Upload.UploadMaxFileSize * 2
 
-    # Only for debugging memory problems. When turned on, server will report
-    # SmartAllocator's usage for each thread to stdout.
-    CheckMemory = false
-
     # If ServerName is not specified for a virtual host, use prefix + this
     # suffix to compose one. If "Pattern" was specified, matched pattern,
     # either by parentheses for the first match or without parentheses for
@@ -163,20 +160,15 @@ flood error logs.
     # Forcing $_SERVER['SERVER_NAME'] to come from request header
     ForceServerNameToHeader = false
 
+    # Print file paths traversed onto the 404 page
+    PathDebug = false
+
     # startup options
     TakeoverFilename = filename   # for port takeover between server instances
     DefaultDocument = index.php
     StartupDocument = filename
     RequestInitFunction = function_name
     RequestInitDocument = filename
-    ThreadDocuments {
-      * = somedoc.php
-      * = another.php
-    }
-    ThreadLoopDocuments {
-      * = somedoc.php
-      * = another.php
-    }
     ErrorDocument404 = 404.php
     ErrorDocument500 = 500.php
     FatalErrorMessage = some string
@@ -212,7 +204,6 @@ How long to wait for dangling server to respond.
       Cookie =      # if this cookie is present: "name" or "name=value"
       Param =       # if this parameter in query string is present
     }
-    EnableMagicQuotesGpc = false
     EnableKeepAlive = true
     EnableOutputBuffering = false
     OutputHandler =
@@ -242,13 +233,12 @@ to use for sending.
 
     # static contents
     FileCache = filename
-    EnableStaticContentCache = true
     EnableStaticContentFromDisk = true
     ExpiresActive = true
     ExpiresDefault = 2592000
     DefaultCharsetName = UTF-8
 
-- EnableStaticContentCache, EnableStaticContentFromDisk
+- EnableStaticContentFromDisk
 
 A static content cache creates one single file from all static contents,
 including css, js, html, images and any other non-PHP files (or even PHP files,
@@ -282,15 +272,6 @@ used for PHP responses in case no other charset has been set explicitly.
 
     APC {
       EnableApc = true
-      UseSharedMemory = false
-      SharedMemorySize = 1024  # in MB
-
-- UseSharedMemory
-
-When off, APC will use regular process memory for faster access, but only
-limited to single process. Shared memory model allows sharing between two or
-more processes, but it has SharedMemorySize as upper limit.
-
       PrimeLibrary = filename
       LoadThread = 2
       CompletionKeys {
@@ -337,9 +318,6 @@ These are experimental LFU settings.
     DnsCache {
       Enable = false
       TTL = 600   # in seconds
-      KeyMaturityThreshold = 20
-      MaximumCapacity = 0
-      KeyFrequencyUpdatePeriod = 1000
     }
 
     # Light process has very little forking cost, because they are pre-forked
@@ -384,6 +362,7 @@ These are experimental LFU settings.
       Prefix = prefix.
       Pattern = regex pattern
       PathTranslation = html
+      CheckExistenceBeforeRewrite = true
       ServerName =
       ServerVariables {
         name = value
@@ -430,6 +409,12 @@ These are experimental LFU settings.
       }
     }
   }
+
+- CheckExistenceBeforeRewrite
+
+With this setting, rewrite rules will not be applied for files that exist in
+the original path. This is the default behavior. Set this to false if one wants
+to block access to certain files (ex. .htaccess.)
 
 = Administration Server
 
@@ -505,16 +490,6 @@ A pagelet server is essentially the same as local CURL, except it's more
 efficient. This allows parallel execution of a web page, preparing two panels
 or iframes at the same time.
 
-  Fiber {
-    ThreadCount = 0
-  }
-
-- Fiber Asynchronous Functions
-
-A "fiber" is a sub-thread of a request thread, mainly for implementing
-call_user_func_async(). This thread count specifies totally number of physical
-threads allocated for executing fiber asynchronous function calls.
-
 = Proxy Server
 
   Proxy {
@@ -580,7 +555,6 @@ next requests.
     Memory = false
     Malloc = false
     APC = false
-    APCKey = false
     SQL = false
     SQLTable = false
     NetworkIO = false
@@ -610,7 +584,6 @@ next requests.
 
   Debug {
     FullBacktrace = false
-    ServerStackTrace = false
     ServerErrorMessage = false
     TranslateSource = false
 
@@ -624,7 +597,7 @@ next requests.
     CoreDumpReportDirectory = /tmp
   }
 
-- FullBacktrace, ServerStackTrace, ServerErrorMessage, TranslateSource
+- FullBacktrace, ServerErrorMessage, TranslateSource
 
 These settings turn on error messages in HTTP responses with detailed
 stacktrace information. TranslateSource will translate C++ file and line
@@ -705,6 +678,8 @@ users can use the same machine serving their own source files.
 = HPHPi Settings
 
   Eval {
+    CheckSymLink = true
+
     EnableHipHopSyntax = false
     EnableHipHopExperimentalSyntax = false
 
@@ -731,12 +706,38 @@ users can use the same machine serving their own source files.
       }
     }
 
+    TimeoutsUseWallTime = true
+    CheckFlushOnUserClose = true
+
+    # Causes HHVM to disallow constructs that are unavailable when Repo.Authoritative
+    # is active, without requiring you to run in Repo.Authoritative.
+    AuthoritativeMode = true
+
     # experimental, please ignore
     BytecodeInterpreter = false
     DumpBytecode = false
     RecordCodeCoverage = false
     CodeCoverageOutputFile =
   }
+
+- CheckSymLink
+
+Determines whether or not to follow symlinks (and, from a performance
+standpoint, make the associated realpath() calls needed) when resolving
+includes/requires and loading code. This is enabled by default for parity with
+the reference implementation. If not needed for a particular application and/or
+configuration, disable this when tuning.
+
+- TimeoutsUseWallTime
+
+Determines whether or not to interpret set_time_limit timeouts as wall time or
+CPU time (which the reference implementation uses.) Defaults to wall time.
+
+- CheckFlushOnUserClose
+
+Determines whether or not close() for user streams (registered by
+stream_wrapper_register) will consider the return value of the implicit call to
+flush() when calculating its return value.
 
 = MySQL
 
@@ -748,6 +749,7 @@ users can use the same machine serving their own source files.
     SlowQueryThreshold = 1000  # in ms, log slow queries as errors
     KillOnTimeout = false
     Socket =                   # Default location to look for mysql.sock
+    TypedResults = true
   }
 
 - KillOnTimeout
@@ -755,6 +757,11 @@ users can use the same machine serving their own source files.
 When a query takes long time to execute on server, client has a chance to
 kill it to avoid extra server cost by turning on KillOnTimeout.
 
+- TypedResults
+
+Zend returns strings and NULL only for MySQL results, not integers or floats.
+HHVM return ints (and, sometimes, actual doubles). This behavior can be
+disabled by setting TypedResults to false.
 
 = HTTP Monitoring
 
@@ -791,3 +798,19 @@ kill it to avoid extra server cost by turning on KillOnTimeout.
 This feature allows a machine to overwrite configurations just by matching
 machine names with specified regex pattern. This block of configuration can
 appear at any location of the file, even at top.
+
+= PHP File Extensions
+
+By default any file with .php in the URL is treated as PHP source code and is
+passed through to the execution engine for processing. This configuration option
+allows other file extensions to be treated similarly. Note that .php is
+automatically treated as such and does not need to be specified in this list.
+
+    PhpFile {
+        Extensions {
+            phpt = application/x-phpt
+            hphp = application/x-hhvm-php
+        }
+    }
+
+The content type is not used and is just for descriptive purposes.

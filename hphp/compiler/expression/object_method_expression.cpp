@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,7 +22,6 @@
 #include "hphp/compiler/analysis/file_scope.h"
 #include "hphp/compiler/analysis/function_scope.h"
 #include "hphp/compiler/statement/statement.h"
-#include "hphp/util/util.h"
 #include "hphp/util/hash.h"
 #include "hphp/compiler/option.h"
 #include "hphp/compiler/expression/simple_variable.h"
@@ -36,11 +35,15 @@ using namespace HPHP;
 
 ObjectMethodExpression::ObjectMethodExpression
 (EXPRESSION_CONSTRUCTOR_PARAMETERS,
- ExpressionPtr object, ExpressionPtr method, ExpressionListPtr params)
+ ExpressionPtr object, ExpressionPtr method, ExpressionListPtr params,
+ bool nullsafe)
   : FunctionCall(
       EXPRESSION_CONSTRUCTOR_PARAMETER_VALUES(ObjectMethodExpression),
       method, "", false, params, ExpressionPtr()),
-    m_object(object), m_bindClass(true) {
+    m_object(object),
+    m_nullsafe(nullsafe),
+    m_xhpGetAttr(false),
+    m_bindClass(true) {
   m_object->setContext(Expression::ObjectContext);
   m_object->clearContext(Expression::LValue);
   m_object->clearContext(Expression::AccessContext);
@@ -122,33 +125,6 @@ void ObjectMethodExpression::setNthKid(int n, ConstructPtr cp) {
   }
 }
 
-TypePtr ObjectMethodExpression::inferTypes(AnalysisResultPtr ar,
-                                           TypePtr type, bool coerce) {
-  assert(false);
-  return TypePtr();
-}
-
-void ObjectMethodExpression::setInvokeParams(AnalysisResultPtr ar) {
-  FunctionScope::FunctionInfoPtr info;
-  if (Option::WholeProgram) {
-    info = FunctionScope::GetFunctionInfo(m_name);
-  }
-  if (!Option::WholeProgram || info || m_name.empty()) {
-    for (int i = m_params->getCount(); i--; ) {
-      if (!info || info->isRefParam(i)) {
-        m_params->markParam(i, canInvokeFewArgs());
-      }
-    }
-  }
-  // If we cannot find information of the so-named function, it might not
-  // exist, or it might go through __call(), either of which cannot have
-  // reference parameters.
-  for (int i = 0; i < m_params->getCount(); i++) {
-    (*m_params)[i]->inferAndCheck(ar, Type::Variant, false);
-  }
-  m_params->resetOutputCount();
-}
-
 ExpressionPtr ObjectMethodExpression::preOptimize(AnalysisResultConstPtr ar) {
   if (ar->getPhase() < AnalysisResult::FirstPreOptimize) {
     return ExpressionPtr();
@@ -172,110 +148,26 @@ ExpressionPtr ObjectMethodExpression::preOptimize(AnalysisResultConstPtr ar) {
   return ExpressionPtr();
 }
 
-TypePtr ObjectMethodExpression::inferAndCheck(AnalysisResultPtr ar,
-                                              TypePtr type, bool coerce) {
-  assert(type);
-  IMPLEMENT_INFER_AND_CHECK_ASSERT(getScope());
-  resetTypes();
-  reset();
+///////////////////////////////////////////////////////////////////////////////
 
-  ConstructPtr self = shared_from_this();
-  TypePtr objectType = m_object->inferAndCheck(ar, Type::Some, false);
-  m_valid = true;
-  m_bindClass = true;
-
-  if (m_name.empty()) {
-    m_nameExp->inferAndCheck(ar, Type::Some, false);
-    setInvokeParams(ar);
-    // we have to use a variant to hold dynamic value
-    return checkTypesImpl(ar, type, Type::Variant, coerce);
+void ObjectMethodExpression::outputCodeModel(CodeGenerator &cg) {
+  cg.printObjectHeader("ObjectMethodCallExpression",
+      m_params == nullptr ? 3 : 4);
+  cg.printPropertyHeader("object");
+  m_object->outputCodeModel(cg);
+  if (m_nameExp->is(Expression::KindOfScalarExpression)) {
+    cg.printPropertyHeader("methodName");
+  } else {
+    cg.printPropertyHeader("methodExpression");
   }
-
-  ClassScopePtr cls;
-  if (objectType && !objectType->getName().empty()) {
-    if (m_classScope && !strcasecmp(objectType->getName().c_str(),
-                                    m_classScope->getName().c_str())) {
-      cls = m_classScope;
-    } else {
-      cls = ar->findExactClass(shared_from_this(), objectType->getName());
-    }
+  m_nameExp->outputCodeModel(cg);
+  if (m_params != nullptr) {
+    cg.printPropertyHeader("arguments");
+    cg.printExpressionVector(m_params);
   }
-
-  if (!cls) {
-    m_classScope.reset();
-    m_funcScope.reset();
-
-    m_valid = false;
-    setInvokeParams(ar);
-    return checkTypesImpl(ar, type, Type::Variant, coerce);
-  }
-
-  if (m_classScope != cls) {
-    m_classScope = cls;
-    m_funcScope.reset();
-  }
-
-  FunctionScopePtr func = m_funcScope;
-  if (!func) {
-    func = cls->findFunction(ar, m_name, true, true);
-    if (!func) {
-      if (!cls->isTrait() &&
-          !cls->getAttribute(ClassScope::MayHaveUnknownMethodHandler) &&
-          !cls->getAttribute(ClassScope::HasUnknownMethodHandler) &&
-          !cls->getAttribute(ClassScope::InheritsUnknownMethodHandler)) {
-        if (ar->classMemberExists(m_name, AnalysisResult::MethodName)) {
-          if (!Option::AllDynamic) {
-            setDynamicByIdentifier(ar, m_name);
-          }
-        } else {
-          Compiler::Error(Compiler::UnknownObjectMethod, self);
-        }
-      }
-
-      m_valid = false;
-      setInvokeParams(ar);
-      return checkTypesImpl(ar, type, Type::Variant, coerce);
-    }
-    m_funcScope = func;
-    func->addCaller(getScope(), !type->is(Type::KindOfAny));
-  }
-
-  bool valid = true;
-  m_bindClass = func->isStatic();
-
-  // use $this inside a static function
-  if (m_object->isThis()) {
-    FunctionScopePtr localfunc = getFunctionScope();
-    if (localfunc->isStatic()) {
-      if (getScope()->isFirstPass()) {
-        Compiler::Error(Compiler::MissingObjectContext, self);
-      }
-      valid = false;
-    }
-  }
-
-  // invoke() will return Variant
-  if (cls->isInterface() ||
-      (func->isVirtual() &&
-       (!Option::WholeProgram || func->isAbstract() ||
-        (func->hasOverride() && cls->getAttribute(ClassScope::NotFinal))) &&
-       !func->isPerfectVirtual())) {
-    valid = false;
-  }
-
-  if (!valid) {
-    setInvokeParams(ar);
-    checkTypesImpl(ar, type, Type::Variant, coerce);
-    m_valid = false; // so we use invoke() syntax
-    if (!Option::AllDynamic) {
-      func->setDynamic();
-    }
-    assert(m_actualType);
-    return m_actualType;
-  }
-
-  assert(func);
-  return checkParamsAndReturn(ar, type, coerce, func, false);
+  cg.printPropertyHeader("sourceLocation");
+  cg.printLocation(this->getLocation());
+  cg.printObjectFooter();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

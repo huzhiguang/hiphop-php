@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,6 +20,7 @@
 #include "hphp/compiler/analysis/code_error.h"
 #include "hphp/compiler/analysis/file_scope.h"
 #include "hphp/compiler/statement/statement_list.h"
+#include "hphp/compiler/code_model_enums.h"
 #include "hphp/compiler/option.h"
 #include "hphp/compiler/expression/expression_list.h"
 #include "hphp/compiler/analysis/function_scope.h"
@@ -76,6 +77,9 @@ inline void UnaryOpExpression::ctorInit() {
     m_localEffects = CreateEffect;
     break;
   case T_ARRAY:
+  case T_VARRAY:
+  case T_MIARRAY:
+  case T_MSARRAY:
   default:
     break;
   }
@@ -114,6 +118,9 @@ bool UnaryOpExpression::isTemporary() const {
   case '-':
   case '~':
   case T_ARRAY:
+  case T_VARRAY:
+  case T_MIARRAY:
+  case T_MSARRAY:
     return true;
   }
   return false;
@@ -178,6 +185,9 @@ bool UnaryOpExpression::containsDynamicConstant(AnalysisResultPtr ar) const {
   case '+':
   case '-':
   case T_ARRAY:
+  case T_VARRAY:
+  case T_MIARRAY:
+  case T_MSARRAY:
     return m_exp && m_exp->containsDynamicConstant(ar);
   default:
     break;
@@ -221,19 +231,22 @@ void UnaryOpExpression::analyzeProgram(AnalysisResultPtr ar) {
   }
 }
 
-bool UnaryOpExpression::preCompute(CVarRef value, Variant &result) {
+bool UnaryOpExpression::preCompute(const Variant& value, Variant &result) {
   bool ret = true;
   try {
     g_context->setThrowAllErrors(true);
+    auto add = RuntimeOption::IntsOverflowToInts ? cellAdd : cellAddO;
+    auto sub = RuntimeOption::IntsOverflowToInts ? cellSub : cellSubO;
+
     switch(m_op) {
       case '!':
         result = (!toBoolean(value)); break;
       case '+':
-        cellSet(cellAdd(make_tv<KindOfInt64>(0), *value.asCell()),
+        cellSet(add(make_tv<KindOfInt64>(0), *value.asCell()),
                 *result.asCell());
         break;
       case '-':
-        cellSet(cellSub(make_tv<KindOfInt64>(0), *value.asCell()),
+        cellSet(sub(make_tv<KindOfInt64>(0), *value.asCell()),
                 *result.asCell());
         break;
       case '~':
@@ -343,6 +356,9 @@ ExpressionPtr UnaryOpExpression::preOptimize(AnalysisResultConstPtr ar) {
       return replaceValue(makeScalarExpression(ar, result));
     }
   } else if (m_op != T_ARRAY &&
+             m_op != T_VARRAY &&
+             m_op != T_MIARRAY &&
+             m_op != T_MSARRAY &&
              m_exp &&
              m_exp->isScalar() &&
              m_exp->getScalarValue(value) &&
@@ -389,41 +405,6 @@ ExpressionPtr UnaryOpExpression::preOptimize(AnalysisResultConstPtr ar) {
   return ExpressionPtr();
 }
 
-ExpressionPtr UnaryOpExpression::postOptimize(AnalysisResultConstPtr ar) {
-  if (m_op == T_PRINT && m_exp->is(KindOfEncapsListExpression) &&
-      !m_exp->hasEffect()) {
-    EncapsListExpressionPtr e = static_pointer_cast<EncapsListExpression>
-      (m_exp);
-    e->stripConcat();
-  }
-
-  if (m_op == T_UNSET_CAST && !hasEffect()) {
-    if (!getScope()->getVariables()->
-        getAttribute(VariableTable::ContainsCompact) ||
-        !m_exp->isScalar()) {
-      return CONSTANT("null");
-    }
-  } else if (m_op == T_UNSET && m_exp->is(KindOfExpressionList) &&
-             !static_pointer_cast<ExpressionList>(m_exp)->getCount()) {
-    recomputeEffects();
-    return CONSTANT("null");
-  } else if (m_op == T_BOOL_CAST) {
-    if (m_exp->getActualType() &&
-        m_exp->getActualType()->is(Type::KindOfBoolean)) {
-      return replaceValue(m_exp);
-    }
-  } else if (m_op != T_ARRAY &&
-             m_exp &&
-             m_exp->isScalar()) {
-    Variant value;
-    Variant result;
-    if (m_exp->getScalarValue(value) && preCompute(value, result)) {
-      return replaceValue(makeScalarExpression(ar, result));
-    }
-  }
-  return ExpressionPtr();
-}
-
 void UnaryOpExpression::setExistContext() {
   if (m_exp) {
     if (m_exp->is(Expression::KindOfExpressionList)) {
@@ -440,120 +421,6 @@ void UnaryOpExpression::setExistContext() {
   }
 }
 
-TypePtr UnaryOpExpression::inferTypes(AnalysisResultPtr ar, TypePtr type,
-                                      bool coerce) {
-  TypePtr et; // expected m_exp's type
-  TypePtr rt; // return type
-
-  switch (m_op) {
-  case '!':             et = rt = Type::Boolean;                     break;
-  case '+':
-  case '-':             et = Type::Numeric; rt = Type::Numeric;      break;
-  case T_INC:
-  case T_DEC:
-  case '~':             et = rt = Type::Primitive;                   break;
-  case T_CLONE:         et = Type::Some;      rt = Type::Object;     break;
-  case '@':             et = type;            rt = Type::Variant;    break;
-  case T_INT_CAST:      et = rt = Type::Int64;                       break;
-  case T_DOUBLE_CAST:   et = rt = Type::Double;                      break;
-  case T_STRING_CAST:   et = rt = Type::String;                      break;
-  case T_ARRAY:         et = Type::Some;      rt = Type::Array;      break;
-  case T_ARRAY_CAST:    et = rt = Type::Array;                       break;
-  case T_OBJECT_CAST:   et = rt = Type::Object;                      break;
-  case T_BOOL_CAST:     et = rt = Type::Boolean;                     break;
-  case T_UNSET_CAST:    et = Type::Some;      rt = Type::Variant;    break;
-  case T_UNSET:         et = Type::Null;      rt = Type::Variant;    break;
-  case T_EXIT:          et = Type::Primitive; rt = Type::Variant;    break;
-  case T_PRINT:         et = Type::String;    rt = Type::Int64;      break;
-  case T_ISSET:         et = Type::Variant;   rt = Type::Boolean;
-    setExistContext();
-    break;
-  case T_EMPTY:         et = Type::Some;      rt = Type::Boolean;
-    setExistContext();
-    break;
-  case T_INCLUDE:
-  case T_INCLUDE_ONCE:
-  case T_REQUIRE:
-  case T_REQUIRE_ONCE:  et = Type::String;    rt = Type::Variant;    break;
-  case T_EVAL:
-    et = Type::String;
-    rt = Type::Any;
-    getScope()->getVariables()->forceVariants(ar, VariableTable::AnyVars);
-    break;
-  case T_DIR:
-  case T_FILE:          et = rt = Type::String;                      break;
-  default:
-    assert(false);
-  }
-
-  if (m_exp) {
-    TypePtr expType = m_exp->inferAndCheck(ar, et, false);
-    if (Type::SameType(expType, Type::String) &&
-        (m_op == T_INC || m_op == T_DEC)) {
-      rt = expType = m_exp->inferAndCheck(ar, Type::Variant, true);
-    }
-
-    switch (m_op) {
-    case '+':
-    case '-':
-      if (Type::SameType(expType, Type::Int64) ||
-          Type::SameType(expType, Type::Double)) {
-        rt = expType;
-      }
-      break;
-    case T_INC:
-    case T_DEC:
-    case '~':
-      if (Type::SameType(expType, Type::Int64) ||
-          Type::SameType(expType, Type::Double) ||
-          Type::SameType(expType, Type::String)) {
-        rt = expType;
-      }
-      break;
-    case T_ISSET:
-    case T_EMPTY:
-      if (m_exp->is(Expression::KindOfExpressionList)) {
-        ExpressionListPtr exps =
-          dynamic_pointer_cast<ExpressionList>(m_exp);
-        if (exps->getListKind() == ExpressionList::ListKindParam) {
-          for (int i = 0; i < exps->getCount(); i++) {
-            SetExpTypeForExistsContext(ar, (*exps)[i], m_op == T_EMPTY);
-          }
-        }
-      } else {
-        SetExpTypeForExistsContext(ar, m_exp, m_op == T_EMPTY);
-      }
-      break;
-    default:
-      break;
-    }
-  }
-
-  return rt;
-}
-
-void UnaryOpExpression::SetExpTypeForExistsContext(AnalysisResultPtr ar,
-                                                   ExpressionPtr e,
-                                                   bool allowPrimitives) {
-  if (!e) return;
-  TypePtr at(e->getActualType());
-  if (!allowPrimitives && at &&
-      at->isExactType() && at->isPrimitive()) {
-    at = e->inferAndCheck(ar, Type::Variant, true);
-  }
-  TypePtr it(e->getImplementedType());
-  TypePtr et(e->getExpectedType());
-  if (et && et->is(Type::KindOfVoid)) e->setExpectedType(TypePtr());
-  if (at && (!it || Type::IsMappedToVariant(it)) &&
-      ((allowPrimitives && Type::HasFastCastMethod(at)) ||
-       (!allowPrimitives &&
-        (at->is(Type::KindOfObject) ||
-         at->is(Type::KindOfArray) ||
-         at->is(Type::KindOfString))))) {
-    e->setExpectedType(it ? at : TypePtr());
-  }
-}
-
 ExpressionPtr UnaryOpExpression::unneededHelper() {
   if ((m_op != '@' && m_op != T_ISSET && m_op != T_EMPTY) ||
       !m_exp->getContainedEffects()) {
@@ -565,6 +432,117 @@ ExpressionPtr UnaryOpExpression::unneededHelper() {
   }
 
   return static_pointer_cast<Expression>(shared_from_this());
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void UnaryOpExpression::outputCodeModel(CodeGenerator &cg) {
+  auto numProps = m_exp == nullptr ? 2 : 3;
+  switch (m_op) {
+    case T_UNSET:
+    case T_EXIT:
+    case T_ARRAY:
+    case T_VARRAY:
+    case T_MIARRAY:
+    case T_MSARRAY:
+    case T_ISSET:
+    case T_EMPTY:
+    case T_EVAL: {
+      cg.printObjectHeader("SimpleFunctionCallExpression", numProps);
+      std::string funcName;
+      switch (m_op) {
+        case T_UNSET: funcName = "unset"; break;
+        case T_EXIT: funcName = "exit"; break;
+        case T_ARRAY: funcName = "array"; break;
+        case T_VARRAY: funcName = "varray"; break;
+        case T_MIARRAY: funcName = "miarray"; break;
+        case T_MSARRAY: funcName = "msarray"; break;
+        case T_ISSET: funcName = "isset"; break;
+        case T_EMPTY: funcName = "empty"; break;
+        case T_EVAL: funcName = "eval"; break;
+        default: break;
+      }
+      cg.printPropertyHeader("functionName");
+      cg.printValue(funcName);
+      if (m_exp != nullptr) {
+        cg.printPropertyHeader("arguments");
+        cg.printExpressionVector(m_exp);
+      }
+      cg.printPropertyHeader("sourceLocation");
+      cg.printLocation(this->getLocation());
+      cg.printObjectFooter();
+      return;
+    }
+    default:
+      break;
+  }
+
+  switch (m_op) {
+    case T_FILE:
+    case T_DIR:
+    case T_CLASS:
+    case T_FUNCTION: {
+      cg.printObjectHeader("SimpleConstantExpression", 2);
+      std::string varName;
+      switch (m_op) {
+        case T_FILE: varName = "__FILE__"; break;
+        case T_DIR: varName = "__DIR__"; break;
+        //case T_CLASS: varName = "class"; break;
+        //case T_FUNCTION: varName = "function"; break;
+        default:
+          assert(false); //fishing expedition. Are these cases dead?
+          break;
+      }
+      cg.printPropertyHeader("constantName");
+      cg.printValue(varName);
+      cg.printPropertyHeader("sourceLocation");
+      cg.printLocation(this->getLocation());
+      cg.printObjectFooter();
+      return;
+    }
+    default:
+      break;
+  }
+
+  cg.printObjectHeader("UnaryOpExpression", numProps);
+  if (m_exp != nullptr) {
+    cg.printPropertyHeader("expression");
+    m_exp->outputCodeModel(cg);
+  }
+  cg.printPropertyHeader("operation");
+  int op = 0;
+  switch (m_op) {
+    case T_CLONE: op = PHP_CLONE_OP; break;
+    case T_INC:
+      op = m_front ? PHP_PRE_INCREMENT_OP : PHP_POST_INCREMENT_OP;
+      break;
+    case T_DEC:
+      op = m_front ? PHP_PRE_DECREMENT_OP : PHP_POST_DECREMENT_OP;
+      break;
+    case '+': op = PHP_PLUS_OP; break;
+    case '-': op = PHP_MINUS_OP; break;
+    case '!': op = PHP_NOT_OP;  break;
+    case '~': op = PHP_BITWISE_NOT_OP; break;
+    case T_INT_CAST: op = PHP_INT_CAST_OP; break;
+    case T_DOUBLE_CAST: op = PHP_FLOAT_CAST_OP; break;
+    case T_STRING_CAST: op = PHP_STRING_CAST_OP; break;
+    case T_ARRAY_CAST: op = PHP_ARRAY_CAST_OP; break;
+    case T_OBJECT_CAST: op = PHP_OBJECT_CAST_OP; break;
+    case T_BOOL_CAST: op = PHP_BOOL_CAST_OP; break;
+    case T_UNSET_CAST: op = PHP_UNSET_CAST_OP; break;
+    case '@': op = PHP_ERROR_CONTROL_OP; break;
+    case T_PRINT: op = PHP_PRINT_OP; break;
+    case T_INCLUDE: op = PHP_INCLUDE_OP; break;
+    case T_INCLUDE_ONCE: op = PHP_INCLUDE_ONCE_OP; break;
+    case T_REQUIRE: op = PHP_REQUIRE_OP; break;
+    case T_REQUIRE_ONCE: op = PHP_REQUIRE_ONCE_OP; break;
+    default:
+      assert(false);
+  }
+  cg.printValue(op);
+  cg.printPropertyHeader("sourceLocation");
+  cg.printLocation(this->getLocation());
+  cg.printObjectFooter();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -591,6 +569,9 @@ void UnaryOpExpression::outputPHP(CodeGenerator &cg, AnalysisResultPtr ar) {
     case T_EXIT:          cg_printf("exit(");         break;
     case '@':             cg_printf("@");             break;
     case T_ARRAY:         cg_printf("array(");        break;
+    case T_VARRAY:        cg_printf("varray(");       break;
+    case T_MIARRAY:       cg_printf("miarray(");      break;
+    case T_MSARRAY:       cg_printf("msarray(");      break;
     case T_PRINT:         cg_printf("print ");        break;
     case T_ISSET:         cg_printf("isset(");        break;
     case T_EMPTY:         cg_printf("empty(");        break;
@@ -615,6 +596,9 @@ void UnaryOpExpression::outputPHP(CodeGenerator &cg, AnalysisResultPtr ar) {
     case T_UNSET:
     case T_EXIT:
     case T_ARRAY:
+    case T_VARRAY:
+    case T_MIARRAY:
+    case T_MSARRAY:
     case T_ISSET:
     case T_EMPTY:
     case T_EVAL:          cg_printf(")");  break;

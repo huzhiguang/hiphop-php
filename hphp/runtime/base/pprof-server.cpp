@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,11 +18,13 @@
 #include "hphp/util/current-executable.h"
 #include "hphp/util/logger.h"
 
-#include "folly/Format.h"
-#include "folly/Conv.h"
+#include <folly/Format.h>
+#include <folly/Conv.h>
 
 #include <mutex>
 #include <condition_variable>
+#include <memory>
+#include <vector>
 
 namespace HPHP {
 
@@ -48,8 +50,9 @@ void HeapProfileRequestHandler::handleRequest(Transport *transport) {
   } else if (!strcmp(url, "pprof/heap")) {
     // the next thing pprof does is hit this endpoint and get a profile
     // dump
-    ProfileDump dump = ProfileController::waitForProfile();
-    transport->sendString(dump.toPProfFormat(), 200);
+    ProfileController::waitForProfile([&](const ProfileDump& dump) {
+      transport->sendString(dump.toPProfFormat(), 200);
+    });
   } else if (!strcmp(url, "pprof/symbol")) {
     // lastly, pprof hits this endpoint three times. the first time, it
     // hits with a HEAD request, which gives it some knowledge as to the
@@ -77,9 +80,11 @@ void HeapProfileRequestHandler::handleRequest(Transport *transport) {
         // for each address we get from pprof, it expects a line formatted
         // like the following
         // <address>\t<symbol name>
-        SrcKey sk = SrcKey::fromAtomicInt(
-          static_cast<uint64_t>(std::stoll(addr.data(), 0, 16))
-        );
+        if (!addr.size()) {
+          continue;
+        }
+        std::string val(addr.data(), addr.size());
+        SrcKey sk = SrcKey::fromAtomicInt(std::stoull(val, 0, 16));
         folly::toAppend(addr, "\t", sk.getSymbol(), "\n", &res);
       }
       transport->sendString(res, 200);
@@ -105,6 +110,10 @@ void HeapProfileRequestHandler::handleRequest(Transport *transport) {
   }
 }
 
+void HeapProfileRequestHandler::abortRequest(Transport *transport) {
+  transport->sendString("Service Unavailable", 503);
+}
+
 // static
 void HeapProfileServer::waitForPProf() {
   std::unique_lock<std::mutex> lock(s_clientMutex);
@@ -116,18 +125,36 @@ bool HeapProfileRequestHandler::handleStartRequest(Transport *transport) {
   // this endpoint is used to start profiling. if there is no profile
   // in progess, we start profiling, otherwise we error out
   std::string requestType = transport->getParam("type");
+  std::string profileType = transport->getParam("profileType");
+  ProfileType pt;
+
+  if (profileType == "" || profileType == "default") {
+    pt = ProfileType::Default;
+  } else if (profileType == "heap") {
+    pt = ProfileType::Heap;
+  } else if (profileType == "allocation") {
+    pt = ProfileType::Allocation;
+  } else {
+    // what are they even trying to do???
+    Logger::Warning(folly::format(
+      "Bad request received at HHProf start endpoint, profile type was: {}",
+      profileType
+    ).str());
+    return false;
+  }
+
   if (requestType == "" || requestType == "next") {
     // profile the next request, which is also the default
     // if a url was supplied, use that
     std::string url = transport->getParam("url");
     if (url == "") {
-      return ProfileController::requestNext();
+      return ProfileController::requestNext(pt);
     } else {
-      return ProfileController::requestNextURL(url);
+      return ProfileController::requestNextURL(pt, url);
     }
   } else if (requestType == "global") {
     // profile all requests until pprof attacks
-    return ProfileController::requestGlobal();
+    return ProfileController::requestGlobal(pt);
   } else {
     // what are they even trying to do???
     Logger::Warning(folly::format(
@@ -138,6 +165,6 @@ bool HeapProfileRequestHandler::handleStartRequest(Transport *transport) {
   }
 }
 
-HeapProfileServerPtr HeapProfileServer::Server;
+std::shared_ptr<HeapProfileServer> HeapProfileServer::Server;
 
 }

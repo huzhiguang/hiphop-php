@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,30 +16,37 @@
 #ifndef incl_HPHP_HHIR_OPT_H_
 #define incl_HPHP_HHIR_OPT_H_
 
-namespace HPHP {  namespace JIT {
+#include "hphp/runtime/vm/jit/types.h"
+
+namespace HPHP { namespace jit {
 
 //////////////////////////////////////////////////////////////////////
 
-class IRTrace;
-class TraceBuilder;
-class IRFactory;
-class IRInstruction;
+struct IRBuilder;
+struct IRUnit;
+struct IRInstruction;
+struct FrameStateMgr;
 
 //////////////////////////////////////////////////////////////////////
 
 /*
  * The main optimization passes, in the order they run.
  */
-void optimizeMemoryAccesses(IRTrace*, IRFactory&);
-void optimizePredictions(IRTrace*, IRFactory&);
-void optimizeJumps(IRTrace*, IRFactory&);
-void eliminateUnconditionalJump(IRTrace*);
-void eliminateDeadCode(IRTrace*, IRFactory&);
+void optimizeRefcounts(IRUnit&, FrameStateMgr&&);
+void optimizePredictions(IRUnit&);
+void optimizeLoads(IRUnit&);
+void optimizeStores(IRUnit&);
+void optimizeJumps(IRUnit&);
+
+/*
+ * DCE runs in between various passes.
+ */
+void eliminateDeadCode(IRUnit&);
 
 /*
  * Run all the optimization passes.
  */
-void optimizeTrace(IRTrace*, TraceBuilder&);
+void optimize(IRUnit& unit, IRBuilder& builder, TransKind kind);
 
 //////////////////////////////////////////////////////////////////////
 

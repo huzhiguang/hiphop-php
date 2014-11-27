@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,7 +21,6 @@
 #include "hphp/runtime/base/string-buffer.h"
 #include "hphp/runtime/base/smart-containers.h"
 #include "hphp/runtime/vm/class.h"
-#include "hphp/runtime/vm/unit.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -61,12 +60,12 @@ public:
   /**
    * Top level entry function called by f_ functions.
    */
-  String serialize(CVarRef v, bool ret);
-  String serializeValue(CVarRef v, bool limit);
+  String serialize(const Variant& v, bool ret, bool keepCount = false);
+  String serializeValue(const Variant& v, bool limit);
 
   // Serialize with limit size of output, always return the serialized string.
   // It does not work with Serialize, JSON, APCSerialize, DebuggerSerialize.
-  String serializeWithLimit(CVarRef v, int limit);
+  String serializeWithLimit(const Variant& v, int limit);
 
   /**
    * Type specialized output functions.
@@ -77,10 +76,13 @@ public:
   void write(int     v) { write((int64_t)v);}
   void write(int64_t   v);
   void write(double  v);
-  void write(const char *v, int len = -1, bool isArrayKey = false);
-  void write(CStrRef v);
-  void write(CObjRef v);
-  void write(CVarRef v, bool isArrayKey = false);
+
+  void write(const char *v, int len = -1, bool isArrayKey = false,
+             bool noQuotes = false);
+
+  void write(const String& v);
+  void write(const Object& v);
+  void write(const Variant& v, bool isArrayKey = false);
 
   void writeNull();
   // what to write if recursive level is over limit?
@@ -89,24 +91,26 @@ public:
 
   void writeArrayHeader(int size, bool isVectorData);
   void writeArrayKey(Variant key);
-  void writeArrayValue(CVarRef value);
-  void writeCollectionKey(CVarRef key);
+  void writeArrayValue(const Variant& value);
+  void writeCollectionKey(const Variant& key);
   void writeCollectionKeylessPrefix();
   void writeArrayFooter();
-  void writeSerializableObject(CStrRef clsname, CStrRef serialized);
+  void writeSerializableObject(const String& clsname, const String& serialized);
 
   /**
    * Helpers.
    */
   void indent();
+  void setDepthLimit(size_t depthLimit) { m_maxDepth = depthLimit; }
   void setReferenced(bool referenced) { m_referenced = referenced;}
   void setRefCount(int count) { m_refCount = count;}
   void incMaxCount() { m_maxCount++; }
   bool incNestedLevel(void *ptr, bool isObject = false);
   void decNestedLevel(void *ptr);
-  void setObjectInfo(CStrRef objClass, int objId, char objCode);
-  void setResourceInfo(CStrRef rsrcName, int rsrcId);
-  void getResourceInfo(String &rsrcName, int &rsrcId);
+  void pushObjectInfo(const String& objClass, int objId, char objCode);
+  void popObjectInfo();
+  void pushResourceInfo(const String& rsrcName, int rsrcId);
+  void popResourceInfo();
   Type getType() const { return m_type; }
 
 private:
@@ -128,16 +132,31 @@ private:
   int m_maxCount;                // for max recursive levels
   int m_levelDebugger;           // keep track of levels for DebuggerSerialize
   int m_maxLevelDebugger;        // for max level of DebuggerSerialize
+  size_t m_currentDepth;         // current depth (nasted objects/arrays)
+  size_t m_maxDepth;             // max depth limit before an error (0 -> none)
 
   struct ArrayInfo {
     bool is_object;     // nested arrays or objects
     bool is_vector;     // whether current array is a vector
     bool first_element; // whether this is first array element
     int  indent_delta;  // the extra indent to serialize this object
+    int  size;          // the number of elements in the array
   };
   smart::vector<ArrayInfo> m_arrayInfos;
 
-  void writePropertyKey(CStrRef prop);
+  struct ObjectInfo {
+    String objClass;
+    int    objId;
+    char   objCode;
+    String rsrcName;
+    int    rsrcId;
+  };
+  smart::vector<ObjectInfo> m_objectInfos;
+
+  // The func parameter will be invoked only if there is no overflow.
+  // Otherwise, writeOverflow will be invoked instead.
+  void preventOverflow(const Object& v, const std::function<void()>& func);
+  void writePropertyKey(const String& prop);
 };
 
 ///////////////////////////////////////////////////////////////////////////////

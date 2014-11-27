@@ -210,8 +210,8 @@ extern void *MALLOC(size_t);
 
 #if defined(IEEE_LITTLE_ENDIAN) + defined(IEEE_BIG_ENDIAN) + defined(VAX) + \
         defined(IBM) != 1
-  Exactly one of IEEE_LITTLE_ENDIAN IEEE_BIG_ENDIAN, VAX, or
-  IBM should be defined.
+#error Exactly one of IEEE_LITTLE_ENDIAN, IEEE_BIG_ENDIAN, VAX, or IBM \
+       should be defined.
 #endif
 
   typedef union {
@@ -367,7 +367,7 @@ struct Bigint {
 
 typedef struct Bigint Bigint;
 
-void destroy_freelist(void);
+void destroy_freelist(Bigint** freelist);
 
 class BigintData {
 public:
@@ -375,7 +375,7 @@ public:
     freelist = (Bigint **)calloc(Kmax + 1, sizeof(Bigint *));
   }
   ~BigintData() {
-    destroy_freelist();
+    destroy_freelist(freelist);
     free(freelist);
   }
 
@@ -1264,12 +1264,11 @@ static int quorem(Bigint *b, Bigint *S)
   return q;
 }
 
-void destroy_freelist(void)
+void destroy_freelist(Bigint** freelist)
 {
   int i;
   Bigint *tmp;
 
-  Bigint **&freelist = s_bigint_data->freelist;
   for (i = 0; i <= Kmax; i++) {
     Bigint **listp = &freelist[i];
     while ((tmp = *listp) != nullptr) {
@@ -2464,6 +2463,9 @@ ret:
     *se = (char *)s;
   result = sign ? -value(rv) : value(rv);
 
+  if (s_bigint_data.isNull()) {
+    return result;
+  }
   Bigint *&p5s = s_bigint_data->p5s;
   while (p5s) {
     tmp = p5s;
@@ -2529,6 +2531,49 @@ double zend_oct_strtod(const char *str, const char **endptr)
   }
 
   if (endptr != nullptr) {
+    *endptr = (char *)(any ? s - 1 : str);
+  }
+
+  return value;
+}
+
+double zend_bin_strtod(const char *str, const char **endptr)
+{
+  const char *s = str;
+  char    c;
+  double  value = 0;
+  int     any = 0;
+
+  if (strlen(str) < 2) {
+    *endptr = str;
+    return 0.0;
+  }
+
+  if ('0' == *s && ('b' == s[1] || 'B' == s[1])) {
+    s += 2;
+  }
+
+  while ((c = *s++)) {
+    /*
+     * Verify the validity of the current character as a base-2 digit.  In
+     * the event that an invalid digit is found, halt the conversion and
+     * return the portion which has been converted thus far.
+     */
+    if ('0' == c || '1' == c)
+      value = value * 2 + c - '0';
+    else
+      break;
+
+    any = 1;
+  }
+
+  /*
+   * As with many strtoX implementations, should the subject sequence be
+   * empty or not well-formed, no conversion is performed and the original
+   * value of str is stored in *endptr, provided that endptr is not a null
+   * pointer.
+   */
+  if (nullptr != endptr) {
     *endptr = (char *)(any ? s - 1 : str);
   }
 

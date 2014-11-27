@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -51,29 +51,34 @@ void CmdEval::onClient(DebuggerClient &client) {
   m_body = client.getCode();
   m_frame = client.getFrame();
   m_bypassAccessCheck = client.getDebuggerClientBypassCheck();
-  CmdEvalPtr res =
+  auto res =
      client.xendWithNestedExecution<CmdEval>(this);
   res->handleReply(client);
   m_failed = res->m_failed;
 }
 
 void CmdEval::handleReply(DebuggerClient &client) {
+  if (this->failed() && client.unknownCmdReceived()) {
+    client.help(
+    "Notice: Attempted to interpret unknown debugger command as PHP!\n");
+  }
+
   if (!m_output.empty()) client.print(m_output);
 }
 
 // NB: unlike most other commands, the client expects that more interrupts
 // can occur while we're doing the server-side work for an eval.
 bool CmdEval::onServer(DebuggerProxy &proxy) {
-  PCFilter* locSave = g_vmContext->m_lastLocFilter;
-  g_vmContext->m_lastLocFilter = new PCFilter();
-  g_vmContext->setDebuggerBypassCheck(m_bypassAccessCheck);
+  PCFilter locSave;
+  RequestInjectionData &rid = ThreadInfo::s_threadInfo->m_reqInjectionData;
+  locSave.swap(rid.m_flowFilter);
+  g_context->debuggerSettings.bypassCheck = m_bypassAccessCheck;
   proxy.ExecutePHP(m_body, m_output, m_frame, m_failed,
                    DebuggerProxy::ExecutePHPFlagsAtInterrupt |
                    (!proxy.isLocal() ? DebuggerProxy::ExecutePHPFlagsLog :
                     DebuggerProxy::ExecutePHPFlagsNone));
-  g_vmContext->setDebuggerBypassCheck(false);
-  delete g_vmContext->m_lastLocFilter;
-  g_vmContext->m_lastLocFilter = locSave;
+  g_context->debuggerSettings.bypassCheck = false;
+  locSave.swap(rid.m_flowFilter);
   return proxy.sendToClient(this);
 }
 

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,8 +13,11 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/runtime/server/http-request-handler.h"
+
+#include <string>
+#include <vector>
+
 #include "hphp/runtime/base/program-functions.h"
 #include "hphp/runtime/base/execution-context.h"
 #include "hphp/runtime/base/runtime-option.h"
@@ -24,17 +27,23 @@
 #include "hphp/runtime/server/server-stats.h"
 #include "hphp/util/network.h"
 #include "hphp/runtime/base/preg.h"
-#include "hphp/runtime/ext/ext_function.h"
+#include "hphp/runtime/ext/std/ext_std_function.h"
 #include "hphp/runtime/server/access-log.h"
 #include "hphp/runtime/server/source-root-info.h"
 #include "hphp/runtime/server/request-uri.h"
 #include "hphp/runtime/server/http-protocol.h"
+#include "hphp/runtime/server/files-match.h"
 #include "hphp/runtime/base/datetime.h"
 #include "hphp/runtime/debugger/debugger.h"
+#include "hphp/runtime/vm/debugger-hook.h"
 #include "hphp/util/alloc.h"
 #include "hphp/util/service-data.h"
 
 namespace HPHP {
+
+using std::string;
+using std::vector;
+
 ///////////////////////////////////////////////////////////////////////////////
 
 IMPLEMENT_THREAD_LOCAL(AccessLog::ThreadData,
@@ -56,11 +65,10 @@ void HttpRequestHandler::sendStaticContent(Transport *transport,
                                            const std::string &cmd,
                                            const char *ext) {
   assert(ext);
-  assert(cmd.rfind('.') != string::npos);
+  assert(cmd.rfind('.') != std::string::npos);
   assert(strcmp(ext, cmd.c_str() + cmd.rfind('.') + 1) == 0);
 
-  hphp_string_imap<string>::const_iterator iter =
-    RuntimeOption::StaticFileExtensions.find(ext);
+  auto iter = RuntimeOption::StaticFileExtensions.find(ext);
   if (iter != RuntimeOption::StaticFileExtensions.end()) {
     string val = iter->second;
     const char *valp = val.c_str();
@@ -69,7 +77,7 @@ void HttpRequestHandler::sendStaticContent(Transport *transport,
          strcmp(valp + 5, "html")  == 0)) {
       // Apache adds character set for these two types
       val += "; charset=";
-      val += RuntimeOption::DefaultCharsetName;
+      val += IniSetting::Get("default_charset");
       valp = val.c_str();
     }
     transport->addHeader("Content-Type", valp);
@@ -110,14 +118,52 @@ void HttpRequestHandler::sendStaticContent(Transport *transport,
   transport->sendRaw((void*)data, len, 200, compressed);
 }
 
+void HttpRequestHandler::logToAccessLog(Transport* transport) {
+  GetAccessLog().onNewRequest();
+  GetAccessLog().log(transport, VirtualHost::GetCurrent());
+}
+
+void HttpRequestHandler::setupRequest(Transport* transport) {
+  MemoryManager::requestInit();
+
+  g_context.getCheck();
+  GetAccessLog().onNewRequest();
+
+  // Set current virtual host.
+  HttpProtocol::GetVirtualHost(transport);
+}
+
+void HttpRequestHandler::teardownRequest(Transport* transport) noexcept {
+  SCOPE_EXIT { always_assert(MM().empty()); };
+
+  const VirtualHost *vhost = VirtualHost::GetCurrent();
+  GetAccessLog().log(transport, vhost);
+
+  // HPHP logs may need to access data in ServerStats, so we have to clear the
+  // hashtable after writing the log entry.
+  ServerStats::Reset();
+  m_sourceRootInfo.clear();
+
+  if (is_hphp_session_initialized()) {
+    hphp_session_exit();
+  } else {
+    // Even though there are no sessions, memory is allocated to perform
+    // INI setting bindings when the thread is initialized.
+    hphp_memory_cleanup();
+  }
+
+  MemoryManager::requestShutdown();
+}
+
 void HttpRequestHandler::handleRequest(Transport *transport) {
   ExecutionProfiler ep(ThreadInfo::RuntimeFunctions);
 
   Logger::OnNewRequest();
-  GetAccessLog().onNewRequest();
   transport->enableCompression();
 
-  ServerStatsHelper ssh("all", ServerStatsHelper::TRACK_MEMORY);
+  ServerStatsHelper ssh("all",
+                        ServerStatsHelper::TRACK_MEMORY |
+                        ServerStatsHelper::TRACK_HWINST);
   Logger::Verbose("receiving %s", transport->getCommand().c_str());
 
   // will clear all extra logging when this function goes out of scope
@@ -125,11 +171,12 @@ void HttpRequestHandler::handleRequest(Transport *transport) {
   StackTraceNoHeap::AddExtraLogging("URL", transport->getUrl());
 
   // resolve virtual host
-  const VirtualHost *vhost = HttpProtocol::GetVirtualHost(transport);
+  const VirtualHost *vhost = VirtualHost::GetCurrent();
   assert(vhost);
   if (vhost->disabled() ||
       vhost->isBlocking(transport->getCommand(), transport->getRemoteHost())) {
     transport->sendString("Not Found", 404);
+    transport->onSendEnd();
     return;
   }
 
@@ -144,6 +191,7 @@ void HttpRequestHandler::handleRequest(Transport *transport) {
 
     if (gettime_diff_us(queueTime, now) > requestTimeoutSeconds * 1000000) {
       transport->sendString("Service Unavailable", 503);
+      transport->onSendEnd();
       m_requestTimedOutOnQueue->addValue(1);
       return;
     }
@@ -154,18 +202,18 @@ void HttpRequestHandler::handleRequest(Transport *transport) {
                             vhost->getName().c_str());
 
   // resolve source root
-  string host = transport->getHeader("Host");
-  SourceRootInfo sourceRootInfo(host.c_str());
-
-  if (sourceRootInfo.error()) {
-    sourceRootInfo.handleError(transport);
+  always_assert(!m_sourceRootInfo.hasValue());
+  m_sourceRootInfo.emplace(transport);
+  if (m_sourceRootInfo->error()) {
+    m_sourceRootInfo->handleError(transport);
     return;
   }
 
   // request URI
   string pathTranslation = m_pathTranslation ?
     vhost->getPathTranslation().c_str() : "";
-  RequestURI reqURI(vhost, transport, sourceRootInfo.path(), pathTranslation);
+  RequestURI reqURI(vhost, transport, pathTranslation,
+                    m_sourceRootInfo->path());
   if (reqURI.done()) {
     return; // already handled with redirection or 404
   }
@@ -180,6 +228,7 @@ void HttpRequestHandler::handleRequest(Transport *transport) {
 
   if (reqURI.forbidden()) {
     transport->sendString("Forbidden", 403);
+    transport->onSendEnd();
     return;
   }
 
@@ -188,31 +237,36 @@ void HttpRequestHandler::handleRequest(Transport *transport) {
      RuntimeOption::StaticFileGenerators.find(path) !=
      RuntimeOption::StaticFileGenerators.end());
 
+  // Determine which extensions should be treated as php
+  // source code. If the execution engine doesn't understand
+  // the source, the content will be spit out verbatim.
+  bool treatAsContent = ext &&
+       strcasecmp(ext, "php") != 0 &&
+       strcasecmp(ext, "hh") != 0 &&
+       (RuntimeOption::PhpFileExtensions.empty() ||
+        !RuntimeOption::PhpFileExtensions.count(ext));
+
   // If this is not a php file, check the static and dynamic content caches
-  if (ext && strcasecmp(ext, "php") != 0) {
-    if (RuntimeOption::EnableStaticContentCache) {
-      bool original = compressed;
-      // check against static content cache
-      if (StaticContentCache::TheCache.find(path, data, len, compressed)) {
-        Util::ScopedMem decompressed_data;
-        // (qigao) not calling stat at this point because the timestamp of
-        // local cache file is not valuable, maybe misleading. This way
-        // the Last-Modified header will not show in response.
-        // stat(RuntimeOption::FileCache.c_str(), &st);
-        if (!original && compressed) {
-          data = gzdecode(data, len);
-          if (data == nullptr) {
-            throw FatalErrorException("cannot unzip compressed data");
-          }
-          decompressed_data = const_cast<char*>(data);
-          compressed = false;
+  if (treatAsContent) {
+    bool original = compressed;
+    // check against static content cache
+    if (StaticContentCache::TheCache.find(path, data, len, compressed)) {
+      ScopedMem decompressed_data;
+      // (qigao) not calling stat at this point because the timestamp of
+      // local cache file is not valuable, maybe misleading. This way
+      // the Last-Modified header will not show in response.
+      // stat(RuntimeOption::FileCache.c_str(), &st);
+      if (!original && compressed) {
+        data = gzdecode(data, len);
+        if (data == nullptr) {
+          throw FatalErrorException("cannot unzip compressed data");
         }
-        sendStaticContent(transport, data, len, 0, compressed, path, ext);
-        StaticContentCache::TheFileCache->adviseOutMemory();
-        ServerStats::LogPage(path, 200);
-        GetAccessLog().log(transport, vhost);
-        return;
+        decompressed_data = const_cast<char*>(data);
+        compressed = false;
       }
+      sendStaticContent(transport, data, len, 0, compressed, path, ext);
+      ServerStats::LogPage(path, 200);
+      return;
     }
 
     if (RuntimeOption::EnableStaticContentFromDisk) {
@@ -226,7 +280,6 @@ void HttpRequestHandler::handleRequest(Transport *transport) {
           sendStaticContent(transport, sb.data(), sb.size(), st.st_mtime,
                             false, path, ext);
           ServerStats::LogPage(path, 200);
-          GetAccessLog().log(transport, vhost);
           return;
         }
       }
@@ -240,7 +293,6 @@ void HttpRequestHandler::handleRequest(Transport *transport) {
       if (DynamicContentCache::TheCache.find(key, data, len, compressed)) {
         sendStaticContent(transport, data, len, 0, compressed, path, ext);
         ServerStats::LogPage(path, 200);
-        GetAccessLog().log(transport, vhost);
         return;
       }
     }
@@ -273,24 +325,44 @@ void HttpRequestHandler::handleRequest(Transport *transport) {
 
   bool ret = false;
   try {
-    ret = executePHPRequest(transport, reqURI, sourceRootInfo,
+    ret = executePHPRequest(transport, reqURI, m_sourceRootInfo.value(),
                             cachableDynamicContent);
-  } catch (const Eval::DebuggerException &e) {
-    transport->sendString(e.what(), 200);
-    transport->onSendEnd();
-    hphp_context_exit(g_context.getNoCheck(), true, true, transport->getUrl());
   } catch (...) {
-    Logger::Error("Unhandled exception in HPHP server engine.");
+    string emsg;
+    string response;
+    int code = 500;
+    try {
+      throw;
+    } catch (const Eval::DebuggerException &e) {
+      code = 200;
+      response = e.what();
+    } catch (Object &e) {
+      try {
+        emsg = e.toString().data();
+      } catch (...) {
+        emsg = "Unknown";
+      }
+    } catch (const std::exception &e) {
+      emsg = e.what();
+    } catch (...) {
+      emsg = "Unknown";
+    }
+    g_context->onShutdownPostSend();
+    Eval::Debugger::InterruptPSPEnded(transport->getUrl());
+    if (code != 200) {
+      Logger::Error("Unhandled server exception: %s", emsg.c_str());
+    }
+    transport->sendString(response, code);
+    transport->onSendEnd();
+    hphp_context_exit();
   }
-  GetAccessLog().log(transport, vhost);
-  /*
-   * HPHP logs may need to access data in ServerStats, so we have to
-   * clear the hashtable after writing the log entry.
-   */
-  ServerStats::Reset();
-  hphp_session_exit();
-
   HttpProtocol::ClearRecord(ret, tmpfile);
+}
+
+void HttpRequestHandler::abortRequest(Transport* transport) {
+  // TODO: t5284137 add some tests for abortRequest
+  transport->sendString("Service Unavailable", 503);
+  transport->onSendEnd();
 }
 
 bool HttpRequestHandler::executePHPRequest(Transport *transport,
@@ -314,6 +386,7 @@ bool HttpRequestHandler::executePHPRequest(Transport *transport,
   {
     ServerStatsHelper ssh("input");
     HttpProtocol::PrepareSystemVariables(transport, reqURI, sourceRootInfo);
+    Extension::RequestInitModules();
 
     if (RuntimeOption::EnableDebugger) {
       Eval::DSandboxInfo sInfo = sourceRootInfo.getSandboxInfo();
@@ -327,6 +400,9 @@ bool HttpRequestHandler::executePHPRequest(Transport *transport,
   int code;
   bool ret = true;
 
+  // Let the debugger initialize.
+  // FIXME: hphpd can be initialized this way as well
+  DEBUGGER_ATTACHED_ONLY(phpDebuggerRequestInitHook());
   if (RuntimeOption::EnableDebugger) {
     Eval::Debugger::InterruptRequestStarted(transport->getUrl());
   }
@@ -336,7 +412,10 @@ bool HttpRequestHandler::executePHPRequest(Transport *transport,
   ret = hphp_invoke(context, file, false, Array(), uninit_null(),
                     RuntimeOption::RequestInitFunction,
                     RuntimeOption::RequestInitDocument,
-                    error, errorMsg);
+                    error, errorMsg,
+                    true /* once */,
+                    false /* warmupOnly */,
+                    false /* richErrorMessage */);
 
   if (ret) {
     String content = context->obDetachContents();
@@ -363,7 +442,10 @@ bool HttpRequestHandler::executePHPRequest(Transport *transport,
       ret = hphp_invoke(context, errorPage, false, Array(), uninit_null(),
                         RuntimeOption::RequestInitFunction,
                         RuntimeOption::RequestInitDocument,
-                        error, errorMsg);
+                        error, errorMsg,
+                        true /* once */,
+                        false /* warmupOnly */,
+                        false /* richErrorMessage */);
       if (ret) {
         String content = context->obDetachContents();
         transport->sendRaw((void*)content.data(), content.size());
@@ -390,8 +472,21 @@ bool HttpRequestHandler::executePHPRequest(Transport *transport,
     Eval::Debugger::InterruptRequestEnded(transport->getUrl());
   }
 
-  transport->onSendEnd();
-  hphp_context_exit(context, true, true, transport->getUrl());
+  // If we have registered post-send shutdown functions, end the request before
+  // executing them. If we don't, be compatible with Zend by allowing usercode
+  // in hphp_context_shutdown to run before we end the request.
+  bool hasPostSend =
+    context->hasShutdownFunctions(ExecutionContext::ShutdownType::PostSend);
+  if (hasPostSend) {
+    transport->onSendEnd();
+  }
+  context->onShutdownPostSend();
+  Eval::Debugger::InterruptPSPEnded(transport->getUrl());
+  hphp_context_shutdown();
+  if (!hasPostSend) {
+    transport->onSendEnd();
+  }
+  hphp_context_exit(false);
   ServerStats::LogPage(file, code);
   return ret;
 }

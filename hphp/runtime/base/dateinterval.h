@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -23,6 +23,7 @@
 
 extern "C" {
 #include <timelib.h>
+#include <memory>
 }
 
 /**
@@ -44,19 +45,19 @@ extern "C" {
 # define TIMELIB_REL_DAYS_SET(rel, val)
 inline timelib_rel_time* timelib_rel_time_clone(timelib_rel_time* t) {
   timelib_rel_time *ret = (timelib_rel_time*)
-          HPHP::Util::safe_malloc(sizeof(timelib_rel_time));
+          HPHP::safe_malloc(sizeof(timelib_rel_time));
   memcpy(ret, t, sizeof(timelib_rel_time));
   return ret;
 }
 inline void timelib_rel_time_dtor(timelib_rel_time *t) {
-  HPHP::Util::safe_free(t);
+  HPHP::safe_free(t);
 }
 #endif /* TIMELIB_HAVE_INTERVAL */
 
 namespace HPHP {
 
 ///////////////////////////////////////////////////////////////////////////////
-typedef boost::shared_ptr<timelib_rel_time> DateIntervalPtr;
+typedef std::shared_ptr<timelib_rel_time> DateIntervalPtr;
 
 /**
  * Handles all date interal related functions.
@@ -64,11 +65,14 @@ typedef boost::shared_ptr<timelib_rel_time> DateIntervalPtr;
 class DateInterval : public SweepableResourceData {
 public:
   DECLARE_RESOURCE_ALLOCATION(DateInterval);
-  static StaticString s_class_name;
-  CStrRef o_getClassNameHook() const { return s_class_name; }
+  static const StaticString& classnameof() {
+    static const StaticString result("DateInterval");
+    return result;
+  }
+  const String& o_getClassNameHook() const { return classnameof(); }
 
   DateInterval();
-  explicit DateInterval(CStrRef date_interval, bool date_string = false);
+  explicit DateInterval(const String& date_interval, bool date_string = false);
   explicit DateInterval(timelib_rel_time *di);
 
   int64_t getYears()      const    { return m_di->y;                      }
@@ -94,9 +98,9 @@ public:
     if (isValid()) TIMELIB_REL_DAYS_SET(m_di, value);
   }
 
-  bool setDateString(CStrRef date_string);
-  bool setInterval(CStrRef date_interval);
-  String format(CStrRef format_spec);
+  bool setDateString(const String& date_string);
+  bool setInterval(const String& date_interval);
+  String format(const String& format_spec);
 
   bool isValid() const { return get(); }
   SmartResource<DateInterval> cloneDateInterval() const;

@@ -11,38 +11,23 @@
  *   r9  / x5:  uint8_t* targetCacheBase
  */
 
-#ifndef __APPLE__
-#define CFI(x)         .cfi_##x
-#define CFI2(x, y)     .cfi_##x y
-#define CFI3C(x, y, z) .cfi_##x y##, z
-#define ETCH_ALIGNMENT .align 16
-#define ETCH_SECTION   .section .text
-#define ETCH_NAME(x)   x
-#define ETCH_LABEL(x)  .L##x
-#else
-#define CFI(x)         /* not used on OSX */
-#define CFI2(x, y)     /* not used on OSX */
-#define CFI3C(x, y, z) /* not used on OSX */
-#define ETCH_ALIGNMENT .align 4 // on OSX this is 2^value
-#define ETCH_SECTION   .section .text,
-#define ETCH_NAME(x)   _##x
-#define ETCH_LABEL(x)  .L##_##x
-#endif
+#include "hphp/runtime/vm/jit/reserved-stack.h"
+#include "hphp/runtime/vm/jit/etch-helpers.h"
 
 ///////////////////////////////////////////////////////////////////////////////
 #if defined(__x86_64__)
   .byte 0
-  ETCH_ALIGNMENT
-  ETCH_SECTION
+  ETCH_ALIGN16
+  ETCH_SECTION(enterTCHelper)
   .globl ETCH_NAME(enterTCHelper)
-ETCH_NAME(enterTCHelper:)
+ETCH_NAME(enterTCHelper):
   // Prologue
   CFI(startproc)             // amongst other things, cfa reg is now rsp, and offset is 8
   push %rbp
   CFI2(adjust_cfa_offset, 8) // cfa is now 8 bytes further from rsp than it was before
   CFI3C(offset, rbp, -16)    // Where to find previous value of rbp, relative to cfa
 
-  // Set firstAR->m_savedRbp to point to this frame.
+  // Set firstAR->m_sfp to point to this frame.
   mov %rsp, (%r8)
 
   // Save infoPtr
@@ -63,8 +48,8 @@ ETCH_NAME(enterTCHelper:)
    * 16-byte aligned.
    */
 
-  sub $0x280, %rsp // kReservedRSPScratchSpace
-  CFI2(adjust_cfa_offset, 0x280)
+  sub $RESERVED_STACK_TOTAL_SPACE, %rsp
+  CFI2(adjust_cfa_offset, RESERVED_STACK_TOTAL_SPACE)
 
   /*
    * If returning from a BIND_CALL request, push the return IP saved
@@ -77,12 +62,23 @@ ETCH_NAME(enterTCHelper:)
   push %rax
   push 0x8(%r15)
   jmp *%rdx
-ETCH_LABEL(enterTCHelper$jumpToTC:)
+ETCH_LABEL(enterTCHelper$jumpToTC):
   call *%rdx
-ETCH_LABEL(enterTCHelper$serviceReqLabel:)
+ETCH_LABEL(enterTCHelper$serviceReqLabel):
 
-  add $0x280, %rsp // kReservedRSPScratchSpace
-  CFI2(adjust_cfa_offset, -0x280)
+  /*
+   * enterTCServiceReq is never called directly; this exists to give the jit
+   * access to the address of the expected return address while in the TC.
+   */
+  .globl ETCH_NAME(enterTCServiceReq)
+  ETCH_NAME(enterTCServiceReq):
+  /*
+   * Eager vm-reg save. Must match values in rds-header.h
+   */
+  mov %rbx, 16(%r12)
+  mov %rbp, 32(%r12)
+  add $RESERVED_STACK_TOTAL_SPACE, %rsp
+  CFI2(adjust_cfa_offset, -RESERVED_STACK_TOTAL_SPACE)
   // Restore infoPtr into %rbx
   pop %rbx
   CFI2(adjust_cfa_offset, -8)
@@ -95,9 +91,16 @@ ETCH_LABEL(enterTCHelper$serviceReqLabel:)
   pop %rbp
   CFI2(restore, rbp)
   CFI2(adjust_cfa_offset, -8)
+
+  /*
+   * Like enterTCServiceReq, this is never called directly, but we need
+   * access to its address.
+   */
+  .globl ETCH_NAME(enterTCReturn)
+  ETCH_NAME(enterTCReturn):
   ret
 
-ETCH_LABEL(enterTCHelper$copyReqArgs:)
+ETCH_LABEL(enterTCHelper$copyReqArgs):
   CFI(restore_state)
   mov %rsi, 0x8(%rbx)
   mov %rdx, 0x10(%rbx)
@@ -117,10 +120,13 @@ ETCH_LABEL(enterTCHelper$copyReqArgs:)
   CFI2(adjust_cfa_offset, -8)
   ret
   CFI(endproc)
+  ETCH_SIZE(enterTCHelper)
 ///////////////////////////////////////////////////////////////////////////////
 #elif defined(__AARCH64EL__)
   .globl enterTCHelper
 enterTCHelper:
+  .globl enterTCServiceReq
+enterTCServiceReq:
   brk 0
 
 #endif

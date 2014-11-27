@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,24 +17,28 @@
 #ifndef incl_HPHP_SERVERSTATS_H_
 #define incl_HPHP_SERVERSTATS_H_
 
+#include <set>
+
+#if defined(__CYGWIN__) && defined(WIN32)
+#undef WIN32
+#endif
+
+#include <curl/curl.h>
+#include <time.h>
+
+#include "hphp/util/health-monitor-types.h"
 #include "hphp/util/lock.h"
 #include "hphp/util/thread-local.h"
-#include "curl/curl.h"
-#include <time.h>
 #include "hphp/runtime/base/shared-string.h"
 #include "hphp/runtime/base/types.h"
+#include "hphp/runtime/base/execution-profiler.h"
+#include "hphp/runtime/server/writer.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 class ServerStats {
 public:
-  enum class Format {
-    XML,
-    JSON,
-    KVP,
-    HTML
-  };
 
   enum class ThreadMode {
     Idling,
@@ -50,7 +54,8 @@ public:
   static void Reset();
   static void Clear();
   static void GetKeys(std::string &out, int64_t from, int64_t to);
-  static void Report(std::string &out, Format format, int64_t from, int64_t to,
+  static void Report(std::string &out, Writer::Format format,
+                     int64_t from, int64_t to,
                      const std::string &agg, const std::string &keys,
                      const std::string &url, int code,
                      const std::string &prefix);
@@ -60,7 +65,9 @@ public:
   static void StartRequest(const char *url, const char *clientIP,
                            const char *vhost);
   static void SetThreadMode(ThreadMode mode);
-  static void ReportStatus(std::string &out, Format format);
+  static void ReportStatus(std::string &out, Writer::Format format);
+
+  static void SetServerHealthLevel(HealthLevel new_health_level);
 
   // io status functions
   static void SetThreadIOStatusAddress(const char *name);
@@ -76,7 +83,7 @@ public:
   ServerStats();
   ~ServerStats();
 
-  static void GetLogger() ATTRIBUTE_COLD;
+  static void GetLogger();
 private:
   enum UDF {
     UDF_NONE = 1, // count
@@ -119,9 +126,10 @@ private:
 
   static void GetAllKeys(std::set<std::string> &allKeys,
                          const std::list<TimeSlot*> &slots);
-  static void Report(std::string &out, Format format,
+  static void Report(std::string &out, Writer::Format format,
                      const std::list<TimeSlot*> &slots,
                      const std::string &prefix);
+  static void ReportSlots(Writer* writer, const std::list<TimeSlot*> &slots);
 
   Mutex m_lock;
   std::vector<TimeSlot> m_slots;
@@ -129,6 +137,9 @@ private:
   int64_t m_min;  // earliest timepoint
   int64_t m_max;  // latest timepoint
   CounterMap m_values;  // current page's name value pairs
+
+  // general health-level of local server
+  static HealthLevel m_ServerHealthLevel;
 
   void log(const std::string &name, int64_t value);
   int64_t get(const std::string &name);
@@ -164,6 +175,7 @@ private:
     ThreadStatus();
 
     pthread_t m_threadId;
+    pid_t m_threadPid;
 
     MemoryManager* m_mm;
 

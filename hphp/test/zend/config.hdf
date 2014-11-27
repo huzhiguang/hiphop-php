@@ -1,8 +1,0 @@
-Eval {
-  EnableObjDestructCall = true
-  EnableZendCompat = true
-}
-
-Http {
-  SlowQueryThreshold = 0
-}

@@ -641,8 +641,6 @@ Exception* generate_request_timeout_exception() {
   return ret;
 }
 
-<<<<<<< HEAD
-=======
 Exception* generate_request_cpu_timeout_exception() {
   ThreadInfo* info = ThreadInfo::s_threadInfo.getNoCheck();
   RequestInjectionData& data = info->m_reqInjectionData;
@@ -656,7 +654,6 @@ Exception* generate_request_cpu_timeout_exception() {
   return new RequestCPUTimeoutException(exceptionMsg, exceptionStack);
 }
 
->>>>>>> upstream/master
 Exception* generate_memory_exceeded_exception() {
   Array exceptionStack = createBacktrace(BacktraceArgs()
                                          .withSelf()

@@ -190,10 +190,7 @@ Variant throw_fatal_unset_static_property(const char *s, const char *prop);
  * Exceptions injected code throws
  */
 Exception* generate_request_timeout_exception();
-<<<<<<< HEAD
-=======
 Exception* generate_request_cpu_timeout_exception();
->>>>>>> upstream/master
 Exception* generate_memory_exceeded_exception();
 
 // unserializable default value arguments such as TimeStamp::Current()

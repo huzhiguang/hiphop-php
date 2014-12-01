@@ -17,18 +17,29 @@
 #include "hphp/runtime/vm/jit/inlining-decider.h"
 
 #include "hphp/runtime/base/arch.h"
+<<<<<<< HEAD
 #include "hphp/runtime/base/datatype.h"
 #include "hphp/runtime/base/runtime-option.h"
+=======
+#include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/ext/ext_generator.h"
+>>>>>>> upstream/master
 #include "hphp/runtime/vm/bytecode.h"
 #include "hphp/runtime/vm/func.h"
 #include "hphp/runtime/vm/hhbc.h"
 #include "hphp/runtime/vm/srckey.h"
+<<<<<<< HEAD
 #include "hphp/runtime/vm/jit/hhbc-translator.h"
 #include "hphp/runtime/vm/jit/normalized-instruction.h"
 #include "hphp/runtime/vm/jit/region-selection.h"
 
 #include "hphp/runtime/ext/ext_generator.h"
 
+=======
+#include "hphp/runtime/vm/jit/normalized-instruction.h"
+#include "hphp/runtime/vm/jit/region-selection.h"
+
+>>>>>>> upstream/master
 #include "hphp/util/trace.h"
 
 #include <vector>
@@ -167,9 +178,12 @@ bool checkFPIRegion(SrcKey callSK, const Func* callee,
       pushBlock = i;
       break;
     }
+<<<<<<< HEAD
     if (blocks[i]->contains(callSK)) {
       break;
     }
+=======
+>>>>>>> upstream/master
   }
   if (pushBlock == -1) {
     return refuse("FPush* is not in the current region");
@@ -434,7 +448,11 @@ bool InliningDecider::shouldInline(const Func* callee,
       }
 
       // Count the returns.
+<<<<<<< HEAD
       if (isReturnish(op)) {
+=======
+      if (isRet(op) || op == Op::NativeImpl) {
+>>>>>>> upstream/master
         if (++numRets > 1) {
           return refuse("region has too many returns");
         }
@@ -483,6 +501,7 @@ void InliningDecider::registerEndInlining(const Func* callee) {
   m_stackDepth -= callee->maxStackCells();
 }
 
+<<<<<<< HEAD
 RegionDescPtr selectCalleeRegion(const SrcKey& sk,
                                  const Func* callee,
                                  const HhbcTranslator& ht,
@@ -519,5 +538,7 @@ RegionDescPtr selectCalleeRegion(const SrcKey& sk,
   return selectTracelet(ctx, profiling, true /* inlining */);
 }
 
+=======
+>>>>>>> upstream/master
 ///////////////////////////////////////////////////////////////////////////////
 }}

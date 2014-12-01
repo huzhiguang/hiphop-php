@@ -31,6 +31,38 @@ namespace HPHP {
 
 //////////////////////////////////////////////////////////////////////
 
+<<<<<<< HEAD
+=======
+struct RequestInjectionData;
+
+//////////////////////////////////////////////////////////////////////
+
+struct RequestTimer {
+  friend class RequestInjectionData;
+
+  RequestTimer(RequestInjectionData*, clockid_t);
+  ~RequestTimer();
+
+  void setTimeout(int seconds);
+  void onTimeout();
+  int getRemainingTime() const;
+
+private:
+  RequestInjectionData* m_reqInjectionData;
+  clockid_t m_clockType;
+#ifndef __APPLE__
+  timer_t m_timer_id;      // id of our timer
+#endif
+  int m_timeoutSeconds;    // how many seconds to timeout
+  bool m_hasTimer;         // Whether we've created our timer yet
+  std::atomic<bool> m_timerActive;
+                           // Set true when we activate a timer,
+                           // cleared when the signal handler runs
+};
+
+//////////////////////////////////////////////////////////////////////
+
+>>>>>>> upstream/master
 struct RequestInjectionData {
   static const ssize_t MemExceededFlag      = 1 << 0;
   static const ssize_t TimedOutFlag         = 1 << 1;
@@ -44,7 +76,12 @@ struct RequestInjectionData {
   static const ssize_t DebuggerSignalFlag   = 1 << 8;
   // Set by the debugger hook handler to force function entry/exit events
   static const ssize_t DebuggerHookFlag     = 1 << 9;
+<<<<<<< HEAD
   static const ssize_t LastFlag             = DebuggerHookFlag;
+=======
+  static const ssize_t CPUTimedOutFlag      = 1 << 10;
+  static const ssize_t LastFlag             = CPUTimedOutFlag;
+>>>>>>> upstream/master
   // flags that shouldn't be cleared by fetchAndClearFlags, because:
   // fetchAndClearFlags is only supposed to touch flags related to PHP-visible
   // signals/exceptions and resource limits
@@ -57,9 +94,14 @@ struct RequestInjectionData {
 
   RequestInjectionData()
       : cflagsPtr(nullptr),
+<<<<<<< HEAD
         m_timeoutSeconds(0), // no timeout by default
         m_hasTimer(false),
         m_timerActive(false),
+=======
+        m_timer(this, CLOCK_REALTIME),
+        m_cpuTimer(this, CLOCK_THREAD_CPUTIME_ID),
+>>>>>>> upstream/master
         m_debuggerAttached(false),
         m_coverage(false),
         m_jit(false),
@@ -69,7 +111,11 @@ struct RequestInjectionData {
         m_debuggerNext(false) {
   }
 
+<<<<<<< HEAD
   ~RequestInjectionData();
+=======
+  ~RequestInjectionData() = default;
+>>>>>>> upstream/master
 
   void threadInit();
 
@@ -81,6 +127,7 @@ struct RequestInjectionData {
   std::atomic<ssize_t>* cflagsPtr;  // this points to the real condition flags,
                                     // somewhere in the thread's targetcache
 
+<<<<<<< HEAD
  private:
 #ifndef __APPLE__
   timer_t m_timer_id;      // id of our timer
@@ -90,6 +137,11 @@ struct RequestInjectionData {
   std::atomic<bool> m_timerActive;
                            // Set true when we activate a timer,
                            // cleared when the signal handler runs
+=======
+private:
+  RequestTimer m_timer;
+  RequestTimer m_cpuTimer;
+>>>>>>> upstream/master
   bool m_debuggerAttached; // whether there is a debugger attached.
   bool m_coverage;         // is coverage being collected
   bool m_jit;              // is the jit enabled
@@ -143,11 +195,23 @@ private:
 
  public:
   std::string getDefaultMimeType() { return m_defaultMimeType; }
+<<<<<<< HEAD
   int getTimeout() const { return m_timeoutSeconds; }
   void setTimeout(int seconds);
   int getRemainingTime() const;
   void resetTimer(int seconds = 0);
   void onTimeout();
+=======
+  int getTimeout() const { return m_timer.m_timeoutSeconds; }
+  int getCPUTimeout() const { return m_cpuTimer.m_timeoutSeconds; }
+  void setTimeout(int seconds);
+  void setCPUTimeout(int seconds);
+  int getRemainingTime() const;
+  int getRemainingCPUTime() const;
+  void resetTimer(int seconds = 0);
+  void resetCPUTimer(int seconds = 0);
+  void onTimeout(RequestTimer*);
+>>>>>>> upstream/master
   bool getJit() const { return m_jit; }
   void updateJit();
 
@@ -256,6 +320,11 @@ private:
   void clearMemExceededFlag();
   void setTimedOutFlag();
   void clearTimedOutFlag();
+<<<<<<< HEAD
+=======
+  void setCPUTimedOutFlag();
+  void clearCPUTimedOutFlag();
+>>>>>>> upstream/master
   void setSignaledFlag();
   void setAsyncEventHookFlag();
   void clearAsyncEventHookFlag();

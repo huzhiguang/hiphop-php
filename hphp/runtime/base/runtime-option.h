@@ -138,6 +138,10 @@ public:
 
   static int RequestTimeoutSeconds;
   static int PspTimeoutSeconds;
+<<<<<<< HEAD
+=======
+  static int PspCpuTimeoutSeconds;
+>>>>>>> upstream/master
   static int64_t MaxRequestAgeFactor;
   static int64_t ServerMemoryHeadRoom;
   static int64_t RequestMemoryMaxBytes;

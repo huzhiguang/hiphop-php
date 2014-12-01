@@ -16,7 +16,10 @@
 
 #include "hphp/runtime/vm/jit/region-selection.h"
 
+<<<<<<< HEAD
 #include "hphp/runtime/vm/jit/analysis.h"
+=======
+>>>>>>> upstream/master
 #include "hphp/runtime/vm/jit/annotation.h"
 #include "hphp/runtime/vm/jit/guard-relaxation.h"
 #include "hphp/runtime/vm/jit/hhbc-translator.h"
@@ -29,9 +32,15 @@
 #include "hphp/runtime/vm/jit/ref-deps.h"
 #include "hphp/runtime/vm/jit/timer.h"
 #include "hphp/runtime/vm/jit/translator.h"
+#include "hphp/runtime/vm/jit/analysis.h"
 
 #include "hphp/util/trace.h"
 
+<<<<<<< HEAD
+#include "hphp/util/trace.h"
+
+=======
+>>>>>>> upstream/master
 #include <algorithm>
 #include <vector>
 
@@ -47,7 +56,12 @@ namespace {
 struct RegionFormer {
   RegionFormer(const RegionContext& ctx,
                InterpSet& interp,
+<<<<<<< HEAD
                bool profiling, bool inlining);
+=======
+               InliningDecider& inl,
+               bool profiling);
+>>>>>>> upstream/master
 
   RegionDescPtr go();
 
@@ -66,10 +80,17 @@ private:
   RefDeps m_refDeps;
   uint32_t m_numJmps;
   uint32_t m_numBCInstrs{0};
+<<<<<<< HEAD
 
   const bool m_profiling;
   const bool m_inlining;
   InliningDecider m_inl;
+=======
+  uint32_t m_pendingInlinedInstrs{0};
+
+  InliningDecider& m_inl;
+  const bool m_profiling;
+>>>>>>> upstream/master
 
   const Func* curFunc() const;
   const Unit* curUnit() const;
@@ -80,14 +101,23 @@ private:
   void addInstruction();
   bool consumeInput(int i, const InputInfo& ii);
   bool traceThroughJmp();
+<<<<<<< HEAD
   void maybeConstrainForInlining();
+=======
+  bool tryInline(uint32_t& instrSize);
+>>>>>>> upstream/master
   void recordDependencies();
   void truncateLiterals();
 };
 
 RegionFormer::RegionFormer(const RegionContext& ctx,
                            InterpSet& interp,
+<<<<<<< HEAD
                            bool profiling, bool inlining)
+=======
+                           InliningDecider& inl,
+                           bool profiling)
+>>>>>>> upstream/master
   : m_ctx(ctx)
   , m_interp(interp)
   , m_sk(ctx.func, ctx.bcOffset, ctx.resumed)
@@ -103,9 +133,14 @@ RegionFormer::RegionFormer(const RegionContext& ctx,
   , m_ht(m_irTrans.hhbcTrans())
   , m_arStates(1)
   , m_numJmps(0)
+<<<<<<< HEAD
   , m_profiling(profiling)
   , m_inlining(inlining)
   , m_inl(ctx.func)
+=======
+  , m_inl(inl)
+  , m_profiling(profiling)
+>>>>>>> upstream/master
 {}
 
 const Func* RegionFormer::curFunc() const {
@@ -153,8 +188,38 @@ RegionDescPtr RegionFormer::go() {
     auto const doPrediction =
       m_profiling ? false : outputIsPredicted(m_inst);
 
+<<<<<<< HEAD
     maybeConstrainForInlining();
 
+=======
+    uint32_t calleeInstrSize;
+    if (tryInline(calleeInstrSize)) {
+      // If m_inst is an FCall and the callee is suitable for inlining, we can
+      // translate the callee and potentially use its return type to extend the
+      // tracelet.
+
+      auto callee = m_inst.funcd;
+      FTRACE(1, "\nselectTracelet starting inlined call from {} to "
+             "{} with stack:\n{}\n", curFunc()->fullName()->data(),
+             callee->fullName()->data(), m_ht.showStack());
+      auto returnSk = m_inst.nextSk();
+      auto returnFuncOff = returnSk.offset() - curFunc()->base();
+
+      m_arStates.back().pop();
+      m_arStates.emplace_back();
+      m_curBlock->setInlinedCallee(callee);
+      m_ht.beginInlining(m_inst.imm[0].u_IVA, callee, returnFuncOff,
+                         doPrediction ? m_inst.outPred : Type::Gen);
+
+      m_sk = m_ht.curSrcKey();
+      m_blockFinished = true;
+      m_pendingInlinedInstrs += calleeInstrSize;
+      continue;
+    }
+
+    auto const inlineReturn = m_ht.isInlining() &&
+      (isRet(m_inst.op()) || m_inst.op() == OpNativeImpl);
+>>>>>>> upstream/master
     try {
       m_irTrans.translateInstr(m_inst);
     } catch (const FailedIRGen& exn) {
@@ -166,6 +231,19 @@ RegionDescPtr RegionFormer::go() {
       break;
     }
 
+<<<<<<< HEAD
+=======
+    // If we just translated a return from an inlined call, grab the updated
+    // SrcKey from m_ht and clean up.
+    if (inlineReturn) {
+      m_inl.registerEndInlining(m_sk.func());
+      m_sk = m_ht.curSrcKey().advanced(curUnit());
+      m_arStates.pop_back();
+      m_blockFinished = true;
+      continue;
+    }
+
+>>>>>>> upstream/master
     // We successfully translated the instruction, so update m_sk.
     m_sk.advance(m_curBlock->unit());
 
@@ -189,11 +267,31 @@ RegionDescPtr RegionFormer::go() {
     }
   }
 
+<<<<<<< HEAD
   printUnit(kTraceletLevel, m_ht.unit(),
             m_inlining ? " after inlining tracelet formation "
                        : " after tracelet formation ",
             nullptr, m_ht.irBuilder().guards());
 
+=======
+  // If we failed while trying to inline, trigger retry without inlining.
+  if (m_region && !m_region->empty() && m_ht.isInlining()) {
+    // We can recover from this situation just fine, but it's more often
+    // than not indicative of a real bug somewhere else in the system.
+    // TODO: 5515310 investigate whether legit bugs cause this.
+    FTRACE(1, "selectTracelet: Failed while inlining:\n{}\n{}",
+           show(*m_region), m_ht.unit());
+    m_inl.disable();
+    m_region.reset();
+  }
+
+  printUnit(kTraceletLevel, m_ht.unit(),
+            m_inl.depth() || m_inl.disabled()
+              ? " after inlining tracelet formation "
+              : " after tracelet formation ",
+            nullptr, m_ht.irBuilder().guards());
+
+>>>>>>> upstream/master
   if (m_region && !m_region->empty()) {
     m_ht.end(m_sk.offset());
     recordDependencies();
@@ -289,6 +387,7 @@ void RegionFormer::addInstruction() {
   FTRACE(2, "selectTracelet adding instruction {}\n", m_inst.toString());
   m_curBlock->addInstruction();
   m_numBCInstrs++;
+<<<<<<< HEAD
 }
 
 bool RegionFormer::traceThroughJmp() {
@@ -296,25 +395,53 @@ bool RegionFormer::traceThroughJmp() {
   // inputs while inlining.
   if (!isUnconditionalJmp(m_inst.op()) &&
       !(m_inlining && isConditionalJmp(m_inst.op()) &&
+=======
+  if (m_ht.isInlining()) m_pendingInlinedInstrs--;
+}
+
+bool RegionFormer::traceThroughJmp() {
+  // This flag means "if we are currently inlining, or we are generating a
+  // tracelet for inlining analysis".  The latter is the case when inlining is
+  // disabled (because our caller wants to peek at our region without us
+  // inlining ourselves).
+  bool inlining = m_inl.depth() || m_inl.disabled();
+
+  // We only trace through unconditional jumps and conditional jumps with const
+  // inputs while inlining.
+  if (!isUnconditionalJmp(m_inst.op()) &&
+      !(inlining && isConditionalJmp(m_inst.op()) &&
+>>>>>>> upstream/master
         m_ht.topType(0, DataTypeGeneric).isConst())) {
     return false;
   }
 
   // Normally we want to keep profiling translations to basic blocks, but if
   // we're inlining we want to analyze as much of the callee as possible.
+<<<<<<< HEAD
   if (m_profiling && !m_inlining) return false;
+=======
+  if (m_profiling && !inlining) return false;
+>>>>>>> upstream/master
 
   // Don't trace through too many jumps, unless we're inlining. We want to make
   // sure we don't break a tracelet in the middle of an inlined call; if the
   // inlined callee becomes too big that's caught in shouldIRInline.
+<<<<<<< HEAD
   if (m_numJmps == Translator::MaxJmpsTracedThrough && !m_inlining) {
+=======
+  if (m_numJmps == Translator::MaxJmpsTracedThrough && !inlining) {
+>>>>>>> upstream/master
     return false;
   }
 
   auto offset = m_inst.imm[0].u_BA;
   // Only trace through backwards jumps if it's a JmpNS and we're
   // inlining. This is to get DV funclets.
+<<<<<<< HEAD
   if (offset <= 0 && (m_inst.op() != OpJmpNS || !m_inlining)) {
+=======
+  if (offset <= 0 && (m_inst.op() != OpJmpNS || !inlining)) {
+>>>>>>> upstream/master
     return false;
   }
 
@@ -332,6 +459,7 @@ bool RegionFormer::traceThroughJmp() {
 
     m_sk.setOffset(taken ? m_sk.offset() + offset
                          : m_sk.advanced().offset());
+<<<<<<< HEAD
   }
 
   m_numJmps++;
@@ -398,6 +526,80 @@ void RegionFormer::maybeConstrainForInlining() {
   if (auto const ssa = sframe->src(2)) {
     m_ht.irBuilder().constrainValue(ssa, tcFor(ssa->type()));
   }
+=======
+  }
+
+  m_numJmps++;
+  m_blockFinished = true;
+  return true;
+}
+
+bool RegionFormer::tryInline(uint32_t& instrSize) {
+  assert(m_inst.source == m_sk);
+  assert(m_inst.func() == curFunc());
+  assert(m_sk.resumed() == resumed());
+
+  instrSize = 0;
+
+  if (!m_inl.canInlineAt(m_inst.source, m_inst.funcd, *m_region)) {
+    return false;
+  }
+
+  auto refuse = [this](const std::string& str) {
+    FTRACE(2, "selectTracelet not inlining {}: {}\n",
+           m_inst.toString(), str);
+    return false;
+  };
+
+  auto callee = m_inst.funcd;
+
+  // Make sure the FPushOp wasn't interpreted.
+  auto spillFrame = findSpillFrame(m_ht.irBuilder().sp());
+  if (!spillFrame) {
+    return refuse("couldn't find SpillFrame for FPushOp");
+  }
+
+  auto numArgs = m_inst.imm[0].u_IVA;
+  auto numParams = callee->numParams();
+
+  // Set up the region context, mapping stack slots in the caller to locals in
+  // the callee.
+  RegionContext ctx;
+  ctx.func = callee;
+  ctx.bcOffset = callee->getEntryForNumArgs(numArgs);
+  ctx.spOffset = callee->numSlotsInFrame();
+  ctx.resumed = false;
+  for (int i = 0; i < numArgs; ++i) {
+    // DataTypeGeneric is used because we're just passing the locals into the
+    // callee. It's up to the callee to constraint further if needed.
+    auto type = m_ht.topType(i, DataTypeGeneric);
+    uint32_t paramIdx = numArgs - 1 - i;
+    ctx.liveTypes.push_back({RegionDesc::Location::Local{paramIdx}, type});
+  }
+
+  for (unsigned i = numArgs; i < numParams; ++i) {
+    // These locals will be populated by DV init funclets but they'll start
+    // out as Uninit.
+    ctx.liveTypes.push_back({RegionDesc::Location::Local{i}, Type::Uninit});
+  }
+
+  FTRACE(1, "selectTracelet analyzing callee {} with context:\n{}",
+         callee->fullName()->data(), show(ctx));
+  auto region = selectTracelet(ctx, m_profiling, false /* noinline */);
+  if (!region) {
+    return refuse("failed to select region in callee");
+  }
+
+  instrSize = region->instrSize();
+  auto newInstrSize = instrSize + m_numBCInstrs + m_pendingInlinedInstrs;
+  if (newInstrSize > RuntimeOption::EvalJitMaxRegionInstrs) {
+    return refuse("new region would be too large");
+  }
+  if (!m_inl.shouldInline(callee, *region)) {
+    return refuse("shouldIRInline failed");
+  }
+  return true;
+>>>>>>> upstream/master
 }
 
 void RegionFormer::truncateLiterals() {
@@ -487,6 +689,7 @@ void RegionFormer::recordDependencies() {
     RelaxGuardsFlags flags = m_profiling ? RelaxSimple : RelaxNormal;
     changed = relaxGuards(unit, *m_ht.irBuilder().guards(), flags);
   }
+<<<<<<< HEAD
 
   auto guardMap = std::map<RegionDesc::Location,Type>{};
   visitGuards(unit, [&](const RegionDesc::Location& loc, Type type) {
@@ -502,6 +705,23 @@ void RegionFormer::recordDependencies() {
     oldTy &= type;
   });
 
+=======
+
+  auto guardMap = std::map<RegionDesc::Location,Type>{};
+  visitGuards(unit, [&](const RegionDesc::Location& loc, Type type) {
+    if (type <= Type::Cls) return;
+    auto inret = guardMap.insert(std::make_pair(loc, type));
+    if (inret.second) return;
+    auto& oldTy = inret.first->second;
+    if (oldTy == Type::Gen) {
+      // This is the case that we see an inner type prediction for a GuardLoc
+      // that got relaxed to Gen.
+      return;
+    }
+    oldTy &= type;
+  });
+
+>>>>>>> upstream/master
   for (auto& kv : guardMap) {
     if (kv.second == Type::Gen) {
       // Guard was relaxed to Gen---don't record it.
@@ -523,14 +743,26 @@ void RegionFormer::recordDependencies() {
 }
 
 RegionDescPtr selectTracelet(const RegionContext& ctx, bool profiling,
+<<<<<<< HEAD
                              bool inlining /* = false */) {
+=======
+                             bool allowInlining /* = true */) {
+>>>>>>> upstream/master
   Timer _t(Timer::selectTracelet);
   InterpSet interp;
   RegionDescPtr region;
   uint32_t tries = 1;
 
+<<<<<<< HEAD
   while (!(region = RegionFormer(ctx, interp, profiling, inlining).go())) {
+=======
+  InliningDecider inl(ctx.func);
+  if (!allowInlining) inl.disable();
+
+  while (!(region = RegionFormer(ctx, interp, inl, profiling).go())) {
+>>>>>>> upstream/master
     ++tries;
+    inl.resetState();
   }
 
   if (region->empty() || region->blocks().front()->length() == 0) {
@@ -538,8 +770,13 @@ RegionDescPtr selectTracelet(const RegionContext& ctx, bool profiling,
     return RegionDescPtr { nullptr };
   }
 
+<<<<<<< HEAD
   FTRACE(1, "selectTracelet returning, {}, {} tries:\n{}\n",
          inlining ? "inlining" : "not inlining", tries, show(*region));
+=======
+  FTRACE(1, "selectTracelet returning, inlining {}, {} tries:\n{}\n",
+         allowInlining ? "allowed" : "disallowed", tries, show(*region));
+>>>>>>> upstream/master
   if (region->blocks().back()->length() == 0) {
     // If the final block is empty because it would've only contained
     // instructions producing literal values, kill it.

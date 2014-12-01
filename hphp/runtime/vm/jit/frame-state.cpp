@@ -601,7 +601,12 @@ void FrameStateMgr::clearLocals() {
 void FrameStateMgr::setLocalValue(uint32_t id, SSATmp* value) {
   always_assert(id < cur().locals.size());
   cur().locals[id].value = value;
+<<<<<<< HEAD
   cur().locals[id].type = value ? value->type() : Type::Gen;
+=======
+  auto const newType = value ? value->type() : Type::Gen;
+  cur().locals[id].type = newType;
+>>>>>>> upstream/master
 
   /*
    * Update the predicted type for boxed values in some special cases to
@@ -626,9 +631,22 @@ void FrameStateMgr::setLocalValue(uint32_t id, SSATmp* value) {
     return cur().locals[id].type;  // just predict what we know
   }();
 
+<<<<<<< HEAD
   FTRACE(3, "setLocalValue setting prediction {} to {}\n",
     id, newInnerPred);
   cur().locals[id].predictedType = newInnerPred;
+=======
+  // We need to make sure not to violate the invariant that predictedType is
+  // always <= type.  Note that operator& can be conservative (it could just
+  // return one of the two types in situations relating to specialized types we
+  // can't represent), so it's necessary to double check.
+  auto const rawIsect = newType & newInnerPred;
+  auto const useTy = rawIsect <= newType ? rawIsect : newType;
+
+  FTRACE(3, "setLocalValue setting prediction {} based on {}, using = {}\n",
+    id, newInnerPred, useTy);
+  cur().locals[id].predictedType = useTy;
+>>>>>>> upstream/master
 
   cur().locals[id].typeSrcs.clear();
   if (value) {
@@ -718,7 +736,11 @@ void FrameStateMgr::refineLocalValues(SSATmp* oldVal, SSATmp* newVal) {
       if (!local.value || canonical(local.value) != canonical(oldVal)) {
         continue;
       }
+<<<<<<< HEAD
       ITRACE(2, "refining local {}'s ({}) value: {} -> {}\n",
+=======
+      ITRACE(2, "refining local {}'s value: {} -> {}\n",
+>>>>>>> upstream/master
              id, *local.value, *newVal);
       local.value = newVal;
       local.type = newVal->type();

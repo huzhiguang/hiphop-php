@@ -942,7 +942,15 @@ static bool HHVM_FUNCTION(putenv, const String& setting) {
 static void HHVM_FUNCTION(set_time_limit, int64_t seconds) {
   ThreadInfo *info = ThreadInfo::s_threadInfo.getNoCheck();
   RequestInjectionData &data = info->m_reqInjectionData;
+<<<<<<< HEAD
   data.setTimeout(seconds);
+=======
+  if (RuntimeOption::TimeoutsUseWallTime) {
+    data.setTimeout(seconds);
+  } else {
+    data.setCPUTimeout(seconds);
+  }
+>>>>>>> upstream/master
 }
 
 String HHVM_FUNCTION(sys_get_temp_dir) {

@@ -466,6 +466,7 @@ void ExecutionContext::registerShutdownFunction(const Variant& function,
   Array callback = make_map_array(s_name, function, s_args, arguments);
   Variant& funcs = m_shutdowns.lvalAt(type);
   forceToArray(funcs).append(callback);
+<<<<<<< HEAD
 }
 
 bool ExecutionContext::removeShutdownFunction(const Variant& function,
@@ -490,6 +491,32 @@ bool ExecutionContext::hasShutdownFunctions(ShutdownType type) {
     m_shutdowns[type].toArray().size() >= 1;
 }
 
+=======
+}
+
+bool ExecutionContext::removeShutdownFunction(const Variant& function,
+                                              ShutdownType type) {
+  bool ret = false;
+  auto& funcs = forceToArray(m_shutdowns.lvalAt(type));
+  PackedArrayInit newFuncs(funcs.size());
+
+  for (ArrayIter iter(funcs); iter; ++iter) {
+    if (!same(iter.second().toArray()[s_name], function)) {
+      newFuncs.appendWithRef(iter.secondRef());
+    } else {
+      ret = true;
+    }
+  }
+  funcs = newFuncs.toArray();
+  return ret;
+}
+
+bool ExecutionContext::hasShutdownFunctions(ShutdownType type) {
+  return !m_shutdowns.isNull() && m_shutdowns.exists(type) &&
+    m_shutdowns[type].toArray().size() >= 1;
+}
+
+>>>>>>> upstream/master
 Variant ExecutionContext::pushUserErrorHandler(const Variant& function,
                                                int error_types) {
   Variant ret;
@@ -554,6 +581,11 @@ void ExecutionContext::onRequestShutdown() {
 void ExecutionContext::executeFunctions(ShutdownType type) {
   ThreadInfo::s_threadInfo->m_reqInjectionData.resetTimer(
     RuntimeOption::PspTimeoutSeconds);
+<<<<<<< HEAD
+=======
+  ThreadInfo::s_threadInfo->m_reqInjectionData.resetCPUTimer(
+    RuntimeOption::PspCpuTimeoutSeconds);
+>>>>>>> upstream/master
 
   if (!m_shutdowns.isNull() && m_shutdowns.exists(type)) {
     SCOPE_EXIT {

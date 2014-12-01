@@ -99,6 +99,7 @@ struct FatalErrorException : ExtendedException {
 
 private:
   bool m_recoverable{false};
+<<<<<<< HEAD
 };
 
 //////////////////////////////////////////////////////////////////////
@@ -115,6 +116,31 @@ struct RequestTimeoutException : ResourceExceededException {
     : ResourceExceededException(msg, backtrace)
   {}
   EXCEPTION_COMMON_IMPL(RequestTimeoutException);
+=======
+};
+
+//////////////////////////////////////////////////////////////////////
+
+struct ResourceExceededException : FatalErrorException {
+  ResourceExceededException(const std::string& msg, const Array& backtrace)
+    : FatalErrorException(msg, backtrace)
+  {}
+  EXCEPTION_COMMON_IMPL(ResourceExceededException);
+};
+
+struct RequestTimeoutException : ResourceExceededException {
+  RequestTimeoutException(const std::string& msg, const Array& backtrace)
+    : ResourceExceededException(msg, backtrace)
+  {}
+  EXCEPTION_COMMON_IMPL(RequestTimeoutException);
+};
+
+struct RequestCPUTimeoutException : ResourceExceededException {
+  RequestCPUTimeoutException(const std::string& msg, const Array& backtrace)
+    : ResourceExceededException(msg, backtrace)
+  {}
+  EXCEPTION_COMMON_IMPL(RequestCPUTimeoutException);
+>>>>>>> upstream/master
 };
 
 struct RequestMemoryExceededException : ResourceExceededException {

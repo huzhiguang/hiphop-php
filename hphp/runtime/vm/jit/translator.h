@@ -23,6 +23,7 @@
 #include "hphp/runtime/vm/debugger-hook.h"
 #include "hphp/runtime/vm/hhbc.h"
 #include "hphp/runtime/vm/srckey.h"
+<<<<<<< HEAD
 
 #include "hphp/runtime/vm/jit/types.h"
 #include "hphp/runtime/vm/jit/location.h"
@@ -59,6 +60,43 @@ namespace jit {
 
 struct Block;
 struct InliningDecider;
+=======
+
+#include "hphp/runtime/vm/jit/types.h"
+#include "hphp/runtime/vm/jit/location.h"
+#include "hphp/runtime/vm/jit/prof-src-key.h"
+#include "hphp/runtime/vm/jit/region-selection.h"
+#include "hphp/runtime/vm/jit/srcdb.h"
+#include "hphp/runtime/vm/jit/trans-rec.h"
+#include "hphp/runtime/vm/jit/type.h"
+#include "hphp/runtime/vm/jit/unique-stubs.h"
+#include "hphp/runtime/vm/jit/write-lease.h"
+
+#include "hphp/util/hash-map-typedefs.h"
+#include "hphp/util/mutex.h"
+
+#include <folly/Format.h>
+
+#include <functional>
+#include <map>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+namespace HPHP {
+///////////////////////////////////////////////////////////////////////////////
+
+struct Class;
+struct Func;
+
+namespace Debug { struct DebugInfo; }
+
+namespace jit {
+///////////////////////////////////////////////////////////////////////////////
+
+struct Block;
+>>>>>>> upstream/master
 struct IRTranslator;
 struct NormalizedInstruction;
 struct ProfData;
@@ -185,15 +223,34 @@ struct TranslArgs {
  */
 struct Translator {
   Translator();
+<<<<<<< HEAD
 
   /////////////////////////////////////////////////////////////////////////////
   // Types.
 
+=======
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Types.
+
+  /*
+   * Blacklisted instruction set.
+   *
+   * Used by translateRegion() to track instructions that must be interpreted.
+   */
+  typedef ProfSrcKeySet RegionBlacklist;
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Main translation API.
+
+>>>>>>> upstream/master
   enum TranslateResult {
     Failure,
     Retry,
     Success
   };
+<<<<<<< HEAD
 
   /*
    * Data used by translateRegion() to pass information between retries.
@@ -211,6 +268,9 @@ struct Translator {
 
   /////////////////////////////////////////////////////////////////////////////
   // Main translation API.
+=======
+  static const char* ResultName(TranslateResult r);
+>>>>>>> upstream/master
 
   /*
    * Start, end, or free a trace of code to be translated.
@@ -222,6 +282,7 @@ struct Translator {
   /*
    * Translate `region'.
    *
+<<<<<<< HEAD
    * The caller is expected to continue calling translateRegion() until either
    * Success or Failure is returned.  Otherwise, Retry is returned, and the
    * caller is responsible for threading the same RetryContext through to
@@ -380,18 +441,176 @@ struct Translator {
 
 
   /////////////////////////////////////////////////////////////////////////////
+=======
+   * The `toInterp' RegionBlacklist is a set of instructions which must be
+   * interpreted.  When an instruction fails in translation, Retry is returned,
+   * and the instruction is added to `interp' so that it will be interpreted on
+   * the next attempt.
+   */
+  TranslateResult translateRegion(const RegionDesc& region,
+                                  RegionBlacklist& interp,
+                                  TransFlags trflags = TransFlags{});
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Accessors.
+
+  /*
+   * Get the IRTranslator for the current translation.
+   *
+   * This is reset whenever traceStart() is called.
+   */
+  IRTranslator* irTrans() const;
+
+  /*
+   * Get the Translator's ProfData.
+   */
+  ProfData* profData() const;
+
+  /*
+   * Get the SrcDB.
+   *
+   * This is the one true SrcDB, since Translator is used as a singleton.
+   */
+  const SrcDB& getSrcDB() const;
+
+  /*
+   * Get the SrcRec for `sk'.
+   *
+   * If no SrcRec exists, insert one into the SrcDB.
+   */
+  SrcRec* getSrcRec(SrcKey sk);
+
+  /*
+   * Current region being translated, if any.
+   */
+  const RegionDesc* region() const;
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Configuration.
+
+  /*
+   * We call the TransKind `mode' for some reason.
+   */
+  TransKind mode() const;
+  void setMode(TransKind mode);
+
+  /*
+   * Whether to use ahot.
+   *
+   * This defaults to runtime option values, and is only changed if we're using
+   * ahot and it runs out of space.
+   */
+  bool useAHot() const;
+  void setUseAHot(bool val);
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Translation DB.
+  //
+  // We maintain mappings from TCAs and TransIDs to translation information,
+  // for debugging purposes only.  Outside of debug builds and processes with
+  // TC dumps enabled, these routines do no work, and their corresponding data
+  // structures are unused.
+  //
+  // Note that PGO always has a coherent notion of TransID---the so-called
+  // `profTransID', which is just the region block ID (which are globally
+  // unique).  This is completely distinct from the Translator's TransID.
+
+  /*
+   * Whether the TransDB structures should be used.
+   *
+   * True only for debug builds or when TC dumps are enabled.
+   */
+  static bool isTransDBEnabled();
+
+  /*
+   * Get a TransRec by TCA or TransID.
+   *
+   * Return nullptr if the TransDB is not enabled.
+   */
+  const TransRec* getTransRec(TCA tca) const;
+  const TransRec* getTransRec(TransID transId) const;
+
+  /*
+   * Add a translation.
+   *
+   * Does nothing but trace if the TransDB is not enabled.
+   */
+  void addTranslation(const TransRec& transRec);
+
+  /*
+   * Get the TransID of the current (or next, if there is no current)
+   * translation.
+   */
+  TransID getCurrentTransID() const;
+
+  /*
+   * Get the translation counter for `transId'.
+   *
+   * Return -1 if the TransDB is not enabled.
+   */
+  uint64_t getTransCounter(TransID transId) const;
+
+  /*
+   * Get a pointer to the translation counter for getCurrentTransID().
+   *
+   * Return nullptr if the TransDB is not enabled.
+   */
+  uint64_t* getTransCounterAddr();
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Debug blacklist.
+  //
+  // The set of PC's and SrcKey's we refuse to JIT because they contain hphpd
+  // breakpoints.
+
+  /*
+   * Atomically clear all entries from the debug blacklist.
+   */
+  void clearDbgBL();
+
+  /*
+   * Add `pc' to the debug blacklist.
+   *
+   * Return whether we actually performed an insertion.
+   */
+  bool addDbgBLPC(PC pc);
+
+  /*
+   * Check if `sk' is in the debug blacklist.
+   *
+   * Lazily populates m_dbgBLSrcKey from m_dbgBLPC if we don't find the entry.
+   */
+  bool isSrcKeyInBL(SrcKey sk);
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Static data.
+
+  static Lease& WriteLease();
+
+  static const int MaxJmpsTracedThrough = 5;
+
+
+  /////////////////////////////////////////////////////////////////////////////
+>>>>>>> upstream/master
   // Other methods.
 
 public:
   static bool liveFrameIsPseudoMain();
 
 private:
+<<<<<<< HEAD
   TranslateResult translateRegionImpl(const RegionDesc& region,
                                       RetryContext& retry,
                                       TransFlags trflags,
                                       InliningDecider& inl,
                                       const NormalizedInstruction* fcall);
 
+=======
+>>>>>>> upstream/master
   void createBlockMap(const RegionDesc&    region,
                       BlockIdToIRBlockMap& blockIdToIRBlock);
 
@@ -420,6 +639,7 @@ private:
 
   std::unique_ptr<IRTranslator> m_irTrans;
   SrcDB m_srcDB;
+<<<<<<< HEAD
 
   // Translation DB.
   typedef std::map<TCA, TransID> TransDB;
@@ -427,6 +647,15 @@ private:
   std::vector<TransRec> m_translations;
   std::vector<uint64_t*> m_transCounters;
 
+=======
+
+  // Translation DB.
+  typedef std::map<TCA, TransID> TransDB;
+  TransDB m_transDB;
+  std::vector<TransRec> m_translations;
+  std::vector<uint64_t*> m_transCounters;
+
+>>>>>>> upstream/master
   // Debug blacklist.
   PCFilter m_dbgBLPC;
   hphp_hash_set<SrcKey,SrcKey::Hasher> m_dbgBLSrcKey;
@@ -505,6 +734,7 @@ struct InputInfo {
     , dontGuard(l.isLiteral())
     , dontGuardInner(false)
   {}
+<<<<<<< HEAD
 
   std::string pretty() const;
 
@@ -512,6 +742,15 @@ public:
   // Location tag for the input.
   Location loc;
 
+=======
+
+  std::string pretty() const;
+
+public:
+  // Location tag for the input.
+  Location loc;
+
+>>>>>>> upstream/master
   // If an input is unknowable, don't break the tracelet just to find its
   // type---but still generate a guard if that will tell us its type.
   bool dontBreak;

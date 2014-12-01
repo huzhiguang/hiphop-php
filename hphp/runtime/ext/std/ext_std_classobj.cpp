@@ -180,11 +180,20 @@ Variant HHVM_FUNCTION(get_class_vars, const String& className) {
   }
 
   for (size_t i = 0; i < numSProps; ++i) {
+<<<<<<< HEAD
     bool vis, access;
     TypedValue* value = cls->getSProp(ctx, sPropInfo[i].m_name, vis, access);
     if (access) {
       arr.set(const_cast<StringData*>(sPropInfo[i].m_name.get()),
         tvAsCVarRef(value));
+=======
+    auto const lookup = cls->getSProp(ctx, sPropInfo[i].m_name);
+    if (lookup.accessible) {
+      arr.set(
+        const_cast<StringData*>(sPropInfo[i].m_name.get()),
+        tvAsCVarRef(lookup.prop)
+      );
+>>>>>>> upstream/master
     }
   }
 
@@ -324,18 +333,29 @@ Variant HHVM_FUNCTION(property_exists, const Variant& class_or_object,
     return Variant(Variant::NullInit());
   }
 
+<<<<<<< HEAD
   bool accessible;
   auto propInd = cls->getDeclPropIndex(cls, property.get(), accessible);
   if (propInd != kInvalidSlot) {
     return true;
   }
+=======
+  auto const lookup = cls->getDeclPropIndex(cls, property.get());
+  if (lookup.prop != kInvalidSlot) return true;
+
+>>>>>>> upstream/master
   if (obj &&
       UNLIKELY(obj->getAttribute(ObjectData::HasDynPropArr)) &&
       obj->dynPropArray()->nvGet(property.get())) {
     return true;
   }
+<<<<<<< HEAD
   propInd = cls->lookupSProp(property.get());
   return (propInd != kInvalidSlot);
+=======
+  auto const propInd = cls->lookupSProp(property.get());
+  return propInd != kInvalidSlot;
+>>>>>>> upstream/master
 }
 
 Array HHVM_FUNCTION(get_object_vars, const Object& object) {

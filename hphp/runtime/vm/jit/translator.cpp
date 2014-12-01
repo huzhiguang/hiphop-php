@@ -49,10 +49,15 @@
 #include "hphp/runtime/vm/treadmill.h"
 #include "hphp/runtime/vm/type-profile.h"
 
+<<<<<<< HEAD
 #include "hphp/runtime/vm/jit/analysis.h"
 #include "hphp/runtime/vm/jit/annotation.h"
 #include "hphp/runtime/vm/jit/hhbc-translator.h"
 #include "hphp/runtime/vm/jit/inlining-decider.h"
+=======
+#include "hphp/runtime/vm/jit/annotation.h"
+#include "hphp/runtime/vm/jit/hhbc-translator.h"
+>>>>>>> upstream/master
 #include "hphp/runtime/vm/jit/ir-translator.h"
 #include "hphp/runtime/vm/jit/ir-unit.h"
 #include "hphp/runtime/vm/jit/mc-generator.h"
@@ -114,7 +119,6 @@ PropInfo getPropertyOffset(const NormalizedInstruction& ni,
   if (!keyType.isConst(Type::Str)) return PropInfo();
   auto const name = keyType.strVal();
 
-  bool accessible;
   // If we are not in repo-authoriative mode, we need to check that
   // baseClass cannot change in between requests
   if (!RuntimeOption::RepoAuthoritative ||
@@ -134,15 +138,16 @@ PropInfo getPropertyOffset(const NormalizedInstruction& ni,
     }
   }
   // Lookup the index of the property based on ctx and baseClass
-  Slot idx = baseClass->getDeclPropIndex(ctx, name, accessible);
-  // If we couldn't find a property that is accessible in the current
-  // context, bail out
-  if (idx == kInvalidSlot || !accessible) {
-    return PropInfo();
-  }
-  // If it's a declared property we're good to go: even if a subclass
-  // redefines an accessible property with the same name it's guaranteed
-  // to be at the same offset
+  auto const lookup = baseClass->getDeclPropIndex(ctx, name);
+  auto const idx = lookup.prop;
+
+  // If we couldn't find a property that is accessible in the current context,
+  // bail out
+  if (idx == kInvalidSlot || !lookup.accessible) return PropInfo();
+
+  // If it's a declared property we're good to go: even if a subclass redefines
+  // an accessible property with the same name it's guaranteed to be at the same
+  // offset.
   return PropInfo(
     baseClass->declPropOffset(idx),
     baseClass->declPropRepoAuthType(idx)
@@ -971,10 +976,17 @@ static void addMVectorInputs(NormalizedInstruction& ni,
                              std::vector<InputInfo>& inputs) {
   assert(ni.immVec.isValid());
   ni.immVecM.reserve(ni.immVec.size());
+<<<<<<< HEAD
 
   int UNUSED stackCount = 0;
   int UNUSED localCount = 0;
 
+=======
+
+  int UNUSED stackCount = 0;
+  int UNUSED localCount = 0;
+
+>>>>>>> upstream/master
   currentStackOffset -= ni.immVec.numStackValues();
   int localStackOffset = currentStackOffset;
 
@@ -1311,6 +1323,7 @@ Translator::Translator()
   , m_profData(nullptr)
   , m_useAHot(RuntimeOption::RepoAuthoritative &&
               RuntimeOption::EvalJitAHotSize > 0)
+<<<<<<< HEAD
 {
   initInstrInfo();
   if (RuntimeOption::EvalJitPGO) {
@@ -1533,10 +1546,93 @@ static bool nextIsMerge(const NormalizedInstruction& inst,
   }
   return isMergePoint(fallthruOffset, region);
 }
+=======
+{
+  initInstrInfo();
+  if (RuntimeOption::EvalJitPGO) {
+    m_profData.reset(new ProfData());
+  }
+}
+
+bool
+Translator::isSrcKeyInBL(SrcKey sk) {
+  auto unit = sk.unit();
+  if (unit->isInterpretOnly()) return true;
+  Lock l(m_dbgBlacklistLock);
+  if (m_dbgBLSrcKey.find(sk) != m_dbgBLSrcKey.end()) {
+    return true;
+  }
+
+  // Loop until the end of the basic block inclusively. This is useful for
+  // function exit breakpoints, which are implemented by blacklisting the RetC
+  // opcodes.
+  PC pc = nullptr;
+  do {
+    pc = (pc == nullptr) ?
+      unit->at(sk.offset()) : pc + instrLen((Op*) pc);
+    if (m_dbgBLPC.checkPC(pc)) {
+      m_dbgBLSrcKey.insert(sk);
+      return true;
+    }
+  } while (!opcodeBreaksBB(*reinterpret_cast<const Op*>(pc)));
+  return false;
+}
+
+void
+Translator::clearDbgBL() {
+  Lock l(m_dbgBlacklistLock);
+  m_dbgBLSrcKey.clear();
+  m_dbgBLPC.clear();
+}
+
+bool
+Translator::addDbgBLPC(PC pc) {
+  Lock l(m_dbgBlacklistLock);
+  if (m_dbgBLPC.checkPC(pc)) {
+    // already there
+    return false;
+  }
+  m_dbgBLPC.addPC(pc);
+  return true;
+}
+
+const char* Translator::ResultName(TranslateResult r) {
+  static const char* const names[] = {
+    "Failure",
+    "Retry",
+    "Success",
+  };
+  return names[r];
+}
+
+bool instrMustInterp(const NormalizedInstruction& inst) {
+  if (RuntimeOption::EvalJitAlwaysInterpOne) return true;
+
+  switch (inst.op()) {
+#define CASE(name) case Op::name:
+  INSTRS
+#undef CASE
+#define NOTHING(...) // PSEUDOINSTR_DISPATCH has the cases in it
+  PSEUDOINSTR_DISPATCH(NOTHING)
+#undef NOTHING
+    return false;
+
+#define CASE(name) case Op::name:
+  INTERP_ONE_INSTRS
+#undef CASE
+    return true;
+  }
+  always_assert_flog(0, "invalid opcode {}", static_cast<uint32_t>(inst.op()));
+}
+
+void Translator::traceStart(TransContext context) {
+  assert(!m_irTrans);
+>>>>>>> upstream/master
 
 namespace {
 ///////////////////////////////////////////////////////////////////////////////
 
+<<<<<<< HEAD
 /*
  * If `psk' is not an FCall{,D} with inlinable `callee', return nullptr.
  *
@@ -1553,6 +1649,10 @@ RegionDescPtr getInlinableCalleeRegion(const ProfSrcKey& psk,
       psk.srcKey.op() != Op::FCallD) {
     return nullptr;
   }
+=======
+  m_irTrans.reset(new IRTranslator(context));
+}
+>>>>>>> upstream/master
 
   if (!inl.canInlineAt(psk.srcKey, callee, region)) return nullptr;
 
@@ -1575,12 +1675,139 @@ RegionDescPtr getInlinableCalleeRegion(const ProfSrcKey& psk,
                                                  : nullptr;
 }
 
+<<<<<<< HEAD
 ///////////////////////////////////////////////////////////////////////////////
+=======
+void Translator::traceFree() {
+  FTRACE(1, "HHIR free: arena size: {}\n",
+         m_irTrans->hhbcTrans().unit().arena().size());
+  m_irTrans.reset();
+>>>>>>> upstream/master
+}
+
+/*
+ * Create a map from RegionDesc::BlockId -> IR Block* for all region blocks.
+ */
+void Translator::createBlockMap(const RegionDesc&    region,
+                                BlockIdToIRBlockMap& blockIdToIRBlock)
+{
+  HhbcTranslator& ht = m_irTrans->hhbcTrans();
+  IRBuilder& irb = ht.irBuilder();
+  blockIdToIRBlock.clear();
+  auto const& blocks = region.blocks();
+  for (unsigned i = 0; i < blocks.size(); i++) {
+    auto rBlock = blocks[i];
+    auto id = rBlock->id();
+    DEBUG_ONLY Offset bcOff = rBlock->start().offset();
+    assert(IMPLIES(i == 0, bcOff == irb.unit().bcOff()));
+
+    // NB: This maps the region entry block to a new IR block, even though
+    // we've already constructed an IR entry block. We'll make the IR entry
+    // block jump to this block.
+    Block* iBlock = irb.unit().defBlock();
+
+    blockIdToIRBlock[id] = iBlock;
+    FTRACE(1,
+           "createBlockMaps: RegionBlock {} => IRBlock {} (BC offset = {})\n",
+           id, iBlock->id(), bcOff);
+  }
+}
+
+/*
+ * Set IRBuilder's Block associated to blockId's block according to
+ * the mapping in blockIdToIRBlock.
+ */
+void Translator::setIRBlock(RegionDesc::BlockId        blockId,
+                            const RegionDesc&          region,
+                            const BlockIdToIRBlockMap& blockIdToIRBlock)
+{
+  IRBuilder& irb = m_irTrans->hhbcTrans().irBuilder();
+  auto rBlock = region.block(blockId);
+  Offset bcOffset = rBlock->start().offset();
+
+  auto iit = blockIdToIRBlock.find(blockId);
+  assert(iit != blockIdToIRBlock.end());
+
+  assert(!irb.hasBlock(bcOffset));
+  FTRACE(3, "  setIRBlock: blockId {}, offset {} => IR Block {}\n",
+         blockId, bcOffset, iit->second->id());
+  irb.setBlock(bcOffset, iit->second);
+}
+
+/*
+ * Set IRBuilder's Blocks for srcBlockId's successors' offsets within
+ * the region.
+ */
+void Translator::setSuccIRBlocks(const RegionDesc&          region,
+                                 RegionDesc::BlockId        srcBlockId,
+                                 const BlockIdToIRBlockMap& blockIdToIRBlock)
+{
+  FTRACE(3, "setSuccIRBlocks: srcBlockId = {}\n", srcBlockId);
+  IRBuilder& irb = m_irTrans->hhbcTrans().irBuilder();
+  irb.resetOffsetMapping();
+  for (auto dstBlockId : region.succs(srcBlockId)) {
+    setIRBlock(dstBlockId, region, blockIdToIRBlock);
+  }
+}
+
+/*
+ * Returns whether offset is a control-flow merge within region.
+ */
+static bool isMergePoint(Offset offset, const RegionDesc& region) {
+  for (auto const block : region.blocks()) {
+    auto const bid = block->id();
+    if (block->start().offset() == offset) {
+      auto inCount = region.preds(bid).size();
+      // NB: The entry block is a merge point if it has one predecessor.
+      if (block == region.entry()) ++inCount;
+      if (inCount >= 2) return true;
+    }
+  }
+  return false;
+}
+
+static bool blockIsLoopHeader(
+  const RegionDesc&             region,
+  RegionDesc::BlockId           blockId,
+  const RegionDesc::BlockIdSet& processedBlocks)
+{
+  for (auto predId : region.preds(blockId)) {
+    if (processedBlocks.count(predId) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/*
+ * Returns whether any instruction following inst (whether by fallthrough or
+ * branch target) is a merge in region.
+ */
+static bool nextIsMerge(const NormalizedInstruction& inst,
+                        const RegionDesc& region) {
+  Offset fallthruOffset = inst.offset() + instrLen((Op*)(inst.pc()));
+  if (instrHasConditionalBranch(inst.op())) {
+    auto offsetPtr = instrJumpOffset((Op*)inst.pc());
+    Offset takenOffset = inst.offset() + *offsetPtr;
+    return fallthruOffset == takenOffset
+      || isMergePoint(takenOffset, region)
+      || isMergePoint(fallthruOffset, region);
+  }
+  if (isUnconditionalJmp(inst.op())) {
+    auto offsetPtr = instrJumpOffset((Op*)inst.pc());
+    Offset takenOffset = inst.offset() + *offsetPtr;
+    return isMergePoint(takenOffset, region);
+  }
+  return isMergePoint(fallthruOffset, region);
 }
 
 Translator::TranslateResult
 Translator::translateRegion(const RegionDesc& region,
+<<<<<<< HEAD
                             RetryContext& retry,
+=======
+                            RegionBlacklist& toInterp,
+>>>>>>> upstream/master
                             TransFlags trflags) {
   const Timer translateRegionTimer(Timer::translateRegion);
   FTRACE(1, "translateRegion starting with:\n{}\n", show(region));
@@ -1592,6 +1819,7 @@ Translator::translateRegion(const RegionDesc& region,
   always_assert_log(check(region, errorMsg),
                     [&] { return errorMsg + "\n" + show(region); });
 
+<<<<<<< HEAD
   auto& ht = m_irTrans->hhbcTrans();
   auto const func = region.entry()->func();
 
@@ -1711,13 +1939,59 @@ Translator::translateRegionImpl(const RegionDesc& region,
 
     TransID profTransID = getTransId(blockId);
     ht.setProfTransID(profTransID);
+=======
+  HhbcTranslator& ht = m_irTrans->hhbcTrans();
+  IRBuilder& irb = ht.irBuilder();
+  auto const startSk = region.start();
+
+  BlockIdToIRBlockMap blockIdToIRBlock;
+  if (RuntimeOption::EvalHHIRBytecodeControlFlow) {
+    ht.setGenMode(IRGenMode::CFG);
+    createBlockMap(region, blockIdToIRBlock);
+
+    // Make the IR entry block jump to the IR block we mapped the region entry
+    // block to (they are not the same!).
+
+    auto const entry = irb.unit().entry();
+    irb.startBlock(entry, entry->front().marker(), false /* isLoopHeader */);
+
+    auto const irBlock = blockIdToIRBlock[region.entry()->id()];
+    always_assert(irBlock != entry);
+
+    irb.gen(Jmp, irBlock);
+  }
+
+  RegionDesc::BlockIdSet processedBlocks;
+
+  Timer irGenTimer(Timer::translateRegion_irGeneration);
+  auto& blocks = region.blocks();
+  for (auto b = 0; b < blocks.size(); b++) {
+    auto const& block  = blocks[b];
+    auto const blockId = block->id();
+    auto sk            = block->start();
+    auto typePreds     = makeMapWalker(block->typePreds());
+    auto byRefs        = makeMapWalker(block->paramByRefs());
+    auto refPreds      = makeMapWalker(block->reffinessPreds());
+    auto knownFuncs    = makeMapWalker(block->knownFuncs());
+    auto skipTrans     = false;
+
+    const Func* topFunc = nullptr;
+    TransID profTransId = getTransId(blockId);
+    ht.setProfTransID(profTransId);
+
+    bool isLoopHeader = false;
+>>>>>>> upstream/master
 
     if (ht.genMode() == IRGenMode::CFG) {
       Block* irBlock = blockIdToIRBlock[blockId];
       isLoopHeader = blockIsLoopHeader(region, blockId, processedBlocks);
       always_assert(IMPLIES(isLoopHeader, RuntimeOption::EvalJitLoops));
 
+<<<<<<< HEAD
       BCMarker marker(sk, block->initialSpOffset(), profTransID);
+=======
+      BCMarker marker(sk, block->initialSpOffset(), profTransId);
+>>>>>>> upstream/master
       if (!irb.startBlock(irBlock, marker, isLoopHeader)) {
         FTRACE(1, "translateRegion: block {} is unreachable, skipping\n",
                blockId);
@@ -1734,6 +2008,7 @@ Translator::translateRegionImpl(const RegionDesc& region,
       // attributed to this instruction.
       ht.setBcOff(sk.offset(), false);
 
+<<<<<<< HEAD
       // Are we on the first or last instruction of the toplevel region?
       const bool isFirstRegionInstr = block == region.entry() &&
                                       i == 0 &&
@@ -1747,6 +2022,14 @@ Translator::translateRegionImpl(const RegionDesc& region,
       // region, and the region's entry block is not a loop header, the guards
       // will go to a retranslate request.  Otherwise, they'll go to a side
       // exit.
+=======
+      // Emit prediction guards. If this is the first instruction in the
+      // region, and the region's entry block is not a loop header, the guards
+      // will go to a retranslate request. Otherwise, they'll go to a side
+      // exit.
+      auto const isEntry = block == region.entry();
+      auto const useGuards = (isEntry && !isLoopHeader && i == 0);
+>>>>>>> upstream/master
       if (useGuards) ht.emitRB(Trace::RBTypeTraceletGuards, sk);
 
       // Emit type guards.
@@ -1754,7 +2037,10 @@ Translator::translateRegionImpl(const RegionDesc& region,
         auto const& pred = typePreds.next();
         auto type = pred.type;
         auto loc  = pred.location;
+<<<<<<< HEAD
 
+=======
+>>>>>>> upstream/master
         if (type <= Type::Cls) {
           // Do not generate guards for class; instead assert the type.
           assert(loc.tag() == RegionDesc::Location::Tag::Stack);
@@ -1767,8 +2053,11 @@ Translator::translateRegionImpl(const RegionDesc& region,
         }
       }
 
+<<<<<<< HEAD
       // Emit reffiness guards.  For now, we only support reffiness guards at
       // the beginning of the region.
+=======
+>>>>>>> upstream/master
       while (refPreds.hasNext(sk)) {
         auto const& pred = refPreds.next();
         if (useGuards) {
@@ -1781,13 +2070,19 @@ Translator::translateRegionImpl(const RegionDesc& region,
       // Finish emitting guards, and emit profiling counters.
       if (useGuards) {
         ht.endGuards();
+<<<<<<< HEAD
 
         // Emit translation counters.
+=======
+>>>>>>> upstream/master
         if (RuntimeOption::EvalJitTransCounters) {
           ht.emitIncTransCounter();
         }
 
+<<<<<<< HEAD
         // Emit profiling counters.
+=======
+>>>>>>> upstream/master
         if (m_mode == TransKind::Profile) {
           if (block->func()->isEntry(block->start().offset())) {
             ht.emitCheckCold(m_profData->curTransID());
@@ -1795,14 +2090,21 @@ Translator::translateRegionImpl(const RegionDesc& region,
             ht.emitIncProfCounter(m_profData->curTransID());
           }
         }
+<<<<<<< HEAD
 
         // Start the trace body buffer.
+=======
+>>>>>>> upstream/master
         ht.emitRB(Trace::RBTypeTraceletBody, sk);
       }
 
       // In the entry block, hhbc-translator gets a chance to emit some code
       // immediately after the initial guards/checks on the first instruction.
+<<<<<<< HEAD
       if (isFirstRegionInstr) {
+=======
+      if (isEntry && i == 0) {
+>>>>>>> upstream/master
         switch (arch()) {
         case Arch::X64:
           ht.prepareEntry();
@@ -1819,6 +2121,7 @@ Translator::translateRegionImpl(const RegionDesc& region,
         topFunc = knownFuncs.next();
       }
 
+<<<<<<< HEAD
       // Make the normalized instruction.
       NormalizedInstruction inst(sk, block->unit());
       inst.funcd = topFunc;
@@ -1976,6 +2279,114 @@ Translator::translateRegionImpl(const RegionDesc& region,
 
           auto nextSK = inst.nextSk();
 
+=======
+      // Create and initialize the instruction.
+      NormalizedInstruction inst(sk, block->unit());
+      inst.funcd = topFunc;
+      if (i == block->length() - 1) {
+        inst.endsRegion = region.isExit(blockId);
+        inst.nextIsMerge = nextIsMerge(inst, region);
+        if (ht.genMode() == IRGenMode::Trace &&
+            instrIsNonCallControlFlow(inst.op()) &&
+            b < blocks.size() - 1) {
+          inst.nextOffset = blocks[b+1]->start().offset();
+        }
+      }
+
+      // We can get a more precise output type for interpOne if we know all of
+      // its inputs, so we still populate the rest of the instruction even if
+      // this is true.
+      inst.interp = toInterp.count(ProfSrcKey{profTransId, sk});
+
+      auto const inputInfos = getInputs(startSk, inst);
+
+      // Populate the NormalizedInstruction's input vector, using types from
+      // HhbcTranslator.
+      std::vector<DynLocation> dynLocs;
+      dynLocs.reserve(inputInfos.size());
+      auto newDynLoc = [&] (const InputInfo& ii) {
+        dynLocs.emplace_back(ii.loc, ht.predictedTypeFromLocation(ii.loc));
+        FTRACE(2, "predictedTypeFromLocation: {} -> {}\n",
+               ii.loc.pretty(), dynLocs.back().rtt);
+        return &dynLocs.back();
+      };
+      FTRACE(2, "populating inputs for {}\n", inst.toString());
+      for (auto const& ii : inputInfos) {
+        inst.inputs.push_back(newDynLoc(ii));
+      }
+      if (inputInfos.needsRefCheck) {
+        assert(byRefs.hasNext(sk));
+        inst.preppedByRef = byRefs.next();
+      }
+
+      /*
+       * Check for a type prediction. Put it in the NormalizedInstruction so
+       * the emit* method can use it if needed.  In PGO mode, we don't really
+       * need the values coming from the interpreter type profiler.
+       * TransKind::Profile translations end whenever there's a side-exit, and
+       * type predictions incur side-exits.  And when we stitch multiple
+       * TransKind::Profile translations together to form a larger region (in
+       * TransKind::Optimize mode), the guard for the top of the stack
+       * essentially does the role of type prediction.  And, if the value is
+       * also inferred, then the guard is omitted.
+       */
+      auto const doPrediction = mode() == TransKind::Live &&
+                                  outputIsPredicted(inst);
+
+      // If this block ends with an inlined FCall, we don't emit anything for
+      // the FCall and instead set up HhbcTranslator for inlining. Blocks from
+      // the callee will be next in the region.
+      if (i == block->length() - 1 &&
+          (inst.op() == Op::FCall || inst.op() == Op::FCallD) &&
+          block->inlinedCallee()) {
+        auto const* callee = block->inlinedCallee();
+        FTRACE(1, "\nstarting inlined call from {} to {} with {} args "
+               "and stack:\n{}\n",
+               block->func()->fullName()->data(),
+               callee->fullName()->data(),
+               inst.imm[0].u_IVA,
+               ht.showStack());
+        auto returnSk = inst.nextSk();
+        auto returnFuncOff = returnSk.offset() - block->func()->base();
+        ht.beginInlining(inst.imm[0].u_IVA, callee, returnFuncOff,
+                         doPrediction ? inst.outPred : Type::Gen);
+        // "Fallthrough" into the callee's first block
+        ht.endBlock(blocks[b + 1]->start().offset(), inst.nextIsMerge);
+        continue;
+      }
+
+      // Singleton inlining optimization.
+      if (RuntimeOption::EvalHHIRInlineSingletons) {
+        bool didInlineSingleton = [&] {
+          if (!RuntimeOption::RepoAuthoritative) return false;
+
+          // I don't really want to inline my arm, thanks.
+          if (arch() != Arch::X64) return false;
+
+          // Don't inline if we're retranslating due to a side-exit from an
+          // inlined call.
+          if (trflags.noinlineSingleton && startSk == inst.source) return false;
+
+          // Bail early if this isn't a push.
+          if (inst.op() != Op::FPushFuncD &&
+              inst.op() != Op::FPushClsMethodD) {
+            return false;
+          }
+
+          // ...and also if this is the end of the block.
+          if (i == block->length() - 1) return false;
+
+          auto nextSK = inst.nextSk();
+
+          // If the normal machinery is already inlining this function, don't
+          // do anything here.
+          if (i == block->length() - 2 &&
+              (nextSK.op() == Op::FCall || nextSK.op() == Op::FCallD) &&
+              block->inlinedCallee()) {
+            return false;
+          }
+
+>>>>>>> upstream/master
           // This is safe to do even if singleton inlining fails; we just won't
           // change topFunc in the next pass since hasNext() will return false.
           if (knownFuncs.hasNext(nextSK)) {
@@ -1992,7 +2403,10 @@ Translator::translateRegionImpl(const RegionDesc& region,
         // instruction (the FCall) if we succeeded at singleton inlining.  We
         // still want the fallthrough and prediction logic, though.
         if (didInlineSingleton) {
+<<<<<<< HEAD
           assert(!skipTrans);
+=======
+>>>>>>> upstream/master
           skipTrans = true;
           continue;
         }
@@ -2002,21 +2416,32 @@ Translator::translateRegionImpl(const RegionDesc& region,
       try {
         if (!skipTrans) m_irTrans->translateInstr(inst);
       } catch (const FailedIRGen& exn) {
+<<<<<<< HEAD
         ProfSrcKey psk { profTransID, sk };
         always_assert_log(
           !retry.toInterp.count(psk),
+=======
+        ProfSrcKey psk{profTransId, sk};
+        always_assert_log(
+          !toInterp.count(psk),
+>>>>>>> upstream/master
           [&] {
             std::ostringstream oss;
             oss << folly::format("IR generation failed with {}\n", exn.what());
             print(oss, m_irTrans->hhbcTrans().unit());
             return oss.str();
           });
+<<<<<<< HEAD
         retry.toInterp.insert(psk);
+=======
+        toInterp.insert(psk);
+>>>>>>> upstream/master
         return Retry;
       }
 
       skipTrans = false;
 
+<<<<<<< HEAD
       // Insert a fallthrough jump.
       if (ht.genMode() == IRGenMode::CFG && i == block->length() - 1) {
         if (!isLastRegionInstr) {
@@ -2050,6 +2475,43 @@ Translator::translateRegionImpl(const RegionDesc& region,
       }
     }
 
+=======
+      // In CFG mode, insert a fallthrough jump at the end of each block.
+      if (ht.genMode() == IRGenMode::CFG && i == block->length() - 1) {
+        if (instrAllowsFallThru(inst.op())) {
+          auto nextOffset = inst.offset() + instrLen((Op*)(inst.pc()));
+          // prepareForSideExit is done later in Trace mode, but it
+          // needs to happen here or else we generate the SpillStack
+          // after the fallthrough jump, which is just weird.
+          if (b < blocks.size() - 1 && region.isSideExitingBlock(blockId)) {
+            ht.prepareForSideExit();
+          }
+          ht.endBlock(nextOffset, inst.nextIsMerge);
+        } else if (b < blocks.size() - 1 &&
+                   (isRet(inst.op()) || inst.op() == OpNativeImpl)) {
+          // "Fallthrough" from inlined return to the next block
+          ht.endBlock(blocks[b + 1]->start().offset(), inst.nextIsMerge);
+        }
+        if (region.isExit(blockId)) {
+          ht.end();
+        }
+      }
+
+      // Check the prediction. If the predicted type is less specific than what
+      // is currently on the eval stack, checkType won't emit any code.
+      if (doPrediction && ht.topType(0, DataTypeGeneric).maybe(inst.outPred)) {
+        ht.checkTypeStack(0, inst.outPred,
+                          sk.advanced(block->unit()).offset());
+      }
+    }
+
+    if (ht.genMode() == IRGenMode::Trace) {
+      if (b < blocks.size() - 1 && region.isSideExitingBlock(blockId)) {
+        ht.prepareForSideExit();
+      }
+    }
+
+>>>>>>> upstream/master
     processedBlocks.insert(blockId);
 
     assert(!typePreds.hasNext());
@@ -2058,6 +2520,43 @@ Translator::translateRegionImpl(const RegionDesc& region,
     assert(!knownFuncs.hasNext());
   }
 
+<<<<<<< HEAD
+=======
+  if (ht.genMode() == IRGenMode::Trace) traceEnd();
+
+  irGenTimer.end();
+
+  try {
+    mcg->traceCodeGen();
+    if (m_mode == TransKind::Profile) {
+      profData()->setProfiling(startSk.func()->getFuncId());
+    }
+  } catch (const FailedCodeGen& exn) {
+    SrcKey sk{exn.vmFunc, exn.bcOff, exn.resumed};
+    ProfSrcKey psk{exn.profTransId, sk};
+    always_assert_log(
+      !toInterp.count(psk),
+      [&] {
+        std::ostringstream oss;
+        oss << folly::format("code generation failed with {}\n", exn.what());
+        print(oss, m_irTrans->hhbcTrans().unit());
+        return oss.str();
+      });
+    toInterp.insert(psk);
+    return Retry;
+  } catch (const DataBlockFull& dbFull) {
+    if (dbFull.name == "hot") {
+      assert(m_useAHot);
+      m_useAHot = false;
+      // We can't return Retry here because the code block selection
+      // will still say hot.
+      return Translator::Failure;
+    } else {
+      always_assert_flog(0, "data block = {}\nmessage: {}\n",
+                         dbFull.name, dbFull.what());
+    }
+  }
+>>>>>>> upstream/master
   return Success;
 }
 

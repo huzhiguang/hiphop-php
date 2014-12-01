@@ -1162,6 +1162,7 @@ ZEND_API void zend_fcall_info_args_clear(zend_fcall_info *fci, int free_mem) /* 
       efree(fci->params);
       fci->params = nullptr;
     }
+<<<<<<< HEAD
   }
   fci->param_count = 0;
 }
@@ -1194,6 +1195,40 @@ ZEND_API int zend_fcall_info_args(zend_fcall_info *fci, zval *args TSRMLS_DC) /*
   if (!args) {
     return SUCCESS;
   }
+=======
+  }
+  fci->param_count = 0;
+}
+/* }}} */
+
+ZEND_API void zend_fcall_info_args_save(zend_fcall_info *fci, int *param_count, zval ****params) /* {{{ */
+{
+  *param_count = fci->param_count;
+  *params = fci->params;
+  fci->param_count = 0;
+  fci->params = nullptr;
+}
+/* }}} */
+
+ZEND_API void zend_fcall_info_args_restore(zend_fcall_info *fci, int param_count, zval ***params) /* {{{ */
+{
+  zend_fcall_info_args_clear(fci, 1);
+  fci->param_count = param_count;
+  fci->params = params;
+}
+/* }}} */
+
+ZEND_API int zend_fcall_info_args(zend_fcall_info *fci, zval *args TSRMLS_DC) /* {{{ */
+{
+  HashPosition pos;
+  zval **arg, ***params;
+
+  zend_fcall_info_args_clear(fci, !args);
+
+  if (!args) {
+    return SUCCESS;
+  }
+>>>>>>> upstream/master
 
   if (Z_TYPE_P(args) != IS_ARRAY) {
     return FAILURE;
@@ -1485,12 +1520,21 @@ ZEND_API int zend_update_static_property(zend_class_entry *scope, const char *na
   }
 
   HPHP::String sname(name, name_length, HPHP::CopyString);
+<<<<<<< HEAD
   bool visible, accessible;
   auto tv = cls->getSProp(cls, sname.get(), visible, accessible);
   if (!tv) {
     return FAILURE;
   }
   HPHP::tvSetZval(value, tv);
+=======
+
+  auto const lookup = cls->getSProp(cls, sname.get());
+
+  if (!lookup.prop) return FAILURE;
+
+  HPHP::tvSetZval(value, lookup.prop);
+>>>>>>> upstream/master
   return SUCCESS;
 }
 
@@ -1655,12 +1699,19 @@ ZEND_API zval *zend_read_static_property(zend_class_entry *scope, const char *na
     return nullptr;
   }
   HPHP::String sname(name, name_length, HPHP::CopyString);
+<<<<<<< HEAD
   bool visible, accessible;
   auto ret = cls->zGetSProp(cls, sname.get(), visible, accessible);
   if (!accessible || !visible) {
     return nullptr;
   }
   return ret;
+=======
+
+  auto const lookup = cls->zGetSProp(cls, sname.get());
+
+  return (!lookup.prop || !lookup.accessible) ? nullptr : lookup.prop;
+>>>>>>> upstream/master
 }
 
 ZEND_API zend_class_entry *zend_register_internal_class_ex(zend_class_entry *class_entry, zend_class_entry *parent_ce, char *parent_name TSRMLS_DC) {

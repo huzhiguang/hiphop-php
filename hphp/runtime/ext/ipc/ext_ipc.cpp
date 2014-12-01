@@ -307,10 +307,14 @@ bool HHVM_FUNCTION(msg_receive,
 
   int result = msgrcv(q->id, buffer, maxsize, desiredmsgtype, realflags);
   if (result < 0) {
+<<<<<<< HEAD
     int err = errno;
     raise_warning("Unable to receive message: %s",
                     folly::errnoStr(err).c_str());
     errorcode = err;
+=======
+    errorcode = errno;
+>>>>>>> upstream/master
     return false;
   }
 

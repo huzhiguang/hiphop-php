@@ -17,9 +17,12 @@
 #ifndef incl_HPHP_JIT_INLINING_H_
 #define incl_HPHP_JIT_INLINING_H_
 
+<<<<<<< HEAD
 #include "hphp/runtime/vm/srckey.h"
 #include "hphp/runtime/vm/jit/region-selection.h"
 
+=======
+>>>>>>> upstream/master
 #include <vector>
 
 namespace HPHP {
@@ -31,7 +34,10 @@ struct SrcKey;
 namespace jit {
 ///////////////////////////////////////////////////////////////////////////////
 
+<<<<<<< HEAD
 struct HhbcTranslator;
+=======
+>>>>>>> upstream/master
 struct RegionDesc;
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -159,6 +165,7 @@ private:
   std::vector<int> m_costStack;
 };
 
+<<<<<<< HEAD
 /*
  * Select an inlining region for the call to `callee' at `sk'.
  */
@@ -167,6 +174,8 @@ RegionDescPtr selectCalleeRegion(const SrcKey& sk,
                                  const HhbcTranslator& ht,
                                  bool profiling);
 
+=======
+>>>>>>> upstream/master
 ///////////////////////////////////////////////////////////////////////////////
 }}
 

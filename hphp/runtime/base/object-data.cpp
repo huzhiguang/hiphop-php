@@ -82,9 +82,15 @@ static Array convert_to_array(const ObjectData* obj, HPHP::Class* cls) {
 
 static_assert(sizeof(ObjectData) == (use_lowptr ? 16 : 32),
               "Change this only on purpose");
+<<<<<<< HEAD
 
 //////////////////////////////////////////////////////////////////////
 
+=======
+
+//////////////////////////////////////////////////////////////////////
+
+>>>>>>> upstream/master
 bool ObjectData::destruct() {
   if (UNLIKELY(RuntimeOption::EnableObjDestructCall && m_cls->getDtor())) {
     g_context->m_liveBCObjs.erase(this);
@@ -806,6 +812,7 @@ void ObjectData::serializeImpl(VariableSerializer* serializer) const {
           }
         }
 
+<<<<<<< HEAD
         bool accessible;
         Slot propInd = m_cls->getDeclPropIndex(ctx, memberName.get(),
                                                accessible);
@@ -814,6 +821,16 @@ void ObjectData::serializeImpl(VariableSerializer* serializer) const {
             const TypedValue* prop = &propVec()[propInd];
             if (prop->m_type != KindOfUninit) {
               auto attrs = m_cls->declProperties()[propInd].m_attrs;
+=======
+        auto const lookup = m_cls->getDeclPropIndex(ctx, memberName.get());
+        auto const propIdx = lookup.prop;
+
+        if (propIdx != kInvalidSlot) {
+          if (lookup.accessible) {
+            auto const prop = &propVec()[propIdx];
+            if (prop->m_type != KindOfUninit) {
+              auto const attrs = m_cls->declProperties()[propIdx].m_attrs;
+>>>>>>> upstream/master
               if (attrs & AttrPrivate) {
                 memberName = concat4(s_zero, ctx->nameStr(),
                                      s_zero, memberName);
@@ -1121,19 +1138,36 @@ TypedValue* ObjectData::getProp(Class* ctx, const StringData* key,
                                 bool& unset) {
   unset = false;
 
+<<<<<<< HEAD
   Slot propInd = m_cls->getDeclPropIndex(ctx, key, accessible);
   visible = (propInd != kInvalidSlot);
   if (LIKELY(propInd != kInvalidSlot)) {
     // We found a visible property, but it might not be accessible.
     // No need to check if there is a dynamic property with this name.
     auto const prop = &propVec()[propInd];
+=======
+  auto const lookup = m_cls->getDeclPropIndex(ctx, key);
+  auto const propIdx = lookup.prop;
+
+  visible = propIdx != kInvalidSlot;
+  accessible = lookup.accessible;
+
+  if (LIKELY(propIdx != kInvalidSlot)) {
+    // We found a visible property, but it might not be accessible.
+    // No need to check if there is a dynamic property with this name.
+    auto const prop = &propVec()[propIdx];
+>>>>>>> upstream/master
     if (prop->m_type == KindOfUninit) {
       unset = true;
     }
 
     if (debug) {
       if (RuntimeOption::RepoAuthoritative) {
+<<<<<<< HEAD
         auto const repoTy = m_cls->declPropRepoAuthType(propInd);
+=======
+        auto const repoTy = m_cls->declPropRepoAuthType(propIdx);
+>>>>>>> upstream/master
         always_assert(tvMatchesRepoAuthType(*prop, repoTy));
       }
     }
@@ -1294,6 +1328,7 @@ bool ObjectData::invokeSet(TypedValue* retval, const StringData* key,
       g_context->invokeFuncFew(retval, meth, this, nullptr, 2, args);
     }
   );
+<<<<<<< HEAD
 }
 
 bool ObjectData::invokeGet(TypedValue* retval, const StringData* key) {
@@ -1318,6 +1353,38 @@ bool ObjectData::invokeIsset(TypedValue* retval, const StringData* key) {
 
 bool ObjectData::invokeUnset(TypedValue* retval, const StringData* key) {
   auto const info = PropAccessInfo { this, key, UseUnset };
+=======
+}
+
+bool ObjectData::invokeGet(TypedValue* retval, const StringData* key) {
+  auto const info = PropAccessInfo { this, key, UseGet };
+>>>>>>> upstream/master
+  return magic_prop_impl(
+    retval,
+    key,
+    info,
+<<<<<<< HEAD
+    MagicInvoker { retval, s___unset.get(), info }
+  );
+}
+
+=======
+    MagicInvoker { retval, s___get.get(), info }
+  );
+}
+
+bool ObjectData::invokeIsset(TypedValue* retval, const StringData* key) {
+  auto const info = PropAccessInfo { this, key, UseIsset };
+  return magic_prop_impl(
+    retval,
+    key,
+    info,
+    MagicInvoker { retval, s___isset.get(), info }
+  );
+}
+
+bool ObjectData::invokeUnset(TypedValue* retval, const StringData* key) {
+  auto const info = PropAccessInfo { this, key, UseUnset };
   return magic_prop_impl(
     retval,
     key,
@@ -1326,6 +1393,7 @@ bool ObjectData::invokeUnset(TypedValue* retval, const StringData* key) {
   );
 }
 
+>>>>>>> upstream/master
 bool ObjectData::invokeGetProp(TypedValue*& retval, TypedValue& tvRef,
                                const StringData* key) {
   if (!invokeGet(&tvRef, key)) return false;

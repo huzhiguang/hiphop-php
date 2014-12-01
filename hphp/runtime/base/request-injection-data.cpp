@@ -38,7 +38,21 @@ const StaticString s_dot(".");
 
 //////////////////////////////////////////////////////////////////////
 
+<<<<<<< HEAD
 RequestInjectionData::~RequestInjectionData() {
+=======
+RequestTimer::RequestTimer(
+  RequestInjectionData* data,
+  clockid_t clockType)
+    : m_reqInjectionData(data)
+    , m_clockType(clockType)
+    , m_timeoutSeconds(0)  // no timeout by default
+    , m_hasTimer(false)
+    , m_timerActive(false)
+{}
+
+RequestTimer::~RequestTimer() {
+>>>>>>> upstream/master
 #ifndef __APPLE__
   if (m_hasTimer) {
     timer_delete(m_timer_id);
@@ -46,20 +60,119 @@ RequestInjectionData::~RequestInjectionData() {
 #endif
 }
 
+<<<<<<< HEAD
 void RequestInjectionData::threadInit() {
   // phpinfo
   {
     auto setAndGet = IniSetting::SetAndGet<int64_t>(
+=======
+/*
+ * NB: this function must be nothrow when `seconds' is zero.  RPCRequestHandler
+ * makes use of this.
+ */
+void RequestTimer::setTimeout(int seconds) {
+#ifndef __APPLE__
+  m_timeoutSeconds = seconds > 0 ? seconds : 0;
+  if (!m_hasTimer) {
+    if (!m_timeoutSeconds) {
+      // we don't have a timer, and we don't have a timeout
+      return;
+    }
+    sigevent sev;
+    memset(&sev, 0, sizeof(sev));
+    sev.sigev_notify = SIGEV_SIGNAL;
+    sev.sigev_signo = SIGVTALRM;
+    sev.sigev_value.sival_ptr = this;
+    if (timer_create(m_clockType, &sev, &m_timer_id)) {
+      raise_error("Failed to set timeout: %s", folly::errnoStr(errno).c_str());
+    }
+    m_hasTimer = true;
+  }
+
+  /*
+   * There is a potential race here. Callers want to assume that
+   * if they cancel the timeout (seconds = 0), they *wont* get
+   * a signal after they call this (although they may get a signal
+   * during the call).
+   * So we need to clear the timeout, wait (if necessary) for a
+   * pending signal to be handled, and then set the new timeout
+   */
+  itimerspec ts = {};
+  itimerspec old;
+  timer_settime(m_timer_id, 0, &ts, &old);
+  if (!old.it_value.tv_sec && !old.it_value.tv_nsec) {
+    // the timer has gone off...
+    if (m_timerActive.load(std::memory_order_acquire)) {
+      // but m_timerActive is still set, so we haven't processed
+      // the signal yet.
+      // spin until its done.
+      while (m_timerActive.load(std::memory_order_relaxed)) {
+      }
+    }
+  }
+  if (m_timeoutSeconds) {
+    m_timerActive.store(true, std::memory_order_relaxed);
+    ts.it_value.tv_sec = m_timeoutSeconds;
+    timer_settime(m_timer_id, 0, &ts, nullptr);
+  } else {
+    m_timerActive.store(false, std::memory_order_relaxed);
+  }
+#endif
+}
+
+void RequestTimer::onTimeout() {
+  m_reqInjectionData->onTimeout(this);
+}
+
+int RequestTimer::getRemainingTime() const {
+#ifndef __APPLE__
+  if (m_hasTimer) {
+    itimerspec ts;
+    if (!timer_gettime(m_timer_id, &ts)) {
+      int remaining = ts.it_value.tv_sec;
+      return remaining > 1 ? remaining : 1;
+    }
+  }
+#endif
+  return m_timeoutSeconds;
+}
+
+//////////////////////////////////////////////////////////////////////
+
+void RequestInjectionData::threadInit() {
+  // phpinfo
+  {
+    auto setAndGetWall = IniSetting::SetAndGet<int64_t>(
+>>>>>>> upstream/master
       [this](const int64_t &limit) {
         setTimeout(limit);
         return true;
       },
       [this] { return getTimeout(); }
     );
+<<<<<<< HEAD
+=======
+    auto setAndGetCPU = IniSetting::SetAndGet<int64_t>(
+      [this](const int64_t &limit) {
+        setCPUTimeout(limit);
+        return true;
+      },
+      [this] { return getCPUTimeout(); }
+    );
+    auto setAndGet = RuntimeOption::TimeoutsUseWallTime
+      ? setAndGetWall : setAndGetCPU;
+>>>>>>> upstream/master
     IniSetting::Bind(IniSetting::CORE, IniSetting::PHP_INI_ALL,
                      "max_execution_time", setAndGet);
     IniSetting::Bind(IniSetting::CORE, IniSetting::PHP_INI_ALL,
                      "maximum_execution_time", setAndGet);
+<<<<<<< HEAD
+=======
+    IniSetting::Bind(IniSetting::CORE, IniSetting::PHP_INI_ALL,
+                     "hhvm.max_wall_time", setAndGetWall);
+    IniSetting::Bind(IniSetting::CORE, IniSetting::PHP_INI_ALL,
+                     "hhvm.max_cpu_time", setAndGetCPU);
+>>>>>>> upstream/master
   }
 
   // Resource Limits
@@ -279,6 +392,7 @@ void RequestInjectionData::onSessionInit() {
   reset();
 }
 
+<<<<<<< HEAD
 void RequestInjectionData::onTimeout() {
   setTimedOutFlag();
   m_timerActive.store(false, std::memory_order_relaxed);
@@ -352,6 +466,34 @@ int RequestInjectionData::getRemainingTime() const {
   }
 #endif
   return m_timeoutSeconds;
+=======
+void RequestInjectionData::onTimeout(RequestTimer* timer) {
+  if (timer == &m_timer) {
+    setTimedOutFlag();
+    m_timer.m_timerActive.store(false, std::memory_order_relaxed);
+  } else if (timer == &m_cpuTimer) {
+    setCPUTimedOutFlag();
+    m_cpuTimer.m_timerActive.store(false, std::memory_order_relaxed);
+  } else {
+    always_assert(false && "Unknown timer fired");
+  }
+}
+
+void RequestInjectionData::setTimeout(int seconds) {
+  m_timer.setTimeout(seconds);
+}
+
+void RequestInjectionData::setCPUTimeout(int seconds) {
+  m_cpuTimer.setTimeout(seconds);
+}
+
+int RequestInjectionData::getRemainingTime() const {
+  return m_timer.getRemainingTime();
+}
+
+int RequestInjectionData::getRemainingCPUTime() const {
+  return m_cpuTimer.getRemainingTime();
+>>>>>>> upstream/master
 }
 
 /*
@@ -373,6 +515,22 @@ void RequestInjectionData::resetTimer(int seconds /* = 0 */) {
   data->clearTimedOutFlag();
 }
 
+<<<<<<< HEAD
+=======
+void RequestInjectionData::resetCPUTimer(int seconds /* = 0 */) {
+  auto data = &ThreadInfo::s_threadInfo->m_reqInjectionData;
+  if (seconds == 0) {
+    seconds = data->getCPUTimeout();
+  } else if (seconds < 0) {
+    if (!data->getCPUTimeout()) return;
+    seconds = -seconds;
+    if (seconds < data->getRemainingCPUTime()) return;
+  }
+  data->setCPUTimeout(seconds);
+  data->clearCPUTimedOutFlag();
+}
+
+>>>>>>> upstream/master
 void RequestInjectionData::reset() {
   getConditionFlags()->store(0);
   m_coverage = RuntimeOption::RecordCodeCoverage;
@@ -417,6 +575,17 @@ void RequestInjectionData::clearTimedOutFlag() {
   getConditionFlags()->fetch_and(~RequestInjectionData::TimedOutFlag);
 }
 
+<<<<<<< HEAD
+=======
+void RequestInjectionData::setCPUTimedOutFlag() {
+  getConditionFlags()->fetch_or(RequestInjectionData::CPUTimedOutFlag);
+}
+
+void RequestInjectionData::clearCPUTimedOutFlag() {
+  getConditionFlags()->fetch_and(~RequestInjectionData::CPUTimedOutFlag);
+}
+
+>>>>>>> upstream/master
 void RequestInjectionData::setSignaledFlag() {
   getConditionFlags()->fetch_or(RequestInjectionData::SignaledFlag);
 }

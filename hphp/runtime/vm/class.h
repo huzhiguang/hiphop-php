@@ -370,8 +370,13 @@ public:
   const Func* getDeclaredCtor() const;
   const Func* getDtor() const;
   const Func* getToString() const;
+<<<<<<< HEAD
 
 
+=======
+
+
+>>>>>>> upstream/master
   /////////////////////////////////////////////////////////////////////////////
   // Builtin classes.                                                   [const]
 
@@ -472,6 +477,7 @@ public:
    */
   const Prop* declProperties() const;
   const SProp* staticProperties() const;
+<<<<<<< HEAD
 
   /*
    * Look up the index of a declared instance property or static property.
@@ -489,6 +495,25 @@ public:
   RepoAuthType staticPropRepoAuthType(Slot index) const;
 
   /*
+=======
+
+  /*
+   * Look up the index of a declared instance property or static property.
+   *
+   * Return kInvalidSlot if no such property exists.
+   */
+  Slot lookupDeclProp(const StringData* propName) const;
+  Slot lookupSProp(const StringData* sPropName) const;
+
+  /*
+   * The RepoAuthType of the declared instance property or static property at
+   * `index' in the corresponding table.
+   */
+  RepoAuthType declPropRepoAuthType(Slot index) const;
+  RepoAuthType staticPropRepoAuthType(Slot index) const;
+
+  /*
+>>>>>>> upstream/master
    * Whether this class has any properties that require deep initialization.
    *
    * Deep initialization means that the property cannot simply be memcpy'd when
@@ -521,6 +546,31 @@ public:
   void initialize() const;
   void initProps() const;
   void initSProps() const;
+<<<<<<< HEAD
+
+  /*
+   * PropInitVec for this class's declared properties, with default values for
+   * scalars only.
+   *
+   * This is the base from which the request-local copy is made.
+   */
+  const PropInitVec& declPropInit() const;
+
+  /*
+   * Vector of 86pinit non-scalar instance property initializer functions.
+   *
+   * These are invoked during initProps() to populate the copied PropInitVec.
+   */
+  const FixedVector<const Func*>& pinitVec() const;
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Property storage.                                                  [const]
+
+  /*
+   * Initialize the RDS handles for the request-local PropInitVec and for the
+   * static properties.
+=======
 
   /*
    * PropInitVec for this class's declared properties, with default values for
@@ -549,6 +599,139 @@ public:
   void initSPropHandles() const;
 
   /*
+   * RDS handle of the request-local PropInitVec.
+   */
+  RDS::Handle propHandle() const;
+
+  /*
+   * RDS handle for the static properties' is-initialized flag.
+   */
+  RDS::Handle sPropInitHandle() const;
+
+  /*
+   * RDS handle for the static property at `index'.
+   */
+  RDS::Handle sPropHandle(Slot index) const;
+
+  /*
+   * Get the PropInitVec for the current request.
+   */
+  PropInitVec* getPropData() const;
+
+  /*
+   * Get the value of the static variable at `index' for the current request.
+   */
+  TypedValue* getSPropData(Slot index) const;
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Property lookup and accessibility.                                 [const]
+
+  template <class T>
+  struct PropLookup {
+    T prop;
+    bool accessible;
+  };
+
+  /*
+   * Get the slot and accessibility of a declared instance property on a class
+   * from the given context.
+   *
+   * Accessibility refers to the public/protected/private attribute of the
+   * property.
+   *
+   * Return kInvalidInd for the property iff the property was not declared on
+   * this class or any ancestor.  Note that if the return is marked as
+   * accessible, then the property must exist.
+   */
+  PropLookup<Slot> getDeclPropIndex(const Class*, const StringData*) const;
+
+  /*
+   * The equivalent of getDeclPropIndex(), but for static properties.
+   */
+  PropLookup<Slot> findSProp(const Class*, const StringData*) const;
+
+  /*
+   * Get the request-local value of the static property `sPropName', as well as
+   * its accessibility, from the given context.
+   *
+   * The behavior is identical to that of findSProp(), except substituting
+   * nullptr for kInvalidInd.
+   *
+   * May perform initialization.
+   */
+  PropLookup<TypedValue*> getSProp(const Class*, const StringData*) const;
+
+  /*
+   * Identical to getSProp(), but the output is boxed.
+   *
+   * Used by the ext_zend_compat layer.
+   */
+  PropLookup<RefData*> zGetSProp(const Class*, const StringData*) const;
+
+  /*
+   * Return whether or not a declared instance property is accessible from the
+   * given context.
+   */
+  static bool IsPropAccessible(const Prop&, Class*);
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Constants.                                                         [const]
+
+  /*
+   * Number of class constants.
+   */
+  size_t numConstants() const;
+
+  /*
+   * The info vector for this class's constants.
+   */
+  const Const* constants() const;
+
+  /*
+   * Whether this class has a constant named `clsCnsName'.
+   */
+  bool hasConstant(const StringData* clsCnsName) const;
+
+  /*
+   * Look up the actual value of a class constant.  Perform dynamic
+   * initialization if necessary.
+   *
+   * Return a Cell containing KindOfUninit if this class has no such constant.
+   *
+   * The returned Cell is guaranteed not to hold a reference counted object (it
+   * may, however, be KindOfString for a static string).
+   */
+  Cell clsCnsGet(const StringData* clsCnsName) const;
+
+  /*
+   * Look up a class constant's TypedValue if it doesn't require dynamic
+   * initialization.  The index of the constant is output via `clsCnsInd'.
+   *
+   * Return nullptr if this class has no constant of the given name.
+   *
+   * The TypedValue represents the constant's value iff it is a scalar,
+   * otherwise it has m_type set to KindOfUninit.  Non-scalar class constants
+   * need to run 86cinit code to determine their value at runtime.
+   */
+  const Cell* cnsNameToTV(const StringData* clsCnsName, Slot& clsCnsInd) const;
+
+  /*
+   * Provide the current runtime type of this class constant.
+   *
+   * This has predictive value for the translator.
+>>>>>>> upstream/master
+   */
+  void initPropHandle() const;
+  void initSPropHandles() const;
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Interfaces and traits.
+
+  /*
+<<<<<<< HEAD
    * RDS handle of the request-local PropInitVec.
    */
   RDS::Handle propHandle() const;
@@ -860,6 +1043,180 @@ private:
   // Internal types.
 
 private:
+=======
+   * Interfaces this class declared in its "implements" clause.
+   */
+  boost::iterator_range<const ClassPtr*> declInterfaces() const;
+
+  /*
+   * All interfaces implemented by this class, including those declared in
+   * traits.
+   */
+  const InterfaceMap& allInterfaces() const;
+
+  /*
+   * Start and end offsets in m_methods of methods that come from used traits.
+   *
+   * The trait methods are precisely in [m_traitsBeginIdx, m_traitsEndIdx).
+   */
+  Slot traitsBeginIdx() const;
+  Slot traitsEndIdx() const;
+
+  /*
+   * Traits used by this class.
+   *
+   * In RepoAuthoritative mode, we flatten all traits into their users in the
+   * compile phase, which leaves m_usedTraits empty as a result.
+   */
+  const std::vector<ClassPtr>& usedTraitClasses() const;
+
+  /*
+   * Trait alias rules.
+   *
+   * This is only used by reflection.
+   */
+  const TraitAliasVec& traitAliases() const;
+
+  /*
+   * All trait and interface requirements imposed on this class, including
+   * those imposed by traits.
+   */
+  const RequirementMap& allRequirements() const;
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Objects.                                                           [const]
+
+  /*
+   * Offset of the declared instance property at `index' on an ObjectData
+   * instantiated from this class.
+   */
+  size_t declPropOffset(Slot index) const;
+
+  /*
+   * Whether instances of this class need to call a custom __init__ when
+   * created.
+   */
+  bool callsCustomInstanceInit() const;
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Other methods.
+  //
+  // Avoiding adding methods to this section.
+
+  /*
+   * Whether this class can be made persistent---i.e., if AttrPersistent is set
+   * and all parents, interfaces, and traits for this class are persistent.
+   */
+  bool verifyPersistent() const;
+
+  /*
+   * Get and set the RDS handle for the class with this class's name.
+   *
+   * We can burn these into the TC even when classes are not persistent, since
+   * only a single name-to-class mapping will exist per request.
+   */
+  RDS::Handle classHandle() const;
+  void setClassHandle(RDS::Link<Class*> link) const;
+
+  /*
+   * Get and set the RDS-cached class with this class's name.
+   */
+  Class* getCached() const;
+  void setCached();
+
+  /*
+   * Set the instance bits on this class.
+   *
+   * The instance bits are a bitfield cache for instanceof checks.  During
+   * warmup, we profile the classes and interfaces most commonly checked
+   * against in instanceof checks.  Then we cache whether or not this Class
+   * satisifes the check in the corresponding bit.
+   */
+  void setInstanceBits();
+  void setInstanceBitsAndParents();
+
+  /*
+   * NativeData type declared in <<__NativeData("Type")>>.
+   */
+  const Native::NativeDataInfo* getNativeDataInfo() const;
+
+  /*
+   * Get the underlying enum base type if this is an enum.
+   *
+   * A return of folly::none represents the `mixed' type.
+   */
+  MaybeDataType enumBaseTy() const;
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Offset accessors.                                                 [static]
+
+#define OFF(f)                          \
+  static constexpr ptrdiff_t f##Off() { \
+    return offsetof(Class, m_##f);      \
+  }
+  OFF(classVec)
+  OFF(classVecLen)
+  OFF(instanceBits)
+  OFF(invoke)
+  OFF(preClass)
+  OFF(propDataCache)
+#undef OFF
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // ExtraData.
+
+private:
+  struct ExtraData {
+    ExtraData() {}
+
+    /*
+     * Vector of (new name, original name) pairs, representing trait aliases.
+     */
+    TraitAliasVec m_traitAliases;
+
+    /*
+     * In RepoAuthoritative mode, we rely on trait flattening in the compile
+     * phase to import the contents of traits.  As a result, m_usedTraits is
+     * always empty.
+     */
+    std::vector<ClassPtr> m_usedTraits;
+
+    /*
+     * Only used by reflection for method ordering.  Whenever we have no traits
+     * (e.g., in repo mode, where traits are flattened), these will both be 0.
+     */
+    Slot m_traitsBeginIdx{0};
+    Slot m_traitsEndIdx{0};
+
+    /*
+     * Builtin-specific data.
+     */
+    BuiltinCtorFunction m_instanceCtor{nullptr};
+    BuiltinDtorFunction m_instanceDtor{nullptr};
+    const ClassInfo* m_clsInfo{nullptr};
+    uint32_t m_builtinODTailSize{0};
+
+    /*
+     * Objects with the <<__NativeData("T")>> UA are allocated with extra space
+     * prior to the ObjectData structure itself.
+     */
+    const Native::NativeDataInfo *m_nativeDataInfo{nullptr};
+  };
+
+  /*
+   * Allocate the ExtraData; done only when necessary.
+   */
+  void allocExtraData();
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Internal types.
+
+private:
+>>>>>>> upstream/master
   using ConstMap = IndexedStringMap<Const,true,Slot>;
   using PropMap  = IndexedStringMap<Prop,true,Slot>;
   using SPropMap = IndexedStringMap<SProp,true,Slot>;

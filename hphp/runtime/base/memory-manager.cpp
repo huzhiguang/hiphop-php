@@ -324,6 +324,7 @@ void MemoryManager::refreshStatsImpl(MemoryUsageStats& stats) {
     // This is the delta between the current and the previous jemalloc reading.
     int64_t jeMMDeltaAllocated =
       int64_t(jeAllocated) - int64_t(m_prevAllocated);
+<<<<<<< HEAD
 
     FTRACE(1, "Before stats sync:\n");
     FTRACE(1, "je alloc:\ncurrent: {}\nprevious: {}\ndelta with MM: {}\n",
@@ -351,6 +352,35 @@ void MemoryManager::refreshStatsImpl(MemoryUsageStats& stats) {
       m_prevDeallocated = jeDeallocated;
     }
 
+=======
+
+    FTRACE(1, "Before stats sync:\n");
+    FTRACE(1, "je alloc:\ncurrent: {}\nprevious: {}\ndelta with MM: {}\n",
+      jeAllocated, m_prevAllocated, jeAllocated - m_prevAllocated);
+    FTRACE(1, "je dealloc:\ncurrent: {}\nprevious: {}\ndelta with MM: {}\n",
+      jeDeallocated, m_prevDeallocated, jeDeallocated - m_prevDeallocated);
+    FTRACE(1, "je delta:\ncurrent: {}\nprevious: {}\n",
+      jeDeltaAllocated, mmDeltaAllocated);
+    FTRACE(1, "usage: {}\ntotal (je) alloc: {}\nje debt: {}\n",
+      stats.usage, stats.totalAlloc, stats.jemallocDebt);
+
+    // Subtract the old jemalloc adjustment (delta0) and add the current one
+    // (delta) to arrive at the new combined usage number.
+    stats.usage += jeDeltaAllocated - mmDeltaAllocated;
+    // Remove the "debt" accrued from allocating the slabs so we don't double
+    // count the slab-based allocations.
+    stats.usage -= stats.jemallocDebt;
+
+    stats.jemallocDebt = 0;
+    // We need to do the calculation instead of just setting it to jeAllocated
+    // because of the MaskAlloc capability.
+    stats.totalAlloc += jeMMDeltaAllocated;
+    if (live) {
+      m_prevAllocated = jeAllocated;
+      m_prevDeallocated = jeDeallocated;
+    }
+
+>>>>>>> upstream/master
     FTRACE(1, "After stats sync:\n");
     FTRACE(1, "usage: {}\ntotal (je) alloc: {}\n\n",
       stats.usage, stats.totalAlloc);
@@ -405,6 +435,7 @@ void MemoryManager::sweep() {
   Native::sweepNativeData(m_natives);
   TRACE(1, "sweep: sweepable %u native %lu\n", sweepable, native);
 }
+<<<<<<< HEAD
 
 void MemoryManager::resetAllocator() {
   // decref apc strings and arrays referenced by this request
@@ -431,6 +462,34 @@ void MemoryManager::resetAllocator() {
   TRACE(1, "reset: apc-arrays %lu strings %u\n", napcs, nstrings);
 }
 
+=======
+
+void MemoryManager::resetAllocator() {
+  // decref apc strings and arrays referenced by this request
+  DEBUG_ONLY auto napcs = m_apc_arrays.size();
+  while (!m_apc_arrays.empty()) {
+    auto a = m_apc_arrays.back();
+    m_apc_arrays.pop_back();
+    a->sweep();
+  }
+  DEBUG_ONLY auto nstrings = StringData::sweepAll();
+
+  // free the heap
+  m_heap.reset();
+
+  // zero out freelists
+  for (auto& i : m_freelists) i.head = nullptr;
+  m_front = m_limit = 0;
+  if (m_trackingInstances) {
+    m_instances = std::unordered_set<void*>();
+  }
+
+  resetStatsImpl(true);
+  resetCouldOOM();
+  TRACE(1, "reset: apc-arrays %lu strings %u\n", napcs, nstrings);
+}
+
+>>>>>>> upstream/master
 void MemoryManager::flush() {
   always_assert(empty());
   m_heap.flush();
@@ -647,6 +706,34 @@ private:
     char* raw_;
   };
 };
+<<<<<<< HEAD
+=======
+
+// Reverse lookup table from size class index back to block size.
+struct SizeTable {
+  size_t table[kNumSmartSizes];
+  SizeTable() {
+#define SMART_SIZE(i,d,s) table[i] = s;
+    SMART_SIZES
+#undef SMART_SIZE
+    assert(table[27] == 4096 && table[28] == 0);
+    // pick up where the macros left off
+    auto i = 28;
+    auto s = 4096;
+    auto d = s/4;
+    for (; i < kNumSmartSizes; d *= 2) {
+      // each power of two size has 4 linear spaced size classes
+      table[i++] = (s += d);
+      if (i < kNumSmartSizes) table[i++] = (s += d);
+      if (i < kNumSmartSizes) table[i++] = (s += d);
+      if (i < kNumSmartSizes) table[i++] = (s += d);
+    }
+  }
+  static_assert(LG_SMART_SIZES_PER_DOUBLING == 2, "");
+};
+SizeTable s_index2size;
+
+>>>>>>> upstream/master
 }
 
 // Iterator over all the slabs and bigs
@@ -711,6 +798,7 @@ struct BigHeap::iterator {
   Headiter m_header;
   BigHeap& m_heap;
 };
+<<<<<<< HEAD
 
 // initialize a Hole header in the unused memory between m_front and m_limit
 void MemoryManager::initHole() {
@@ -726,6 +814,34 @@ BigHeap::iterator MemoryManager::begin() {
   return m_heap.begin();
 }
 
+=======
+
+// initialize a Hole header in the unused memory between m_front and m_limit
+void MemoryManager::initHole() {
+  if ((char*)m_front < (char*)m_limit) {
+    auto hdr = static_cast<FreeNode*>(m_front);
+    hdr->kind = HeaderKind::Hole;
+    hdr->size = (char*)m_limit - (char*)m_front;
+  }
+}
+
+// initialize the FreeNode header on all freelist entries.
+void MemoryManager::initFree() {
+  for (size_t i = 0; i < kNumSmartSizes; i++) {
+    auto size = s_index2size.table[i];
+    for (auto n = m_freelists[i].head; n; n = n->next) {
+      n->kind_size = HeaderKind::Free<<24 | size<<32;
+    }
+  }
+}
+
+BigHeap::iterator MemoryManager::begin() {
+  initHole();
+  initFree();
+  return m_heap.begin();
+}
+
+>>>>>>> upstream/master
 BigHeap::iterator MemoryManager::end() {
   return m_heap.end();
 }
@@ -1006,6 +1122,7 @@ bool MemoryManager::checkPreFree(DebugHeader* p,
   }
 
   return true;
+<<<<<<< HEAD
 }
 
 void MemoryManager::logAllocation(void* p, size_t bytes) {
@@ -1113,9 +1230,213 @@ NEVER_INLINE
 void* MemoryManager::untrackSlow(void* p) {
   m_instances.erase(p);
   return p;
+=======
+}
+
+void MemoryManager::logAllocation(void* p, size_t bytes) {
+  MemoryProfile::logAllocation(p, bytes);
+>>>>>>> upstream/master
+}
+
+void MemoryManager::logDeallocation(void* p) {
+  MemoryProfile::logDeallocation(p);
+}
+
+void MemoryManager::resetCouldOOM(bool state) {
+  ThreadInfo* info = ThreadInfo::s_threadInfo.getNoCheck();
+  info->m_reqInjectionData.clearMemExceededFlag();
+  m_couldOOM = state;
+}
+
+
+///////////////////////////////////////////////////////////////////////////////
+// Request profiling.
+
+bool MemoryManager::triggerProfiling(const std::string& filename) {
+  auto trigger = new ReqProfContext();
+  trigger->flag = true;
+  trigger->filename = filename;
+
+  ReqProfContext* expected = nullptr;
+
+  if (!s_trigger.compare_exchange_strong(expected, trigger)) {
+    delete trigger;
+    return false;
+  }
+  return true;
+}
+
+void MemoryManager::requestInit() {
+  auto trigger = s_trigger.exchange(nullptr);
+
+  // If the trigger has already been claimed, do nothing.
+  if (trigger == nullptr) return;
+
+  always_assert(MM().empty());
+
+  // Initialize the request-local context from the trigger.
+  auto& profctx = MM().m_profctx;
+  assert(!profctx.flag);
+
+  MM().m_bypassSlabAlloc = true;
+  profctx = *trigger;
+  delete trigger;
+
+#ifdef USE_JEMALLOC
+  bool active = true;
+  size_t boolsz = sizeof(bool);
+
+  // Reset jemalloc stats.
+  if (mallctl("prof.reset", nullptr, nullptr, nullptr, 0)) {
+    return;
+  }
+
+  // Enable jemalloc thread-local heap dumps.
+  if (mallctl("prof.active",
+              &profctx.prof_active, &boolsz,
+              &active, sizeof(bool))) {
+    profctx = ReqProfContext{};
+    return;
+  }
+  if (mallctl("thread.prof.active",
+              &profctx.thread_prof_active, &boolsz,
+              &active, sizeof(bool))) {
+    mallctl("prof.active", nullptr, nullptr,
+            &profctx.prof_active, sizeof(bool));
+    profctx = ReqProfContext{};
+    return;
+  }
+#endif
+}
+
+void MemoryManager::requestShutdown() {
+  auto& profctx = MM().m_profctx;
+
+  if (!profctx.flag) return;
+
+#ifdef USE_JEMALLOC
+  jemalloc_pprof_dump(profctx.filename, true);
+
+  mallctl("thread.prof.active", nullptr, nullptr,
+          &profctx.thread_prof_active, sizeof(bool));
+  mallctl("prof.active", nullptr, nullptr,
+          &profctx.prof_active, sizeof(bool));
+#endif
+
+  MM().m_bypassSlabAlloc = RuntimeOption::DisableSmartAllocator;
+  profctx = ReqProfContext{};
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+
+NEVER_INLINE
+void* MemoryManager::trackSlow(void* p) {
+  m_instances.insert(p);
+  return p;
+}
+
+NEVER_INLINE
+void* MemoryManager::untrackSlow(void* p) {
+  m_instances.erase(p);
+  return p;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void BigHeap::reset() {
+  TRACE(1, "BigHeap-reset: slabs %lu bigs %lu\n", m_slabs.size(),
+        m_bigs.size());
+  for (auto slab : m_slabs) {
+    free(slab.ptr);
+  }
+  m_slabs.clear();
+  for (auto n : m_bigs) {
+    free(n);
+  }
+  m_bigs.clear();
+}
+
+void BigHeap::flush() {
+  assert(empty());
+  m_slabs = std::vector<MemBlock>{};
+  m_bigs = std::vector<BigNode*>{};
+}
+
+MemBlock BigHeap::allocSlab(size_t size) {
+  void* slab = safe_malloc(size);
+  m_slabs.push_back({slab, size});
+  return {slab, size};
+}
+
+MemBlock BigHeap::allocBig(size_t bytes) {
+#ifdef USE_JEMALLOC
+  auto n = static_cast<BigNode*>(mallocx(bytes + sizeof(BigNode), 0));
+  auto cap = sallocx(n, 0);
+#else
+  auto cap = bytes + sizeof(BigNode);
+  auto n = static_cast<BigNode*>(safe_malloc(cap));
+#endif
+  enlist(n, cap);
+  return {n + 1, cap - sizeof(BigNode)};
+}
+
+MemBlock BigHeap::callocBig(size_t nbytes) {
+  auto cap = nbytes + sizeof(BigNode);
+  auto const n = static_cast<BigNode*>(safe_calloc(cap, 1));
+  enlist(n, cap);
+  return {n + 1, nbytes};
+}
+
+bool BigHeap::contains(void* ptr) const {
+  auto const ptrInt = reinterpret_cast<uintptr_t>(ptr);
+  auto it = std::find_if(std::begin(m_slabs), std::end(m_slabs),
+    [&] (MemBlock slab) {
+      auto const baseInt = reinterpret_cast<uintptr_t>(slab.ptr);
+      return ptrInt >= baseInt && ptrInt < baseInt + slab.size;
+    }
+  );
+  return it != std::end(m_slabs);
+}
+
+void BigHeap::enlist(BigNode* n, size_t size) {
+  n->nbytes = size;
+  n->kind = HeaderKind::Big;
+  n->index = m_bigs.size();
+  m_bigs.push_back(n);
+}
+
+NEVER_INLINE
+void BigHeap::freeBig(void* ptr) {
+  auto n = static_cast<BigNode*>(ptr) - 1;
+  auto i = n->index;
+  auto last = m_bigs.back();
+  last->index = i;
+  m_bigs[i] = last;
+  m_bigs.pop_back();
+  free(n);
+}
+
+MemBlock BigHeap::resizeBig(void* ptr, size_t newsize) {
+  // Since we don't know how big it is (i.e. how much data we should memcpy),
+  // we have no choice but to ask malloc to realloc for us.
+  auto const n = static_cast<BigNode*>(ptr) - 1;
+  auto const newNode = static_cast<BigNode*>(
+    safe_realloc(n, newsize + sizeof(BigNode))
+  );
+  if (newNode != n) {
+    m_bigs[newNode->index] = newNode;
+  }
+  return {newNode + 1, newsize};
+}
+
+BigHeap::iterator BigHeap::begin() {
+  if (!m_slabs.empty()) return iterator{m_slabs.begin(), *this};
+  return iterator{m_bigs.begin(), *this};
+}
+
+BigHeap::iterator BigHeap::end() {
+  return iterator{m_bigs.end(), *this};
+}
 
 void BigHeap::reset() {
   TRACE(1, "BigHeap-reset: slabs %lu bigs %lu\n", m_slabs.size(),
